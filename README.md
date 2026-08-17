@@ -46,6 +46,51 @@ Ou seja, o fluxo do GoLiveBypass — **boot inteiro atrás da proxy → proxy re
    - **watchdog de 120s**: se a sessão não abrir, a proxy é removida com um aviso;
    - **loop-breaker**: se uma tentativa com proxy não terminar, a próxima inicialização pula a proxy por 3 minutos.
 
+## Dependências
+
+Antes de instalar o plugin, você precisa de quatro coisas. As três primeiras são ferramentas de build; a quarta é o app onde o plugin vai rodar.
+
+### 1. Git — para baixar os códigos-fonte
+
+É o programa que clona este repositório e o do Equicord/Vencord.
+
+- **Windows**: baixe em [git-scm.com/download/win](https://git-scm.com/download/win) e instale com as opções padrão, ou rode `winget install Git.Git` no terminal.
+- **Linux**: `sudo apt install git` (Debian/Ubuntu) ou o equivalente da sua distro.
+- **macOS**: `brew install git` ou use o que já vem com as Xcode Command Line Tools.
+- Verifique: `git --version` — qualquer versão recente serve.
+
+### 2. Node.js 22 ou superior — para compilar o plugin
+
+O Equicord/Vencord é escrito em TypeScript e o build roda em Node. Versões antigas quebram o build, então confira a sua.
+
+- **Windows/macOS**: baixe o instalador **LTS** em [nodejs.org](https://nodejs.org/) (qualquer LTS ≥ 22 serve), ou `winget install OpenJS.NodeJS.LTS`.
+- **Linux**: use o [NodeSource](https://github.com/nodesource/distributions) ou o gerenciador de pacotes da sua distro (evite versões muito antigas dos repositórios).
+- Verifique: `node --version` — precisa mostrar `v22` ou maior.
+
+### 3. pnpm — o gerenciador de pacotes do projeto
+
+O Equicord/Vencord usa pnpm (não npm) para instalar as dependências do build. A forma mais fácil de instalar é pelo **Corepack**, que já vem com o Node:
+
+```bash
+corepack enable
+corepack prepare pnpm@latest --activate
+```
+
+- Se o Corepack não estiver disponível, instale global: `npm install -g pnpm`.
+- Verifique: `pnpm --version` — o projeto foi testado com pnpm 11.
+
+### 4. Um cliente Discord desktop — onde o plugin roda
+
+O plugin só funciona em app desktop (usa recursos do Electron):
+
+- **Discord normal** (stable, PTB ou Canary) — o `pnpm inject` do Equicord/Vencord instala o mod nele; ou
+- **Vesktop / Equibop** — que já vêm com Vencord/Equicord embutido.
+- **Não funciona** no Discord do navegador nem no app de celular.
+
+### Opcional: Tor Browser — proxy manual recomendada
+
+Se quiser usar Tor em vez da proxy gratuita automática, instale o [Tor Browser](https://www.torproject.org/download/) e deixe-o aberto antes de abrir o Discord. O SOCKS dele fica em `socks5://127.0.0.1:9150`. Sem proxy manual configurada, o plugin busca e testa uma proxy gratuita sozinho — nenhuma dependência extra necessária.
+
 ## Instalação
 
 ### Equicord
@@ -130,6 +175,7 @@ GPL-3.0-or-later, mesma licença do Vencord/Equicord. Veja [LICENSE](LICENSE).
 It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). It works while the gateway WebSocket stays alive — if it reconnects over your real IP, press Ctrl+R to boot behind the proxy again. Bypassing the restriction may violate Discord's ToS.
 
 - Desktop only (injected Discord, Vesktop or Equibop). Not available on the browser extension.
+- Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client (or Vesktop/Equibop). Optionally Tor Browser for a manual proxy.
 - Free proxies are weak for anonymity — prefer Tor: `socks5://127.0.0.1:9050`.
 - Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings.
 - Free proxies are tested before use and filtered by country (default: no BR); a 120s watchdog and a startup loop-breaker prevent infinite reload loops.
