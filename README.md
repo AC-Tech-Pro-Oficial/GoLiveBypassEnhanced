@@ -46,90 +46,129 @@ Ou seja, o fluxo do GoLiveBypass — **boot inteiro atrás da proxy → proxy re
    - **watchdog de 120s**: se a sessão não abrir, a proxy é removida com um aviso;
    - **loop-breaker**: se uma tentativa com proxy não terminar, a próxima inicialização pula a proxy por 3 minutos.
 
-## Dependências
+## Dependências: o que baixar e como instalar
 
-Antes de instalar o plugin, você precisa de quatro coisas. As três primeiras são ferramentas de build; a quarta é o app onde o plugin vai rodar.
+Você precisa de **4 programas** antes de começar. Instale na ordem. Depois de instalar cada um, **feche e abra o terminal de novo** — o Windows só reconhece programas novos em terminais abertos depois da instalação.
 
-### 1. Git — para baixar os códigos-fonte
+### 1. Git — o programa que baixa código do GitHub
 
-É o programa que clona este repositório e o do Equicord/Vencord.
+É ele que faz o `git clone` (baixar) deste repositório e do Equicord/Vencord.
 
-- **Windows**: baixe em [git-scm.com/download/win](https://git-scm.com/download/win) e instale com as opções padrão, ou rode `winget install Git.Git` no terminal.
-- **Linux**: `sudo apt install git` (Debian/Ubuntu) ou o equivalente da sua distro.
-- **macOS**: `brew install git` ou use o que já vem com as Xcode Command Line Tools.
-- Verifique: `git --version` — qualquer versão recente serve.
+**Windows (jeito mais fácil):**
+1. Abra o **PowerShell** (tecla Windows → digite "PowerShell" → Enter)
+2. Rode: `winget install Git.Git`
+3. Ou, se preferir baixar manualmente: entre em [git-scm.com/download/win](https://git-scm.com/download/win), baixe o instalador de 64-bit e clique em **Next** em tudo (as opções padrão são as certas)
 
-### 2. Node.js 22 ou superior — para compilar o plugin
+**Linux:** `sudo apt install git` (Debian/Ubuntu) ou o equivalente da sua distro.
+**macOS:** `brew install git`.
 
-O Equicord/Vencord é escrito em TypeScript e o build roda em Node. Versões antigas quebram o build, então confira a sua.
+**Confira se deu certo** (num terminal novo): `git --version` → deve mostrar algo como `git version 2.x.x`. Se disser "comando não encontrado", feche e abra o terminal.
 
-- **Windows/macOS**: baixe o instalador **LTS** em [nodejs.org](https://nodejs.org/) (qualquer LTS ≥ 22 serve), ou `winget install OpenJS.NodeJS.LTS`.
-- **Linux**: use o [NodeSource](https://github.com/nodesource/distributions) ou o gerenciador de pacotes da sua distro (evite versões muito antigas dos repositórios).
-- Verifique: `node --version` — precisa mostrar `v22` ou maior.
+### 2. Node.js 22 ou superior — o motor que compila o plugin
 
-### 3. pnpm — o gerenciador de pacotes do projeto
+O Equicord/Vencord é feito em TypeScript, e quem transforma isso no programa final é o Node. **Versão menor que 22 quebra o build.**
 
-O Equicord/Vencord usa pnpm (não npm) para instalar as dependências do build. A forma mais fácil de instalar é pelo **Corepack**, que já vem com o Node:
+**Windows/macOS:**
+1. Entre em [nodejs.org](https://nodejs.org/) e baixe o botão verde **LTS** (qualquer LTS a partir do 22)
+2. Instale clicando em **Next** em tudo — deixe marcada a opção de adicionar ao PATH (vem marcada)
+3. Ou pelo terminal: `winget install OpenJS.NodeJS.LTS`
+
+**Linux:** use o [NodeSource](https://github.com/nodesource/distributions) — o Node dos repositórios da distro costuma ser velho demais.
+
+**Confira:** `node --version` → precisa mostrar `v22.x.x` ou maior.
+
+### 3. pnpm — o instalador de peças do projeto
+
+O projeto usa **pnpm** (e não o npm que vem com o Node) para baixar as bibliotecas do build. Você não baixa instalador nenhum: o Node já traz o **Corepack**, que ativa o pnpm com dois comandos.
+
+Num terminal (depois de instalar o Node):
 
 ```bash
 corepack enable
 corepack prepare pnpm@latest --activate
 ```
 
-- Se o Corepack não estiver disponível, instale global: `npm install -g pnpm`.
-- Verifique: `pnpm --version` — o projeto foi testado com pnpm 11.
+Se der erro de permissão no Windows, abra o PowerShell **como administrador** e rode de novo. Se o Corepack não existir, a alternativa é: `npm install -g pnpm`.
 
-### 4. Um cliente Discord desktop — onde o plugin roda
+**Confira:** `pnpm --version` → o projeto foi testado com pnpm 11.
 
-O plugin só funciona em app desktop (usa recursos do Electron):
+### 4. Discord para computador — onde o plugin vai rodar
 
-- **Discord normal** (stable, PTB ou Canary) — o `pnpm inject` do Equicord/Vencord instala o mod nele; ou
-- **Vesktop / Equibop** — que já vêm com Vencord/Equicord embutido.
-- **Não funciona** no Discord do navegador nem no app de celular.
+O plugin **só funciona no app de computador** (ele usa recursos do Electron que o navegador não tem):
 
-### Opcional: Tor Browser — proxy manual recomendada
+- **Discord normal**: baixe em [discord.com/download](https://discord.com/download) (stable, PTB ou Canary servem); ou
+- **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido.
+- **Não funciona** no Discord aberto no navegador nem no celular.
 
-Se quiser usar Tor em vez da proxy gratuita automática, instale o [Tor Browser](https://www.torproject.org/download/) e deixe-o aberto antes de abrir o Discord. O SOCKS dele fica em `socks5://127.0.0.1:9150`. Sem proxy manual configurada, o plugin busca e testa uma proxy gratuita sozinho — nenhuma dependência extra necessária.
+### Opcional: Tor Browser — para proxy manual (recomendado para anonimato)
 
-## Instalação
+Se quiser usar Tor em vez da proxy gratuita automática, instale o [Tor Browser](https://www.torproject.org/download/) e **abra ele antes de abrir o Discord**. O endereço dele é `socks5://127.0.0.1:9150`. Se não configurar nada, o plugin busca e testa uma proxy gratuita sozinho — sem nenhuma dependência extra.
 
-### Equicord
+## Instalação: passo a passo completo
+
+Escolha **Equicord** ou **Vencord** — os dois funcionam, o processo é idêntico. Os exemplos usam Equicord; para Vencord, troque o link do clone por `https://github.com/Vendicated/Vencord` e a pasta para `Vencord`.
+
+### Passo 1 — Baixe o código do Equicord
+
+Abra o terminal, vá para a pasta onde quer guardar o projeto e clone:
 
 ```bash
+cd Documents
 git clone https://github.com/Equicord/Equicord
 cd Equicord
-pnpm install
-
-# copie a pasta goLiveBypass deste repositório para:
-#   Equicord/src/userplugins/goLiveBypass
-
-pnpm build
-pnpm inject   # escolha seu Discord no instalador
 ```
 
-Reinicie o Discord completamente (bandeja do sistema → Quit Discord) e ative o plugin em **Settings → Equicord → Plugins → GoLiveBypass**.
-
-### Vencord
-
-O processo é idêntico, usando o repositório do Vencord:
+### Passo 2 — Instale as bibliotecas do build
 
 ```bash
-git clone https://github.com/Vendicated/Vencord
-cd Vencord
 pnpm install
+```
 
-# copie a pasta goLiveBypass deste repositório para:
-#   Vencord/src/userplugins/goLiveBypass
+Isso baixa tudo que o Equicord precisa para compilar (demora um pouco na primeira vez, é normal).
 
+### Passo 3 — Baixe o plugin e coloque na pasta certa
+
+Duas formas de baixar este repositório:
+
+- **Pelo terminal** (estando fora da pasta Equicord): `git clone https://github.com/bezumiya/GoLiveBypass`
+- **Pelo navegador**: abra [github.com/bezumiya/GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), clique no botão verde **Code → Download ZIP** e extraia o arquivo
+
+Depois copie a pasta **`goLiveBypass`** (a que contém `index.ts` e `native.ts`) para dentro de:
+
+```
+Equicord/src/userplugins/goLiveBypass
+```
+
+**Atenção aos detalhes que mais quebram:**
+
+- A pasta `userplugins` **não existe por padrão** — crie ela dentro de `src/`
+- Ela fica em `src/userplugins`, **ao lado** de `src/plugins` — **nunca dentro** de `src/plugins` (isso gera o erro `Could not resolve "./plugins/userplugins"` no build)
+- No final, o caminho dos arquivos deve ser exatamente `src/userplugins/goLiveBypass/index.ts` e `src/userplugins/goLiveBypass/native.ts`
+
+### Passo 4 — Compile
+
+```bash
 pnpm build
+```
+
+Isso gera a pasta `dist/` com o Equicord modificado já incluindo o plugin. Se aparecer algum erro vermelho, leia a seção **Solução de problemas** antes de tentar de novo.
+
+### Passo 5 — Injete no Discord
+
+**Feche o Discord completamente antes** (ícone na bandeja perto do relógio → botão direito → **Quit Discord**). Depois:
+
+```bash
 pnpm inject
 ```
 
-Reinicie o Discord e ative o plugin em **Settings → Vencord → Plugins → GoLiveBypass**.
+O instalador abre uma janelinha perguntando **qual Discord** você usa (Stable, PTB ou Canary) — escolha o seu e confirme. É isso que "injetar" faz: ele aponta o seu Discord para o build que você compilou. Para desfazer depois, basta rodar `pnpm uninject` na mesma pasta.
 
-### Vesktop / Equibop
+### Passo 6 — Ative o plugin e use
 
-Copie a pasta para `src/userplugins/goLiveBypass` no código do Equicord/Vencord, rode `pnpm build` e aponte o Vesktop/Equibop para esse build (ou use a opção de dev settings). O plugin usa IPC nativo, então precisa de um build desktop completo.
+1. Abra o Discord
+2. Vá em **Configurações → Equicord (ou Vencord) → Plugins** e ative **GoLiveBypass**
+3. Aperte **Ctrl+R** para recarregar — a sessão renasce atrás da proxy (você verá o toast `GoLiveBypass active...` e depois `GoLiveBypass off. Direct connection restored.`)
+4. Entre num canal de voz: **Go Live e câmera liberados**
 
 ## Configuração
 
