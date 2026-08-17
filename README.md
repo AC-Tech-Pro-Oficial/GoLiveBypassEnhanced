@@ -152,6 +152,7 @@ Nas settings do plugin:
 - **Discord carregando infinitamente**: as proteções (watchdog + loop-breaker) devem destravar sozinhas em até ~1 minuto. Se persistir, desative o plugin editando `%APPDATA%/Equicord/settings/settings.json` (ou `%APPDATA%/Vencord/settings/settings.json`) com o Discord fechado: `"GoLiveBypass": { "enabled": false }`.
 - **"GoLiveBypass could not get a free proxy"**: a lista gratuita não tinha nenhuma proxy funcional. Tente outro protocolo ou configure uma proxy manual.
 - **Captcha ou verificação de telefone no login**: o Discord marca muitos IPs de proxies públicas. Use Tor ou outra proxy.
+- **Erro de build `Could not resolve "./plugins/userplugins"`**: você copiou a pasta para dentro de `src/plugins/` por engano. O caminho certo é `src/userplugins/goLiveBypass` — a pasta `userplugins` fica em `src/`, **ao lado** de `plugins`, e pode ser necessário criá-la.
 - **Plugin não aparece na lista**: confirme que a pasta está em `src/userplugins/goLiveBypass` (com `index.ts` e `native.ts`) e que você rodou `pnpm build` + `pnpm inject` e reiniciou o Discord.
 
 ## Estrutura
