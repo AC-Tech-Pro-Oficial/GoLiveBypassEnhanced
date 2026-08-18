@@ -58,6 +58,12 @@ confirm() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# O corepack cria o atalho do pnpm antes de saber que versao usar. Na primeira execucao ele
+# busca essa versao no registro do npm e confere a assinatura com chaves embutidas nele; as
+# chaves do corepack que vem no Node 22 estao velhas, entao o atalho existe e mesmo assim
+# quebra com "Cannot find matching keyid". So testar se o comando existe nao prova nada.
+have_pnpm() { have pnpm && pnpm --version >/dev/null 2>&1; }
+
 usage() {
     sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
@@ -253,11 +259,18 @@ ensure_toolchain() {
         fail "Instale o que falta e rode de novo."
     fi
 
-    if ! have pnpm; then
+    if ! have_pnpm && have corepack; then
         step "Habilitando o pnpm (corepack enable)"
         corepack enable >/dev/null 2>&1 || true
-        have pnpm || fail 'Nao consegui habilitar o pnpm. Rode: sudo corepack enable'
     fi
+
+    if ! have_pnpm; then
+        # O npm instala o pnpm direto, sem a conferencia de assinatura que derruba o corepack.
+        step "O corepack nao entregou um pnpm que roda, instalando pelo npm"
+        npm install -g pnpm >/dev/null 2>&1 || sudo npm install -g pnpm >/dev/null 2>&1 || true
+    fi
+
+    have_pnpm || fail 'Nao consegui deixar o pnpm funcionando. Rode: sudo npm install -g pnpm'
 }
 
 install_mod() {

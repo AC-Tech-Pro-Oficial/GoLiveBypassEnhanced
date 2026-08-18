@@ -85,6 +85,24 @@ function Test-Tool($name) {
     return [bool] (Get-Command $name -ErrorAction SilentlyContinue)
 }
 
+# O corepack cria o atalho do pnpm antes de saber que versao usar. Na primeira execucao ele
+# busca essa versao no registro do npm e confere a assinatura com chaves embutidas nele; as
+# chaves do corepack que vem no Node 22 estao velhas, entao o atalho existe e mesmo assim
+# quebra com "Cannot find matching keyid". So testar se o comando existe nao prova nada.
+function Test-Pnpm {
+    if (-not (Test-Tool 'pnpm')) { return $false }
+
+    # 2>$null para o erro do corepack nao assustar quem so vai ver a instalacao seguir.
+    & pnpm --version 2>$null | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
+function Update-PathFromEnvironment {
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = @($machine, $user | Where-Object { $_ }) -join ';'
+}
+
 function Test-ModCheckout($path) {
     if (-not $path) { return $false }
     if (-not (Test-Path -LiteralPath (Join-Path $path 'package.json'))) { return $false }
@@ -285,12 +303,21 @@ function Install-Toolchain($needGit) {
         exit 0
     }
 
-    if (-not (Test-Tool 'pnpm')) {
+    if (-not (Test-Pnpm) -and (Test-Tool 'corepack')) {
         Write-Step 'Habilitando o pnpm (corepack enable)'
         & corepack enable
-        if (-not (Test-Tool 'pnpm')) {
-            throw 'Nao consegui habilitar o pnpm. Abra um terminal como administrador e rode: corepack enable'
-        }
+        Update-PathFromEnvironment
+    }
+
+    if (-not (Test-Pnpm)) {
+        # O npm instala o pnpm direto, sem a conferencia de assinatura que derruba o corepack.
+        Write-Step 'O corepack nao entregou um pnpm que roda, instalando pelo npm'
+        & npm install -g pnpm
+        Update-PathFromEnvironment
+    }
+
+    if (-not (Test-Pnpm)) {
+        throw 'Nao consegui deixar o pnpm funcionando. Abra um terminal e rode: npm install -g pnpm'
     }
 }
 
