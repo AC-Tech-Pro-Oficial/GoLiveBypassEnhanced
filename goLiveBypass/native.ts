@@ -7,59 +7,30 @@
 import { NativeSettings, RendererSettings } from "@main/settings";
 import { app, IpcMainInvokeEvent, session } from "electron";
 import { request } from "https";
-import { connect } from "net";
+import { connect, Socket } from "net";
+import { connect as connectTls } from "tls";
 
-const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get";
+const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
+const GEO_HOST = "ifconfig.co";
+const DISCORD_HOST = "discord.com";
+
 const MAX_LIST_BYTES = 1024 * 1024;
-const MAX_PROXY_CANDIDATES = 8;
-const PROXY_TEST_TIMEOUT_MS = 5000;
-const VALID_PROTOCOLS = new Set(["http", "socks4", "socks5"]);
-const PROXY_RULES_RE = /^(socks4|socks5|https?):\/\/([^/\s]{1,253}):(\d{1,5})$/;
+const PROBE_TIMEOUT_MS = 6000;
+const PARALLEL_PROBES = 10;
+const MAX_CANDIDATES = 40;
+const MIN_UPTIME = 90;
+const MAX_LISTED_TIMEOUT = 1500;
+const SESSION_DEADLINE_MS = 120_000;
+const TOR_PORTS = [9150, 9050];
+const TOR_PORT_TIMEOUT_MS = 400;
+const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const INTERCEPTING_PORTS = new Set([4145]);
+
+const PROXY_RULES_RE = /^(socks5|https?):\/\/([a-z0-9.-]{1,253}):(\d{1,5})$/;
+const PROXY_BYPASS_RULES = "cdn.discordapp.com;*.discordapp.net;*.discord.media;<local>";
 
 let appliedProxy: string | null = null;
-let lastKnownProxy: string | null = null;
-
-function readStoredProxy() {
-    const proxy: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.lastKnownProxy;
-    return typeof proxy === "string" && PROXY_RULES_RE.test(proxy) ? proxy : "";
-}
-
-function storeProxy(proxy: string) {
-    lastKnownProxy = proxy;
-    NativeSettings.store.plugins.GoLiveBypass ??= {};
-    NativeSettings.store.plugins.GoLiveBypass.lastKnownProxy = proxy;
-}
-
-function earlyProxy() {
-    const settings = RendererSettings.plain.plugins?.GoLiveBypass;
-    if (settings?.enabled !== true) return "";
-
-    const { proxy } = settings;
-    if (typeof proxy === "string" && PROXY_RULES_RE.test(proxy.trim())) return proxy.trim();
-
-    return lastKnownProxy ?? readStoredProxy();
-}
-
-async function apply(proxyRules: string) {
-    await session.defaultSession.setProxy({ proxyRules });
-    appliedProxy = proxyRules;
-}
-
-function earlyApply() {
-    const proxy = earlyProxy();
-    if (proxy && proxy !== appliedProxy) apply(proxy).catch(() => { });
-}
-
-app.whenReady().then(() => {
-    earlyApply();
-
-    app.on("browser-window-created", (_event, win) => {
-        earlyApply();
-        win.webContents.on("did-start-navigation", e => {
-            if (e.isMainFrame) earlyApply();
-        });
-    });
-});
+let deadline: ReturnType<typeof setTimeout> | undefined;
 
 function parseProxy(proxyRules: string) {
     const match = PROXY_RULES_RE.exec(proxyRules);
@@ -71,164 +42,320 @@ function parseProxy(proxyRules: string) {
     return { scheme: match[1], host: match[2], port };
 }
 
-function connectThroughProxy(scheme: string, host: string, port: number, target: string, targetPort: number): Promise<boolean> {
+function markBoot(pending: boolean) {
+    NativeSettings.store.plugins.GoLiveBypass ??= {};
+    NativeSettings.store.plugins.GoLiveBypass.bootPending = pending;
+}
+
+function bootWasPending() {
+    return NativeSettings.plain.plugins?.GoLiveBypass?.bootPending === true;
+}
+
+function listening(port: number, timeoutMs: number): Promise<boolean> {
     return new Promise(resolve => {
-        const socket = connect({ host, port });
-        let settled = false;
-        const done = (ok: boolean) => {
-            if (settled) return;
-            settled = true;
+        const socket = connect({ host: "127.0.0.1", port });
+        const finish = (open: boolean) => {
             socket.destroy();
-            resolve(ok);
+            resolve(open);
         };
 
-        socket.setTimeout(PROXY_TEST_TIMEOUT_MS, () => done(false));
-        socket.on("error", () => done(false));
+        socket.setTimeout(timeoutMs, () => finish(false));
+        socket.once("connect", () => finish(true));
+        socket.on("error", () => finish(false));
+    });
+}
 
+function readCachedProxy() {
+    const cache: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.verifiedProxy;
+    if (typeof cache !== "object" || cache === null) return null;
+
+    const { proxy, at } = cache as { proxy?: unknown; at?: unknown; };
+    if (typeof proxy !== "string" || parseProxy(proxy) === null) return null;
+    if (typeof at !== "number" || Date.now() - at > CACHE_MAX_AGE_MS) return null;
+
+    return proxy;
+}
+
+function storeCachedProxy(proxy: string) {
+    NativeSettings.store.plugins.GoLiveBypass ??= {};
+    NativeSettings.store.plugins.GoLiveBypass.verifiedProxy = { proxy, at: Date.now() };
+}
+
+function excludedCountries() {
+    const raw: unknown = RendererSettings.plain.plugins?.GoLiveBypass?.excludedCountries;
+    const codes = typeof raw === "string" ? raw.split(",") : ["BR"];
+
+    return new Set(codes.map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code)));
+}
+
+async function bootProxy() {
+    const manual = manualProxy();
+    if (manual) return manual;
+
+    if (RendererSettings.plain.plugins?.GoLiveBypass?.enabled !== true) return "";
+
+    for (const port of TOR_PORTS) {
+        if (await listening(port, TOR_PORT_TIMEOUT_MS)) return `socks5://127.0.0.1:${port}`;
+    }
+
+    // Sem Tor local a escolha de uma proxy gratuita levaria dezenas de segundos, e o gateway
+    // conecta antes disso. Reaproveitar a ultima que funcionou resolve, desde que ela seja
+    // testada de novo agora: aplicar uma proxy morta as cegas foi o que travava o Discord.
+    const cached = readCachedProxy();
+    if (cached !== null && await probe(cached) !== null) return cached;
+
+    return await pickFreeProxy(excludedCountries()) ?? "";
+}
+
+function manualProxy() {
+    const settings = RendererSettings.plain.plugins?.GoLiveBypass;
+    if (settings?.enabled !== true) return "";
+
+    const { proxy } = settings;
+    return typeof proxy === "string" && parseProxy(proxy.trim()) ? proxy.trim() : "";
+}
+
+async function apply(proxy: string) {
+    try {
+        await session.defaultSession.setProxy({
+            proxyRules: `${proxy},direct://`,
+            proxyBypassRules: PROXY_BYPASS_RULES
+        });
+        await session.defaultSession.closeAllConnections();
+    } catch {
+        return false;
+    }
+
+    appliedProxy = proxy;
+    markBoot(true);
+
+    clearTimeout(deadline);
+    deadline = setTimeout(clear, SESSION_DEADLINE_MS);
+    return true;
+}
+
+async function clear() {
+    clearTimeout(deadline);
+    deadline = undefined;
+    appliedProxy = null;
+    markBoot(false);
+
+    try {
+        await session.defaultSession.setProxy({ mode: "direct" });
+        await session.defaultSession.closeAllConnections();
+    } catch {
+        return false;
+    }
+    return true;
+}
+
+function readReply(socket: Socket, size: (buffer: Buffer) => number, done: (reply: Buffer | null) => void) {
+    const chunks: Buffer[] = [];
+
+    const onData = (chunk: Buffer) => {
+        chunks.push(chunk);
+        const buffer = Buffer.concat(chunks);
+        const wanted = size(buffer);
+        if (wanted < 0 || buffer.length < wanted) return;
+
+        socket.off("data", onData);
+        socket.pause();
+        if (buffer.length > wanted) socket.unshift(buffer.subarray(wanted));
+        done(buffer.subarray(0, wanted));
+    };
+
+    socket.on("data", onData);
+    socket.resume();
+}
+
+function negotiateSocks5(socket: Socket, host: string, port: number, done: (ok: boolean) => void) {
+    readReply(socket, buffer => buffer.length < 2 ? -1 : 2, greeting => {
+        if (greeting === null || greeting[1] !== 0) return done(false);
+
+        readReply(socket, buffer => {
+            if (buffer.length < 4) return -1;
+            if (buffer[3] === 1) return 10;
+            if (buffer[3] === 4) return 22;
+            return buffer.length < 5 ? -1 : 7 + buffer[4];
+        }, reply => done(reply !== null && reply[1] === 0));
+
+        const target = Buffer.from(host, "latin1");
+        socket.write(Buffer.concat([
+            Buffer.from([5, 1, 0, 3, target.length]),
+            target,
+            Buffer.from([port >> 8, port & 0xff])
+        ]));
+    });
+
+    socket.write(Buffer.from([5, 1, 0]));
+}
+
+function negotiateConnect(socket: Socket, host: string, port: number, done: (ok: boolean) => void) {
+    readReply(socket, buffer => {
+        const end = buffer.indexOf("\r\n\r\n");
+        return end < 0 ? -1 : end + 4;
+    }, reply => done(reply !== null && /^HTTP\/1\.[01] 200/.test(reply.toString("latin1"))));
+
+    socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
+}
+
+function openTunnel(proxy: string, host: string, port: number): Promise<Socket | null> {
+    const parsed = parseProxy(proxy);
+    if (parsed === null) return Promise.resolve(null);
+
+    return new Promise(resolve => {
+        const socket = connect({ host: parsed.host, port: parsed.port });
+        let settled = false;
+
+        const finish = (tunnel: Socket | null) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(guard);
+            socket.setTimeout(0);
+            if (tunnel === null) socket.destroy();
+            resolve(tunnel);
+        };
+
+        const guard = setTimeout(() => finish(null), PROBE_TIMEOUT_MS);
+        socket.setTimeout(PROBE_TIMEOUT_MS, () => finish(null));
+        socket.on("error", () => finish(null));
         socket.once("connect", () => {
-            if (scheme === "http" || scheme === "https") {
-                socket.once("data", res => done(/^HTTP\/1\.[01] 200/.test(res.toString("latin1"))));
-                socket.write(`CONNECT ${target}:${targetPort} HTTP/1.1\r\nHost: ${target}:${targetPort}\r\n\r\n`);
-                return;
-            }
-
-            if (scheme === "socks5") {
-                socket.once("data", greeting => {
-                    if (greeting.length < 2 || greeting[1] !== 0) return done(false);
-
-                    const hostBuf = Buffer.from(target, "latin1");
-                    socket.once("data", res => done(res.length >= 2 && res[1] === 0));
-                    socket.write(Buffer.concat([
-                        Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
-                        hostBuf,
-                        Buffer.from([targetPort >> 8, targetPort & 0xff])
-                    ]));
-                });
-                socket.write(Buffer.from([0x05, 0x01, 0x00]));
-                return;
-            }
-
-            const hostBuf = Buffer.from(target, "latin1");
-            socket.once("data", res => done(res.length >= 2 && res[1] === 0x5a));
-            socket.write(Buffer.concat([
-                Buffer.from([0x04, 0x01, targetPort >> 8, targetPort & 0xff, 0, 0, 0, 1, 0]),
-                hostBuf,
-                Buffer.from([0])
-            ]));
+            const done = (ok: boolean) => finish(ok ? socket : null);
+            if (parsed.scheme === "socks5") negotiateSocks5(socket, host, port, done);
+            else negotiateConnect(socket, host, port, done);
         });
     });
 }
 
-export async function applyProxy(_: IpcMainInvokeEvent, proxyRules: unknown, remember?: unknown) {
-    if (typeof proxyRules !== "string" || !parseProxy(proxyRules.trim()))
-        return { success: false as const, error: "Invalid proxy format. Use scheme://host:port." };
+function readOverTls(socket: Socket, host: string, path: string): Promise<string | null> {
+    return new Promise(resolve => {
+        let body = "";
+        let settled = false;
 
-    try {
-        await apply(proxyRules.trim());
-        if (remember === true) storeProxy(proxyRules.trim());
-        return { success: true as const, proxy: appliedProxy };
-    } catch {
-        return { success: false as const, error: "Failed to apply the proxy." };
-    }
+        const finish = (value: string | null) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            tls.destroy();
+            resolve(value);
+        };
+
+        const timer = setTimeout(() => finish(null), PROBE_TIMEOUT_MS);
+        const tls = connectTls({ socket, servername: host, host }, () => {
+            tls.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nAccept: */*\r\nConnection: close\r\n\r\n`);
+        });
+
+        tls.setEncoding("latin1");
+        tls.on("error", () => finish(null));
+        tls.on("data", (chunk: string) => {
+            body += chunk;
+            if (body.length > 65536) finish(body);
+        });
+        tls.on("end", () => finish(body));
+    });
 }
 
-export async function clearProxy(_: IpcMainInvokeEvent) {
-    try {
-        await session.defaultSession.setProxy({ mode: "direct" });
-        appliedProxy = null;
-        return { success: true as const };
-    } catch {
-        return { success: false as const, error: "Failed to clear the proxy." };
-    }
+async function probe(proxy: string) {
+    const started = Date.now();
+
+    const socket = await openTunnel(proxy, DISCORD_HOST, 443);
+    if (socket === null) return null;
+
+    const response = await readOverTls(socket, DISCORD_HOST, "/api/v9/gateway");
+    if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
+
+    return { proxy, ms: Date.now() - started };
 }
 
-export function getActiveProxy(_: IpcMainInvokeEvent) {
-    return appliedProxy;
+async function exitCountry(proxy: string) {
+    const socket = await openTunnel(proxy, GEO_HOST, 443);
+    if (socket === null) return null;
+
+    const response = await readOverTls(socket, GEO_HOST, "/json");
+    if (response === null) return null;
+
+    const match = /"country_iso"\s*:\s*"([A-Za-z]{2})"|"country(?:Code)?"\s*:\s*"([A-Za-z]{2})"/.exec(response);
+    if (match === null) return null;
+
+    return (match[1] ?? match[2]).toUpperCase();
 }
 
-export async function testProxy(_: IpcMainInvokeEvent, proxyRules: unknown) {
-    const proxy = typeof proxyRules === "string" ? parseProxy(proxyRules.trim()) : null;
-    if (!proxy)
-        return { success: false as const, error: "Invalid proxy format. Use scheme://host:port." };
-
-    const ok = await connectThroughProxy(proxy.scheme, proxy.host, proxy.port, "discord.com", 443);
-    return ok
-        ? { success: true as const }
-        : { success: false as const, error: "The proxy did not accept a connection to discord.com." };
+async function accepts(proxy: string, excluded: Set<string>) {
+    const country = await exitCountry(proxy);
+    return country !== null && !excluded.has(country);
 }
 
-interface FreeProxyEntry {
-    proxy: string;
-    countryCode: string;
-}
-
-function parseFreeProxyList(body: string): FreeProxyEntry[] {
+function rankFreeProxies(body: string, excluded: Set<string>) {
     const data: unknown = JSON.parse(body);
-    if (typeof data !== "object" || data === null) return [];
-
     const { proxies } = data as { proxies?: unknown };
     if (!Array.isArray(proxies)) return [];
 
-    const entries: FreeProxyEntry[] = [];
+    const usable: { proxy: string; uptime: number; timeout: number; }[] = [];
+
     for (const item of proxies) {
         if (typeof item !== "object" || item === null) continue;
 
-        const { proxy, ip_data } = item as { proxy?: unknown; ip_data?: unknown };
-        if (typeof proxy !== "string" || !PROXY_RULES_RE.test(proxy)) continue;
+        const entry = item as {
+            proxy?: unknown;
+            alive?: unknown;
+            uptime?: unknown;
+            timeout?: unknown;
+            ip_data?: { countryCode?: unknown; };
+        };
 
-        const countryCode = typeof ip_data === "object" && ip_data !== null
-            && typeof (ip_data as { countryCode?: unknown }).countryCode === "string"
-            ? (ip_data as { countryCode: string }).countryCode.toUpperCase()
-            : "";
+        if (typeof entry.proxy !== "string" || entry.alive !== true) continue;
 
-        entries.push({ proxy, countryCode });
+        const parsed = parseProxy(entry.proxy);
+        if (parsed === null || INTERCEPTING_PORTS.has(parsed.port)) continue;
+
+        const uptime = typeof entry.uptime === "number" ? entry.uptime : 0;
+        const timeout = typeof entry.timeout === "number" ? entry.timeout : MAX_LISTED_TIMEOUT;
+        if (uptime < MIN_UPTIME || timeout > MAX_LISTED_TIMEOUT) continue;
+
+        const country = typeof entry.ip_data?.countryCode === "string" ? entry.ip_data.countryCode.toUpperCase() : "";
+        if (excluded.has(country)) continue;
+
+        usable.push({ proxy: entry.proxy, uptime, timeout });
     }
-    return entries;
+
+    return usable
+        .sort((a, b) => b.uptime - a.uptime || a.timeout - b.timeout)
+        .slice(0, MAX_CANDIDATES)
+        .map(entry => entry.proxy);
 }
 
-export async function fetchFreeProxy(_: IpcMainInvokeEvent, protocol: unknown, excludedCountries: unknown) {
-    if (typeof protocol !== "string" || !VALID_PROTOCOLS.has(protocol))
-        return { success: false as const, error: "Unsupported proxy protocol." };
-
-    const excluded = new Set(
-        typeof excludedCountries === "string"
-            ? excludedCountries.split(",").map(c => c.trim().toUpperCase()).filter(c => /^[A-Z]{2}$/.test(c))
-            : []
-    );
-
-    let body: string;
+async function pickFreeProxy(excluded: Set<string>) {
+    let candidates: string[];
     try {
-        body = await downloadText(`${FREE_PROXY_API}?request=display_proxies&protocol=${protocol}&proxy_format=protocolipport&format=json&timeout=5000`);
+        candidates = rankFreeProxies(await downloadText(FREE_PROXY_API), excluded);
     } catch {
-        return { success: false as const, error: "Failed to fetch the free proxy list." };
+        return null;
     }
 
-    let proxies: string[];
-    try {
-        proxies = parseFreeProxyList(body)
-            .filter(e => !e.countryCode || !excluded.has(e.countryCode))
-            .map(e => e.proxy);
-    } catch {
-        return { success: false as const, error: "Failed to parse the free proxy list." };
+    for (let i = 0; i < candidates.length; i += PARALLEL_PROBES) {
+        const batch = await Promise.all(candidates.slice(i, i + PARALLEL_PROBES).map(probe));
+        const working = batch
+            .filter((result): result is { proxy: string; ms: number; } => result !== null)
+            .sort((a, b) => a.ms - b.ms);
+
+        for (const candidate of working) {
+            if (await accepts(candidate.proxy, excluded)) {
+                storeCachedProxy(candidate.proxy);
+                return candidate.proxy;
+            }
+        }
     }
 
-    if (!proxies.length)
-        return { success: false as const, error: "The free proxy list had no proxies outside the excluded countries." };
+    return null;
+}
 
-    for (let i = proxies.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [proxies[i], proxies[j]] = [proxies[j], proxies[i]];
+async function detectTor(excluded: Set<string>) {
+    for (const port of TOR_PORTS) {
+        const proxy = `socks5://127.0.0.1:${port}`;
+        if (await probe(proxy) !== null && await accepts(proxy, excluded)) return proxy;
     }
 
-    for (const candidate of proxies.slice(0, MAX_PROXY_CANDIDATES)) {
-        const parsed = parseProxy(candidate);
-        if (!parsed) continue;
-
-        if (await connectThroughProxy(parsed.scheme, parsed.host, parsed.port, "discord.com", 443))
-            return { success: true as const, proxy: candidate };
-    }
-
-    return { success: false as const, error: "No working proxy found outside the excluded countries." };
+    return null;
 }
 
 function downloadText(url: string): Promise<string> {
@@ -236,22 +363,91 @@ function downloadText(url: string): Promise<string> {
         const req = request(url, res => {
             if (res.statusCode !== 200) {
                 res.resume();
-                return reject(new Error("Unexpected response status"));
+                reject(new Error("Unexpected response status"));
+                return;
             }
 
-            let size = 0;
             const chunks: Buffer[] = [];
+            let size = 0;
+            let settled = false;
+
             res.on("data", (chunk: Buffer) => {
+                if (settled) return;
+
                 size += chunk.length;
-                if (size > MAX_LIST_BYTES)
-                    req.destroy(new Error("Response too large"));
-                else
-                    chunks.push(chunk);
+                if (size > MAX_LIST_BYTES) {
+                    settled = true;
+                    res.destroy();
+                    reject(new Error("Response too large"));
+                    return;
+                }
+
+                chunks.push(chunk);
             });
-            res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+
+            res.on("end", () => {
+                if (settled) return;
+                settled = true;
+                resolve(Buffer.concat(chunks).toString("utf8"));
+            });
         });
+
         req.on("error", reject);
-        req.setTimeout(15000, () => req.destroy(new Error("Request timed out")));
+        req.setTimeout(15_000, () => req.destroy(new Error("Request timed out")));
         req.end();
     });
+}
+
+app.whenReady().then(async () => {
+    app.on("browser-window-created", (_event, win) => {
+        win.webContents.on("did-fail-load", (_failed, code, _description, _url, isMainFrame) => {
+            if (isMainFrame && code !== -3 && appliedProxy !== null) clear();
+        });
+    });
+
+    if (bootWasPending()) {
+        markBoot(false);
+        return;
+    }
+
+    const proxy = await bootProxy();
+    if (proxy) apply(proxy);
+});
+
+export async function enable(_: IpcMainInvokeEvent, excludedCountries: unknown) {
+    if (appliedProxy !== null) return { success: true as const, proxy: appliedProxy };
+
+    const excluded = new Set(
+        typeof excludedCountries === "string"
+            ? excludedCountries.split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
+            : []
+    );
+
+    const manual = manualProxy();
+    const proxy = manual || await detectTor(excluded) || await pickFreeProxy(excluded);
+    if (proxy === null || proxy === "")
+        return { success: false as const, error: "No proxy could carry a real request to Discord, so the connection stays direct." };
+
+    return await apply(proxy)
+        ? { success: true as const, proxy }
+        : { success: false as const, error: "Electron refused the proxy." };
+}
+
+export async function disable(_: IpcMainInvokeEvent) {
+    return { success: await clear() };
+}
+
+export function getActiveProxy(_: IpcMainInvokeEvent) {
+    return appliedProxy;
+}
+
+export async function testProxy(_: IpcMainInvokeEvent, proxyRules: unknown) {
+    if (typeof proxyRules !== "string" || parseProxy(proxyRules.trim()) === null)
+        return { success: false as const, error: "Invalid proxy format. Use socks5://host:port." };
+
+    const result = await probe(proxyRules.trim());
+    if (result === null)
+        return { success: false as const, error: "The proxy could not carry a real request to Discord." };
+
+    return { success: true as const, ms: result.ms, country: await exitCountry(proxyRules.trim()) };
 }

@@ -31,20 +31,114 @@ Ou seja, o fluxo do GoLiveBypass — **boot inteiro atrás da proxy → proxy re
 ## Avisos importantes
 
 - **Só funciona no app desktop** (Discord com Equicord/Vencord injetado, Vesktop ou Equibop). Não funciona na versão de navegador/extensão.
-- **Proxies gratuitas são fracas para anonimato**: o operador da proxy vê seus metadados de conexão, muitas estão mortas ou são lentas, e o Discord pode pedir captcha/verificação extra para IPs de proxies públicas. Para anonimato real, **use Tor** (`socks5://127.0.0.1:9050`).
+- **Proxies gratuitas são fracas para anonimato**: o operador da proxy vê seus metadados de conexão, muitas estão mortas ou lentas, e o Discord pode pedir captcha para IPs de proxies públicas. Para anonimato real, **use Tor**.
 - Usar clientes modificados viola os Termos de Serviço do Discord. Use por sua conta e risco.
-- A proxy cobre a inicialização e o login. Após a sessão abrir (`CONNECTION_OPEN`), o tráfego volta a ser direto com seu IP real.
-- Num reload (Ctrl+R), os primeiros instantes do boot podem sair diretos antes do plugin aplicar a proxy. Com proxy manual (Tor), a aplicação no processo principal acontece o mais cedo possível.
+- A proxy cobre apenas a **criação da sessão**. Depois que a sessão abre (`CONNECTION_OPEN`), o tráfego volta a ser direto com seu IP real.
+- **O plugin nunca te deixa sem Discord.** Se a proxy falhar, o Chromium cai sozinho para conexão direta, e o processo principal remove a proxy em no máximo 120 segundos. O pior caso é abrir o Discord *sem* Go Live, nunca ficar sem conseguir abrir.
 
 ## Como funciona
 
-1. A proxy é aplicada **pelo processo principal do app, antes de qualquer carregamento de página** — na abertura do app e em **todo reload (Ctrl+R)** — e também logo após um **logout**. Ou seja, a sessão do Discord (autenticação, gateway e os flags de funcionalidades que o servidor libera por região/IP) nasce inteira atrás da proxy.
-2. Com proxy manual configurada (ex.: Tor), a aplicação acontece o mais cedo possível, antes da primeira requisição. Sem proxy manual, a última proxy gratuita que funcionou fica **salva em disco** e é reutilizada em todo boot (inclusive boot frio), enquanto o renderer busca uma nova em paralelo.
-3. Ao completar o login (`LOGIN_SUCCESS` / `CONNECTION_OPEN`), a proxy é removida e a conexão direta é restaurada — como no fluxo "ligar VPN, abrir o Discord, desligar VPN".
-4. Proteções contra travamento:
-   - proxies gratuitas são **testadas antes de aplicar** (handshake SOCKS5/SOCKS4a ou HTTP CONNECT contra `discord.com:443`, até 8 candidatas) e **filtradas por país** (padrão: sem BR);
-   - **watchdog de 120s**: se a sessão não abrir, a proxy é removida com um aviso;
-   - **loop-breaker**: se uma tentativa com proxy não terminar, a próxima inicialização pula a proxy por 3 minutos.
+São duas travas independentes, e o plugin desarma as duas de formas diferentes.
+
+### Trava 1: o cliente se auto-bloqueia
+
+O Discord embarca um experimento de usuário que desliga vídeo. Quando o servidor te coloca nele, o cliente desabilita sozinho os botões de câmera e Go Live: é o `MediaEngineStore.supportsInApp(VIDEO)` que passa a retornar falso, e com ele o `canGoLive`.
+
+O plugin esvazia a tabela de variações desse experimento. Qualquer bucket que o servidor atribua passa a cair na configuração padrão, que tem vídeo ligado. Isso destrava o cliente inteiro de uma vez, porque todos os consumidores leem do mesmo lugar.
+
+### Trava 2: o servidor recusa a transmissão
+
+Destravar o cliente não basta: o servidor decide separadamente se você pode transmitir, e essa decisão é tomada **uma única vez, quando você entra no canal de voz**, a partir do IP de origem da **conexão de gateway** (o WebSocket que carrega o `VOICE_STATE_UPDATE`). Depois disso não há reavaliação: o servidor de voz só transporta mídia por UDP.
+
+Por isso o plugin proxia **só o gateway**:
+
+1. Na abertura do app, antes do Discord abrir o WebSocket, o proxy é aplicado (o seu manual, ou um Tor local se estiver rodando).
+2. O gateway nasce atrás do proxy. Como o Chromium prende cada conexão à rota que ela tinha ao nascer, esse socket fica no proxy para sempre.
+3. Assim que a sessão abre (`CONNECTION_OPEN`), o plugin devolve a sessão para conexão direta. O gateway continua no proxy; **todo o resto** (API, CDN, anexos, atualizações e a mídia das calls) passa a sair direto, na sua velocidade normal.
+4. O plugin então confere a atribuição do experimento no servidor e te diz num toast se a sessão ficou liberada de verdade.
+
+O momento importa e é mais estrito do que parece: um socket criado **antes** do proxy ser aplicado fica preso na conexão direta para sempre. Proxiar depois que o app subiu não adianta.
+
+### Como as proxies gratuitas são escolhidas
+
+- A lista da ProxyScrape já traz `alive`, `uptime` e `timeout`. O plugin **ranqueia por esses campos** (uptime >= 90, timeout <= 1500ms) em vez de sortear a lista.
+- Descarta a porta 4145: numa amostra medida, 14 de 14 proxies nessa porta interceptavam TLS com certificado forjado.
+- Testa até 10 candidatas **em paralelo**, e o teste é um **handshake TLS real + `GET /api/v9/gateway` exigindo HTTP 200**, não apenas o handshake SOCKS.
+- Confirma o **país de saída real** por TLS antes de usar, porque o `countryCode` da lista descreve o IP de entrada, que frequentemente é diferente do de saída.
+
+Medido: escolher aleatoriamente e testar só o handshake acerta 12% das vezes; ranquear e exigir TLS real acerta 60%. Ainda assim, um Tor local ganha de qualquer lista gratuita, e é por isso que o plugin o prefere.
+
+### Proteções contra travar o Discord
+
+- **Fallback direto**: a proxy é aplicada como `proxy,direct://`, então se ela morrer o Chromium usa conexão direta sozinho.
+- **Prazo no processo principal**: 120s depois de aplicada, a proxy sai sozinha. O prazo vive no processo principal, que tem rede sadia, e não no renderer, que é justamente o que a proxy quebrada impede de carregar.
+- **`did-fail-load`**: se a página principal falhar em carregar, a proxy sai na hora.
+- **Marca de boot**: se uma inicialização aplicou proxy e nunca terminou, a inicialização seguinte se recusa a aplicar.
+- **Proxy gratuita nunca é salva em disco.** Só a proxy manual, que é sua e você controla, é reaplicada no boot.
+
+## Instalação automática (recomendado)
+
+Um script encontra sozinho o Equicord ou o Vencord que você tem, instala o plugin, compila e injeta. Se você não tiver nenhum dos dois, ele pergunta qual você quer e instala junto.
+
+**Windows, jeito mais simples:** baixe o [`GoLiveBypass-Installer.bat`](installer/GoLiveBypass-Installer.bat) e dê dois cliques. Ele libera a execução só para aquele processo (`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`), baixa o `.ps1` se ele não estiver do lado, e roda tudo.
+
+**Linux:**
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/golivebypass-installer.sh
+chmod +x golivebypass-installer.sh
+./golivebypass-installer.sh
+```
+
+Ao abrir, ele mostra o que encontrou e um menu:
+
+```
+  Detectado:
+    Discord   instalado (1)
+    Mod       Equicord
+    Fonte     /home/voce/Equicord
+    Plugin    nao instalado
+
+  O que voce quer fazer?
+
+    [1] Instalar ou atualizar o GoLiveBypass
+    [2] Remover so o plugin (o mod continua)
+    [3] Restaurar tudo (remove o plugin e desfaz a injecao)
+    [0] Sair
+```
+
+Escolhendo instalar, ele pergunta três coisas: **onde** (usar o mod que já está aí ou baixar outro), **como sair do Brasil** (proxy gratuita testada sozinha, Tor local, ou uma proxy sua) e **por quanto tempo** (permanente, ou temporário — que desfaz a injeção quando você fechar o Discord).
+
+**Pelo PowerShell:**
+
+```powershell
+irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile GoLiveBypass-Installer.ps1
+powershell -ExecutionPolicy Bypass -File .\GoLiveBypass-Installer.ps1
+```
+
+Ele descobre onde está o seu checkout **lendo a própria injeção do Discord**: o instalador do Equicord e o do Vencord substituem o `app.asar` por um stub que faz `require` da pasta de build, e desse caminho dá para derivar a raiz do repositório. Se não achar por aí, procura nos lugares habituais.
+
+| sua situação | o que acontece |
+|---|---|
+| Equicord ou Vencord já instalado a partir do fonte | Copia o plugin, compila e reinicia o Discord |
+| Instalado, mas o Discord não carrega desse checkout | Compila e roda o `pnpm inject` para apontar o Discord para ele |
+| Você não tem nenhum dos dois | Mostra uma tela para escolher **Equicord** ou **Vencord**, baixa, compila e injeta |
+| Falta Git ou Node | Oferece instalar pelo winget; o pnpm sai do `corepack enable` |
+
+A descoberta é automática e roda em milissegundos: primeiro lê a injeção do Discord, depois varre os lugares onde um checkout costuma estar (perfil, Documentos, Desktop, Downloads, `dev`, `repos`, `projects`, `source`, e a raiz de cada disco).
+
+Outros modos:
+
+```powershell
+.\GoLiveBypass-Installer.ps1 -Source C:\caminho\do\Equicord   # aponta o checkout na mão
+.\GoLiveBypass-Installer.ps1 -Mod Vencord                      # escolhe o mod sem a tela
+.\GoLiveBypass-Installer.ps1 -Yes                              # sem perguntas, para automação
+.\GoLiveBypass-Installer.ps1 -Mode Uninstall                   # remove o plugin e recompila
+```
+
+O instalador **baixa o plugin direto deste repositório** em vez de carregar uma cópia embutida, então nunca instala uma versão defasada. Ele nunca mexe no `app.asar`: quem injeta é o instalador oficial do Equicord/Vencord.
+
+O instalador já deixa o plugin **ativado e configurado**. Depois que ele terminar, feche o Discord pela bandeja e abra de novo: é isso.
 
 ## Dependências: o que baixar e como instalar
 
@@ -100,9 +194,11 @@ O plugin **só funciona no app de computador** (ele usa recursos do Electron que
 - **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido.
 - **Não funciona** no Discord aberto no navegador nem no celular.
 
-### Opcional: Tor Browser — para proxy manual (recomendado para anonimato)
+### Opcional: Tor — só se você quiser mais estabilidade
 
-Se quiser usar Tor em vez da proxy gratuita automática, instale o [Tor Browser](https://www.torproject.org/download/) e **abra ele antes de abrir o Discord**. O endereço dele é `socks5://127.0.0.1:9150`. Se não configurar nada, o plugin busca e testa uma proxy gratuita sozinho — sem nenhuma dependência extra.
+**Não é necessário.** Por padrão o plugin escolhe e testa uma proxy gratuita sozinho, sem nenhuma dependência extra.
+
+O Tor é só uma opção para quem quer mais estabilidade: ele é mais rápido e não morre no meio do caminho como as proxies públicas. Se você já tiver o [Tor Browser](https://www.torproject.org/download/) aberto, o plugin detecta sozinho em `127.0.0.1:9150`; o daemon `tor` fica em `9050`.
 
 ## Instalação: passo a passo completo
 
@@ -133,7 +229,7 @@ Duas formas de baixar este repositório:
 - **Pelo terminal** (estando fora da pasta Equicord): `git clone https://github.com/bezumiya/GoLiveBypass`
 - **Pelo navegador**: abra [github.com/bezumiya/GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), clique no botão verde **Code → Download ZIP** e extraia o arquivo
 
-Depois copie a pasta **`goLiveBypass`** (a que contém `index.ts` e `native.ts`) para dentro de:
+Depois copie a pasta **`goLiveBypass`** (a que contém `index.tsx` e `native.ts`) para dentro de:
 
 ```
 Equicord/src/userplugins/goLiveBypass
@@ -143,7 +239,7 @@ Equicord/src/userplugins/goLiveBypass
 
 - A pasta `userplugins` **não existe por padrão** — crie ela dentro de `src/`
 - Ela fica em `src/userplugins`, **ao lado** de `src/plugins` — **nunca dentro** de `src/plugins` (isso gera o erro `Could not resolve "./plugins/userplugins"` no build)
-- No final, o caminho dos arquivos deve ser exatamente `src/userplugins/goLiveBypass/index.ts` e `src/userplugins/goLiveBypass/native.ts`
+- No final, o caminho dos arquivos deve ser exatamente `src/userplugins/goLiveBypass/index.tsx` e `src/userplugins/goLiveBypass/native.ts`
 
 ### Passo 4 — Compile
 
@@ -167,46 +263,72 @@ O instalador abre uma janelinha perguntando **qual Discord** você usa (Stable, 
 
 1. Abra o Discord
 2. Vá em **Configurações → Equicord (ou Vencord) → Plugins** e ative **GoLiveBypass**
-3. Aperte **Ctrl+R** para recarregar — a sessão renasce atrás da proxy (você verá o toast `GoLiveBypass active...` e depois `GoLiveBypass off. Direct connection restored.`)
-4. Entre num canal de voz: **Go Live e câmera liberados**
+3. Escolha a região das suas calls em **Voice region** (padrão: `brazil`)
+4. Reinicie o Discord por completo (bandeja, Quit). O plugin escolhe o proxy e aplica antes do gateway conectar, depois solta o resto
+5. Entre num canal de voz: **Go Live e câmera liberados**, e a call continua em servidor brasileiro
 
 ## Configuração
 
 Nas settings do plugin:
 
-- **Proxy**: proxy usada na inicialização/login, no formato `esquema://host:porta`.
-  - Tor (recomendado): `socks5://127.0.0.1:9050` (Tor Browser aberto) ou `socks5://127.0.0.1:9150` (daemon Tor), dependendo do seu setup.
-  - **Deixe vazio** para buscar uma proxy gratuita automática (testada antes de aplicar).
-- **Free proxy protocol**: protocolo usado na busca automática (SOCKS5, HTTP ou SOCKS4). Ignorado quando há proxy manual.
-- **Excluded countries**: códigos de país de duas letras separados por vírgula cujas proxies nunca são usadas na busca automática (padrão: `BR`). Exemplo: `BR,RU,CN`.
+- **Voice region**: seletor com a lista real de regiões que o Discord expõe. Padrão: `brazil`. Escolha `Automatic` para devolver a decisão ao Discord.
+- **Proxy**: proxy usada só na criação da sessão, no formato `esquema://host:porta` (`socks5`, `http` ou `https`).
+  - Tor, se você usa: `socks5://127.0.0.1:9150` com o **Tor Browser** aberto, ou `socks5://127.0.0.1:9050` para o **daemon** `tor`.
+  - **Deixe vazio** para o plugin detectar um Tor local automaticamente e, se não achar, buscar uma proxy gratuita validada.
+- **Excluded countries**: códigos de país de duas letras separados por vírgula que nunca são usados (padrão: `BR`). O país conferido é o de **saída real**, medido através da proxy, não o que a lista afirma.
 
 ## Uso
 
-1. Ative o plugin e configure sua proxy (ou deixe a automática).
-2. Abra o Discord, dê Ctrl+R ou faça logout — um toast confirma: `GoLiveBypass active. Login traffic goes through ...`.
-3. Ao entrar: `GoLiveBypass off. Direct connection restored.` — o resto do uso segue com conexão direta.
+1. Abra o Discord normalmente. O plugin escolhe o proxy e aplica antes do gateway conectar.
+2. Se você escolheu Tor no instalador, deixe o Tor aberto antes; com proxy gratuita não precisa fazer nada.
+3. Espere o toast. `Go Live is unlocked on this session` significa que o servidor liberou e o proxy já saiu de tudo que não é o gateway. `Discord still has Go Live blocked` significa que o gateway subiu sem o proxy: feche o Discord de verdade (bandeja, Quit) e abra de novo.
+4. Entre na call e transmita.
+
+Se o Discord reconectar o gateway sozinho no meio da sessão (queda de rede, suspender o notebook), o socket novo nasce direto e o desbloqueio se perde até você reiniciar o app. O toast do próximo `CONNECTION_OPEN` avisa quando isso acontece.
 
 ## Solução de problemas
 
-- **Discord carregando infinitamente**: as proteções (watchdog + loop-breaker) devem destravar sozinhas em até ~1 minuto. Se persistir, desative o plugin editando `%APPDATA%/Equicord/settings/settings.json` (ou `%APPDATA%/Vencord/settings/settings.json`) com o Discord fechado: `"GoLiveBypass": { "enabled": false }`.
-- **"GoLiveBypass could not get a free proxy"**: a lista gratuita não tinha nenhuma proxy funcional. Tente outro protocolo ou configure uma proxy manual.
+- **Discord carregando infinitamente**: com o Discord fechado, abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`) e coloque `"GoLiveBypass": { "enabled": false }`. Se você usou uma versão anterior deste plugin, apague também a chave `lastKnownProxy` em `%APPDATA%/Equicord/settings/native-settings.json` — versões antigas salvavam uma proxy gratuita ali e a reaplicavam em todo boot, que é a causa mais comum desse travamento.
+- **"No proxy could carry a real request to Discord"**: nenhuma candidata passou no teste TLS real naquele momento. Tente de novo, ou use Tor / uma proxy sua no campo Proxy.
+- **A região da call não mudou**: saia e entre de novo no canal. Canais de servidor com região fixada por um admin ignoram sua preferência, e numa call que já está rolando a região já foi decidida.
 - **Captcha ou verificação de telefone no login**: o Discord marca muitos IPs de proxies públicas. Use Tor ou outra proxy.
 - **Erro de build `Could not resolve "./plugins/userplugins"`**: você copiou a pasta para dentro de `src/plugins/` por engano. O caminho certo é `src/userplugins/goLiveBypass` — a pasta `userplugins` fica em `src/`, **ao lado** de `plugins`, e pode ser necessário criá-la.
-- **Plugin não aparece na lista**: confirme que a pasta está em `src/userplugins/goLiveBypass` (com `index.ts` e `native.ts`) e que você rodou `pnpm build` + `pnpm inject` e reiniciou o Discord.
+- **Plugin não aparece na lista**: confirme que a pasta está em `src/userplugins/goLiveBypass` (com `index.tsx` e `native.ts`) e que você rodou `pnpm build` + `pnpm inject` e reiniciou o Discord.
 
 ## Estrutura
 
 ```
 goLiveBypass/
-├── index.ts   # renderer: settings, eventos de fluxo, watchdog, toasts
-└── native.ts  # processo principal: session.setProxy, teste de proxies, lista gratuita
+├── index.tsx                      # renderer: patches do video guard e do stream, seletor de região,
+│                                  #   override do RTCRegionStore, eventos de fluxo
+└── native.ts                      # processo principal: session.setProxy, validação TLS das proxies,
+                                   #   detecção de Tor, prazos de segurança
+
+installer/
+├── GoLiveBypass-Installer.bat     # Windows: dois cliques, libera a execução e chama o .ps1
+├── GoLiveBypass-Installer.ps1     # Windows: instalador automático
+└── golivebypass-installer.sh      # Linux: mesmo instalador, mesmo menu
 ```
 
 ## Licença
 
 GPL-3.0-or-later, mesma licença do Vencord/Equicord. Veja [LICENSE](LICENSE).
 
----
+## Autor
+
+**bezumiya**
+
+- GitHub: [bezumiya/GoLiveBypass](https://github.com/bezumiya/GoLiveBypass)
+- Twitter: [@obezumiya](https://twitter.com/obezumiya)
+- Discord: `1366453661970071633`
+
+## Agradecimentos
+
+**Obrigado ao [Vithor](https://github.com/Vith0r)** pelo instalador.
+
+Ele escreveu o primeiro instalador do GoLiveBypass por conta própria, e foi ele quem mostrou
+que dava para automatizar tudo isso num script só. O instalador que está aqui hoje nasceu
+desse trabalho.
 
 # English
 
@@ -215,8 +337,13 @@ GPL-3.0-or-later, mesma licença do Vencord/Equicord. Veja [LICENSE](LICENSE).
 It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). It works while the gateway WebSocket stays alive — if it reconnects over your real IP, press Ctrl+R to boot behind the proxy again. Bypassing the restriction may violate Discord's ToS.
 
 - Desktop only (injected Discord, Vesktop or Equibop). Not available on the browser extension.
-- Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client (or Vesktop/Equibop). Optionally Tor Browser for a manual proxy.
-- Free proxies are weak for anonymity — prefer Tor: `socks5://127.0.0.1:9050`.
+- Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client. Tor is optional, not required: by default the plugin picks and validates a free proxy on its own.
+- **Your calls stay on the region you pick.** Creating the session abroad makes Discord rank foreign voice servers, so the plugin overrides the three `RTCRegionStore` getters that feed `preferred_region` / `preferred_regions` in the gateway `VOICE_STATE_UPDATE`. The override is evaluated at read time, so Discord's latency test cannot undo it, and it writes nothing into Discord's persisted state, so the region is not left pinned after you remove the plugin. Restored on `stop()`.
+- Proxy order: your manual proxy, then a local Tor (`127.0.0.1:9150` for Tor Browser, `9050` for the daemon), then a validated free proxy.
+- Free proxies are weak for anonymity — prefer Tor.
+- Free proxies are ranked by the `alive` / `uptime` / `timeout` metadata the list already returns, port 4145 is dropped (measured 14/14 TLS interception), up to 10 candidates are probed in parallel with a real TLS handshake plus `GET /api/v9/gateway` expecting HTTP 200, and the exit country is verified over TLS. Measured: random pick with a handshake-only test works 12% of the time, ranked with a real TLS test works 60%.
+- It cannot leave you unable to open Discord: the proxy is installed as `proxy,direct://` so Chromium falls back on its own, a main-process deadline drops it after 120s, `did-fail-load` drops it immediately, a boot marker refuses to re-apply after a boot that never finished, and a free proxy is never persisted to disk.
 - Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings.
-- Free proxies are tested before use and filtered by country (default: no BR); a 120s watchdog and a startup loop-breaker prevent infinite reload loops.
+- Made by **bezumiya** — [GitHub](https://github.com/bezumiya/GoLiveBypass), [Twitter](https://twitter.com/obezumiya), Discord `1366453661970071633`.
+- Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script.
 - License: GPL-3.0-or-later.
