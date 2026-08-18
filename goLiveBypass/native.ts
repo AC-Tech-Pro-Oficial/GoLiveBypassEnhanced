@@ -21,8 +21,14 @@ const MAX_CANDIDATES = 40;
 const MIN_UPTIME = 90;
 const MAX_LISTED_TIMEOUT = 1500;
 const SESSION_DEADLINE_MS = 120_000;
-const TOR_PORTS = [9150, 9050];
+// Portas SOCKS de clientes Tor, em ordem de preferencia. A 9052 vem primeiro porque e a que
+// o instalador configura com bridge meek: ela atravessa rede censurada, que e exatamente o
+// cenario de quem precisa deste plugin. As outras sao Tor Browser, daemon e Brave, que podem
+// estar sem bridge nenhuma.
+const TOR_PORTS = [9052, 9150, 9050, 9250];
 const TOR_PORT_TIMEOUT_MS = 400;
+const MAX_LOG_LINES = 200;
+const MAX_RETRIES = 2;
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BOOT_PROBE_TIMEOUT_MS = 2500;
 const INTERCEPTING_PORTS = new Set([4145]);
@@ -32,6 +38,16 @@ const PROXY_BYPASS_RULES = "cdn.discordapp.com;*.discordapp.net;*.discord.media;
 
 let appliedProxy: string | null = null;
 let deadline: ReturnType<typeof setTimeout> | undefined;
+
+const history: string[] = [];
+
+let retries = 0;
+
+function log(message: string) {
+    const line = `${new Date().toISOString().slice(11, 19)} ${message}`;
+    history.push(line);
+    if (history.length > MAX_LOG_LINES) history.shift();
+}
 
 function parseProxy(proxyRules: string) {
     const match = PROXY_RULES_RE.exec(proxyRules);
@@ -91,20 +107,52 @@ function excludedCountries() {
 
 async function bootProxy() {
     const manual = manualProxy();
-    if (manual === null || manual !== "") return manual ?? "";
+    if (manual === null) {
+        log("o proxy do campo Proxy nao e valido, nada foi aplicado");
+        return "";
+    }
+    if (manual !== "") {
+        // Sem testar, um proxy fora do ar viraria conexao direta pelo fallback direct:// e o
+        // bypass falharia em silencio, que foi exatamente o que aconteceu com o Tor fechado.
+        const started = Date.now();
+        if (await probe(manual, BOOT_PROBE_TIMEOUT_MS) !== null) {
+            log(`seu proxy respondeu em ${Date.now() - started}ms: ${manual}`);
+            return manual;
+        }
+
+        log(`seu proxy nao respondeu: ${manual}`);
+        log("se for Tor, ele precisa estar aberto ANTES do Discord. Procurando alternativa.");
+    }
 
     for (const port of TOR_PORTS) {
         const tor = `socks5://127.0.0.1:${port}`;
-        if (await listening(port, TOR_PORT_TIMEOUT_MS) && await probe(tor, BOOT_PROBE_TIMEOUT_MS) !== null) return tor;
+        if (!await listening(port, TOR_PORT_TIMEOUT_MS)) continue;
+
+        if (await probe(tor, BOOT_PROBE_TIMEOUT_MS) !== null) {
+            log(`Tor local encontrado na porta ${port}`);
+            return tor;
+        }
+        log(`porta ${port} aberta mas nao respondeu como proxy, ignorando`);
     }
 
     // Sem Tor local a escolha de uma proxy gratuita levaria dezenas de segundos, e o gateway
     // conecta antes disso. Reaproveitar a ultima que funcionou resolve, desde que ela seja
     // testada de novo agora: aplicar uma proxy morta as cegas foi o que travava o Discord.
     const cached = readCachedProxy();
-    if (cached !== null && await probe(cached, BOOT_PROBE_TIMEOUT_MS) !== null) return cached;
+    if (cached !== null) {
+        const started = Date.now();
+        if (await probe(cached, BOOT_PROBE_TIMEOUT_MS) !== null) {
+            log(`proxy guardada revalidada em ${Date.now() - started}ms: ${cached}`);
+            return cached;
+        }
+        log("a proxy guardada morreu, procurando outra");
+    }
 
-    return await pickFreeProxy(excludedCountries()) ?? "";
+    log("procurando uma proxy nova, isso demora e o gateway pode conectar antes");
+    const picked = await sharedFreeProxy(excludedCountries());
+    log(picked === null ? "nenhuma proxy passou nos testes" : `proxy escolhida: ${picked}`);
+
+    return picked ?? "";
 }
 
 function manualProxy() {
@@ -132,9 +180,13 @@ async function apply(proxy: string) {
 
     appliedProxy = proxy;
     markBoot(true);
+    log(`proxy aplicado: ${proxy}`);
 
     clearTimeout(deadline);
-    deadline = setTimeout(clear, SESSION_DEADLINE_MS);
+    deadline = setTimeout(() => {
+        log("a sessao nao abriu no prazo, soltando o proxy para nao travar o Discord");
+        clear();
+    }, SESSION_DEADLINE_MS);
     return true;
 }
 
@@ -143,6 +195,8 @@ async function clear() {
     deadline = undefined;
     appliedProxy = null;
     markBoot(false);
+
+    log("proxy liberado, so o gateway continua nele");
 
     try {
         // "system" e o que uma sessao intocada usa. Voltar para "direct" arrancaria o proxy
@@ -330,6 +384,16 @@ function rankFreeProxies(body: string, excluded: Set<string>) {
         .map(entry => entry.proxy);
 }
 
+// O boot e o pedido do renderer procuram proxy ao mesmo tempo. Duas buscas paralelas disputam
+// a mesma banda e dobram o tempo ate a primeira proxy ficar pronta, que e exatamente a janela
+// em que o gateway conecta sem protecao. Quem chegar depois espera a busca que ja esta correndo.
+let hunting: Promise<string | null> | null = null;
+
+function sharedFreeProxy(excluded: Set<string>) {
+    hunting ??= pickFreeProxy(excluded).finally(() => { hunting = null; });
+    return hunting;
+}
+
 async function pickFreeProxy(excluded: Set<string>) {
     let candidates: string[];
     try {
@@ -338,17 +402,24 @@ async function pickFreeProxy(excluded: Set<string>) {
         return null;
     }
 
+    log(`${candidates.length} candidatas depois do ranqueamento`);
+
     for (let i = 0; i < candidates.length; i += PARALLEL_PROBES) {
-        const batch = await Promise.all(candidates.slice(i, i + PARALLEL_PROBES).map(probe));
+        // map passa (item, indice, array), entao .map(probe) mandava o indice como timeout
+        // e todas as candidatas estouravam o prazo em milissegundos.
+        const batch = await Promise.all(candidates.slice(i, i + PARALLEL_PROBES).map(candidate => probe(candidate)));
         const working = batch
             .filter((result): result is { proxy: string; ms: number; } => result !== null)
             .sort((a, b) => a.ms - b.ms);
 
         for (const candidate of working) {
-            if (await accepts(candidate.proxy, excluded)) {
+            const country = await exitCountry(candidate.proxy);
+            if (country !== null && !excluded.has(country)) {
+                log(`${candidate.proxy} passou: ${candidate.ms}ms, saida em ${country}`);
                 storeCachedProxy(candidate.proxy);
                 return candidate.proxy;
             }
+            log(`${candidate.proxy} recusada: saida em ${country ?? "pais desconhecido"}`);
         }
     }
 
@@ -407,12 +478,16 @@ function downloadText(url: string): Promise<string> {
 app.whenReady().then(async () => {
     app.on("browser-window-created", (_event, win) => {
         win.webContents.on("did-fail-load", (_failed, code, _description, _url, isMainFrame) => {
-            if (isMainFrame && code !== -3 && appliedProxy !== null) clear();
+            if (isMainFrame && code !== -3 && appliedProxy !== null) {
+                log(`a pagina falhou ao carregar (${code}), voltando para conexao direta`);
+                clear();
+            }
         });
     });
 
     if (bootWasPending()) {
         markBoot(false);
+        log("a abertura anterior nao terminou, entao nao vou aplicar proxy desta vez");
         return;
     }
 
@@ -420,19 +495,23 @@ app.whenReady().then(async () => {
     if (proxy) apply(proxy);
 });
 
+function requestedCountries(raw: unknown) {
+    return new Set(
+        typeof raw === "string"
+            ? raw.split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
+            : []
+    );
+}
+
 export async function enable(_: IpcMainInvokeEvent, excludedCountries: unknown) {
     if (appliedProxy !== null) return { success: true as const, proxy: appliedProxy };
 
-    const excluded = new Set(
-        typeof excludedCountries === "string"
-            ? excludedCountries.split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
-            : []
-    );
+    const excluded = requestedCountries(excludedCountries);
 
     const manual = manualProxy();
     if (manual === null) return { success: false as const, error: "O endereco no campo Proxy nao e valido. Use socks5://host:porta." };
 
-    const proxy = manual || await detectTor(excluded) || await pickFreeProxy(excluded);
+    const proxy = manual || await detectTor(excluded) || await sharedFreeProxy(excluded);
     if (proxy === null || proxy === "")
         return { success: false as const, error: "No proxy could carry a real request to Discord, so the connection stays direct." };
 
@@ -447,6 +526,63 @@ export async function disable(_: IpcMainInvokeEvent) {
 
 export function getActiveProxy(_: IpcMainInvokeEvent) {
     return appliedProxy;
+}
+
+export function getLog(_: IpcMainInvokeEvent) {
+    return history.join("\n");
+}
+
+export function sessionWorked(_: IpcMainInvokeEvent) {
+    if (retries > 0) log(`sessao liberada depois de ${retries} tentativa(s)`);
+    retries = 0;
+}
+
+// Quando a sessao sobe sem passar pelo proxy, o servidor continua bloqueando video e nao ha
+// como consertar sem refazer o gateway. Recarregar com o proxy no ar resolve, mas so pode
+// acontecer um numero fixo de vezes: sem teto isso vira a tela de carregamento infinita.
+export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountries: unknown) {
+    if (retries >= MAX_RETRIES) {
+        log(`o servidor continuou bloqueando apos ${retries} tentativas, desistindo`);
+        await clear();
+        return { retried: false as const, reason: "tentativas esgotadas" };
+    }
+
+    // Se o proxy que esta no ar ainda responde, a causa foi a corrida: o gateway nasceu antes
+    // dele. Recarregar faz o gateway renascer por tras do proxy, e isso conserta a sessao.
+    let proxy = appliedProxy;
+    if (proxy !== null && await probe(proxy) === null) {
+        log(`${proxy} parou de responder no meio da sessao`);
+        await clear();
+        proxy = null;
+    }
+
+    // Sem proxy no ar, recarregar cairia no fallback direct:// e repetiria a mesma falha. Aqui
+    // nao ha corrida com o gateway para ganhar, entao vale a busca completa em vez dos prazos
+    // curtos do boot: gastar meio minuto e melhor que recarregar para nada.
+    if (proxy === null) {
+        const excluded = requestedCountries(excludedCountries);
+        const manual = manualProxy();
+
+        proxy = (manual !== null && manual !== "" && await probe(manual) !== null ? manual : null)
+            ?? await detectTor(excluded)
+            ?? await sharedFreeProxy(excluded);
+
+        if (proxy === null || !await apply(proxy)) {
+            log("nenhum proxy respondeu, a sessao continua direta");
+            await clear();
+            return { retried: false as const, reason: "nenhum proxy respondeu" };
+        }
+    }
+
+    if (event.sender.isDestroyed()) return { retried: false as const, reason: "janela indisponivel" };
+
+    retries++;
+    log(`o servidor bloqueou esta sessao, recarregando atras de ${proxy} (tentativa ${retries} de ${MAX_RETRIES})`);
+
+    // event.sender e a janela que roda o plugin. Guardar a primeira janela criada nao servia:
+    // a primeira do Discord e a tela de abertura, e recarregar ela nao recarrega o cliente.
+    event.sender.reload();
+    return { retried: true as const, attempt: retries };
 }
 
 export async function testProxy(_: IpcMainInvokeEvent, proxyRules: unknown) {
