@@ -4,19 +4,10 @@ Plugin para **Equicord** e **Vencord**, feito por um desenvolvedor brasileiro, q
 
 > **English summary below / Resumo em inglês no final.**
 
-## Instalação em 1 minuto
-
-### ▶ [Assista ao tutorial de instalação](media/instalacao.mp4)
-
-Baixe o **[`GoLiveBypass-Installer.bat`](https://github.com/bezumiya/GoLiveBypass/releases/latest)**, dê dois cliques e responda três perguntas. O script acha o seu Equicord ou Vencord sozinho, compila e já deixa o plugin ativado.
-
-Não precisa saber programar, não precisa mexer em arquivo, não precisa instalar Tor.
-
 ## Índice
 
 **Quero instalar agora**
 
-- [Instalação em 1 minuto](#instalação-em-1-minuto) — o vídeo do passo a passo no Windows
 - [Instalação automática](#instalação-automática-recomendado) — um script faz tudo sozinho, no Windows e no Linux
 - [Instalação manual, passo a passo](#instalação-passo-a-passo-completo) — se preferir fazer cada etapa à mão
 - [Dependências](#dependências-o-que-baixar-e-como-instalar) — só para o caminho manual
