@@ -356,18 +356,41 @@ inject_mod() {
     injected_from_checkout "$root" || fail "A injecao nao pegou. Se o Discord estiver em /usr/share ou /opt, rode: cd $root && sudo pnpm inject"
 }
 
-mod_settings_file() {
+checkout_mod() {
+    # A identidade vem do package.json, nao do nome da pasta: quem baixou o ZIP tem o repo
+    # numa pasta chamada Equicord-main, e ai o nome da pasta nao diz nada.
     local root="$1"
-    local name
-    name="$(basename "$root")"
+    local manifest="$root/package.json"
 
-    local candidate
-    for candidate in "$name" Equicord Vencord; do
-        local file="$HOME/.config/$candidate/settings/settings.json"
-        [ -f "$file" ] && { printf '%s\n' "$file"; return 0; }
-    done
+    if [ -f "$manifest" ]; then
+        local name
+        name="$(node -e 'try{process.stdout.write(String(require(process.argv[1]).name||""))}catch(e){}' "$manifest" 2>/dev/null || true)"
+        case "${name,,}" in
+            *equicord*) echo "Equicord"; return 0 ;;
+            *vencord*) echo "Vencord"; return 0 ;;
+        esac
+    fi
 
-    printf '%s\n' "$HOME/.config/$name/settings/settings.json"
+    case "$(basename "$root" | tr '[:upper:]' '[:lower:]')" in
+        *vencord*) echo "Vencord" ;;
+        *) echo "Equicord" ;;
+    esac
+}
+
+mod_settings_file() {
+    # Mesma regra do proprio mod (src/main/utils/constants.ts):
+    #   DATA_DIR = <MOD>_USER_DATA_DIR ?? ~/.config/<Mod>
+    local root="$1"
+    local mod
+    mod="$(checkout_mod "$root")"
+
+    local override="${mod^^}_USER_DATA_DIR"
+    if [ -n "${!override:-}" ]; then
+        printf '%s\n' "${!override}/settings/settings.json"
+        return 0
+    fi
+
+    printf '%s\n' "$HOME/.config/$mod/settings/settings.json"
 }
 
 set_plugin_settings() {
@@ -534,7 +557,6 @@ do_install() {
     ensure_toolchain 0
     copy_plugin "$root"
     build_mod "$root"
-    set_plugin_settings "$root" "$proxy"
 
     if injected_from_checkout "$root"; then
         step "O Discord ja carrega deste checkout, so reiniciando"
@@ -542,6 +564,10 @@ do_install() {
     else
         inject_mod "$root"
     fi
+
+    # Com o Discord fechado: aberto, ele regrava o settings.json a partir da memoria e
+    # apaga o que escrevemos aqui.
+    set_plugin_settings "$root" "$proxy"
 
     start_discord
 

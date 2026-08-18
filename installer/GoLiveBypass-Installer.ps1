@@ -400,7 +400,6 @@ function Invoke-Install($root) {
     Install-Toolchain $false
     Copy-Plugin $root
     Build-Mod $root
-    Set-PluginSettings $root $proxy
 
     $weInjected = -not (Test-InjectedFromCheckout $root)
     if ($weInjected) {
@@ -409,6 +408,10 @@ function Invoke-Install($root) {
         Write-Step 'O Discord ja carrega deste checkout, so reiniciando'
         Stop-Discord
     }
+
+    # Com o Discord fechado: aberto, ele regrava o settings.json a partir da memoria e
+    # apaga o que escrevemos aqui.
+    Set-PluginSettings $root $proxy
 
     Start-Discord
 
@@ -453,13 +456,32 @@ function Invoke-Uninstall {
 
 # =============================================================================== interface
 
-function Get-ModSettingsFile($root) {
-    $name = Split-Path -Leaf $root
-    foreach ($candidate in @($name, 'Equicord', 'Vencord')) {
-        $file = Join-Path $env:APPDATA "$candidate\settings\settings.json"
-        if (Test-Path -LiteralPath $file) { return $file }
+function Get-CheckoutMod($root) {
+    # A identidade vem do package.json, nao do nome da pasta: quem baixou o ZIP tem o repo
+    # numa pasta chamada Equicord-main, e ai o nome da pasta nao diz nada.
+    $manifest = Join-Path $root 'package.json'
+    if (Test-Path -LiteralPath $manifest) {
+        try {
+            $name = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).name
+            if ($name -match 'equicord') { return 'Equicord' }
+            if ($name -match 'vencord') { return 'Vencord' }
+        } catch { }
     }
-    return (Join-Path $env:APPDATA "$name\settings\settings.json")
+
+    if ((Split-Path -Leaf $root) -match 'vencord') { return 'Vencord' }
+    return 'Equicord'
+}
+
+function Get-ModSettingsFile($root) {
+    # Mesma regra do proprio mod (src/main/utils/constants.ts):
+    #   DATA_DIR = <MOD>_USER_DATA_DIR ?? %APPDATA%\<Mod>
+    #   SETTINGS_FILE = DATA_DIR\settings\settings.json
+    $mod = Get-CheckoutMod $root
+
+    $override = [Environment]::GetEnvironmentVariable("$($mod.ToUpper())_USER_DATA_DIR")
+    if ($override) { return (Join-Path $override 'settings\settings.json') }
+
+    return (Join-Path $env:APPDATA "$mod\settings\settings.json")
 }
 
 function Set-PluginSettings($root, $proxy) {
@@ -498,7 +520,15 @@ function Set-PluginSettings($root, $proxy) {
     $settings.plugins | Add-Member -NotePropertyName GoLiveBypass -NotePropertyValue $plugin -Force
 
     Save-Text $file ($settings | ConvertTo-Json -Depth 10)
-    Write-Step "Plugin ativado em $file"
+
+    $written = $null
+    try { $written = (Get-Content -LiteralPath $file -Raw | ConvertFrom-Json).plugins.GoLiveBypass } catch { }
+    if ($written -and $written.enabled) {
+        Write-Step "Plugin ativado em $file"
+    } else {
+        Write-Warn "Nao consegui confirmar a escrita em $file"
+        Write-Host '  Ative o GoLiveBypass na mao em Configuracoes > Plugins.' -ForegroundColor DarkGray
+    }
 }
 
 function Show-Status($root) {
