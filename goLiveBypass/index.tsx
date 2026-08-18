@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { sendBotMessage } from "@api/Commands";
 import { definePluginSettings } from "@api/Settings";
 import { Paragraph } from "@components/Paragraph";
+import { copyWithToast } from "@utils/discord";
 import { Logger } from "@utils/Logger";
 import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findStoreLazy } from "@webpack";
-import { Constants, MaskedLink, RestAPI, SearchableSelect, showToast, Toasts } from "@webpack/common";
+import { Constants, MaskedLink, RestAPI, SearchableSelect, showToast, Toasts, UserStore } from "@webpack/common";
 
 const Native = VencordNative?.pluginHelpers?.GoLiveBypass as PluginNative<typeof import("./native")> | undefined;
 
@@ -32,10 +34,26 @@ interface VoiceRegion {
 
 interface MediaEngineStore {
     supportsInApp(kind: string): boolean;
+    supports(kind: string): boolean;
+    isSupported(): boolean;
+}
+
+interface ApexExperiments {
+    getServerAssignment(kind: string, unitId: string, name: string): unknown;
+}
+
+interface DiagnosticStore {
+    [method: string]: unknown;
 }
 
 const RTCRegionStore: RegionStore = findStoreLazy("RTCRegionStore");
 const MediaEngineStore: MediaEngineStore = findStoreLazy("MediaEngineStore");
+const ApexExperimentStore: ApexExperiments & DiagnosticStore = findStoreLazy("ApexExperimentStore");
+const ApplicationStreamingStore: DiagnosticStore = findStoreLazy("ApplicationStreamingStore");
+const StreamRTCConnectionStore: DiagnosticStore = findStoreLazy("StreamRTCConnectionStore");
+const RTCConnectionStore: DiagnosticStore = findStoreLazy("RTCConnectionStore");
+
+const VIDEO_GUARD = "2026-08-video-guard";
 
 const AUTOMATIC = "";
 const VOICE_KEYS: "voiceRegion"[] = ["voiceRegion"];
@@ -211,29 +229,111 @@ async function startBypass() {
 }
 
 function videoIsBlocked() {
-    const store = MediaEngineStore;
-    return typeof store.supportsInApp === "function" && !store.supportsInApp("VIDEO");
+    const user = UserStore.getCurrentUser();
+    if (user == null) return false;
+
+    const assignment = ApexExperimentStore.getServerAssignment("user", user.id, VIDEO_GUARD);
+    if (assignment === null || typeof assignment !== "object") return false;
+
+    // As duas variacoes do experimento desligam video; o balde de controle nao tem nenhuma
+    // delas. Ler supportsInApp aqui seria inutil: o patch do plugin deixa esse valor sempre
+    // verdadeiro, e a checagem nunca detectaria bloqueio nenhum.
+    const { variantId } = assignment as { variantId?: unknown; };
+    return variantId === 1 || variantId === 2;
 }
 
 async function releaseProxy() {
-    let wasProxied = false;
+    if (!Native) return;
 
-    if (Native) {
+    let wasProxied = false;
+    try {
+        wasProxied = await Native.getActiveProxy() !== null;
+        // So solta o proxy quando a sessao realmente ficou liberada: soltar antes de saber
+        // disso jogaria fora a unica chance de recarregar atras dele.
+        if (wasProxied && !videoIsBlocked()) await Native.disable();
+        bypassRequested = false;
+    } catch (error) {
+        logger.error("Failed to reach the desktop process", error);
+    }
+
+    if (!videoIsBlocked()) {
+        Native?.sessionWorked();
+        showToast(wasProxied
+            ? "Go Live is unlocked on this session. Only the gateway stays on the proxy, everything else is direct now."
+            : "Go Live is unlocked on this session, no proxy was needed.", Toasts.Type.SUCCESS);
+        return;
+    }
+
+    logger.warn("O servidor continuou bloqueando video: o gateway subiu sem passar pelo proxy.");
+
+    // Nao adianta soltar o proxy aqui: sem refazer o gateway a sessao fica bloqueada ate o
+    // proximo reinicio. Recarregar com o proxy no ar e a unica saida, e o processo principal
+    // limita quantas vezes isso pode acontecer.
+    try {
+        const result = await Native.retryWithProxy(settings.store.excludedCountries);
+        if (result.retried) {
+            showToast(`GoLiveBypass is reconnecting behind the proxy (attempt ${result.attempt}).`);
+            return;
+        }
+
+        showToast(`GoLiveBypass could not unlock this session (${result.reason}). Open your proxy, then restart Discord from the tray.`, Toasts.Type.FAILURE);
+    } catch (error) {
+        logger.error("Failed to reach the desktop process", error);
+    }
+}
+
+function ask(store: object, method: string, ...args: unknown[]) {
+    const fn = (store as DiagnosticStore)[method];
+    if (typeof fn !== "function") return "metodo ausente";
+
+    try {
+        return (fn as (...a: unknown[]) => unknown).apply(store, args) ?? null;
+    } catch (error) {
+        return `erro: ${error instanceof Error ? error.message : String(error)}`;
+    }
+}
+
+async function buildReport() {
+    const user = UserStore.getCurrentUser();
+    const lines: string[] = ["GoLiveBypass, diagnostico"];
+
+    lines.push("", "== o servidor te bloqueia? ==");
+    lines.push(`atribuicao do video guard: ${JSON.stringify(user == null ? "sem usuario" : ask(ApexExperimentStore, "getServerAssignment", "user", user.id, VIDEO_GUARD))}`);
+
+    lines.push("", "== o cliente consegue fazer video? ==");
+    lines.push(`supports(VIDEO)          ${ask(MediaEngineStore, "supports", "VIDEO")}`);
+    lines.push(`supportsInApp(VIDEO)     ${ask(MediaEngineStore, "supportsInApp", "VIDEO")}`);
+    lines.push(`supportsInApp(DESKTOP)   ${ask(MediaEngineStore, "supportsInApp", "DESKTOP_CAPTURE")}`);
+    lines.push(`motor de midia pronto    ${ask(MediaEngineStore, "isSupported")}`);
+
+    lines.push("", "== transmissao ==");
+    lines.push(`minha transmissao ativa  ${JSON.stringify(ask(ApplicationStreamingStore, "getCurrentUserActiveStream"))}`);
+    lines.push(`transmissoes visiveis    ${JSON.stringify(ask(ApplicationStreamingStore, "getAllActiveStreams"))}`);
+    lines.push(`conexoes de midia        ${JSON.stringify(ask(StreamRTCConnectionStore, "getAllActiveStreamKeys"))}`);
+    lines.push(`estado da call           ${ask(RTCConnectionStore, "getState")} em ${ask(RTCConnectionStore, "getHostname")}`);
+
+    lines.push("", "== regiao ==");
+    lines.push(`preferida  ${ask(RTCRegionStore, "getPreferredRegion")}`);
+    lines.push(`lista      ${JSON.stringify(ask(RTCRegionStore, "getPreferredRegions"))}`);
+    lines.push(`override instalado ${original !== undefined}`);
+
+    lines.push("", "== configuracao ==");
+    const { proxy, voiceRegion, streamRegion, excludedCountries } = settings.store;
+    lines.push(`proxy "${proxy}" | regiao de call "${voiceRegion}" | regiao de stream "${streamRegion}" | paises fora "${excludedCountries}"`);
+
+    lines.push("", "== processo principal ==");
+    if (!Native) {
+        lines.push("indisponivel, o plugin esta rodando sem a parte desktop");
+    } else {
         try {
-            wasProxied = await Native.getActiveProxy() !== null;
-            if (wasProxied) await Native.disable();
-            bypassRequested = false;
+            lines.push(`proxy no ar agora: ${await Native.getActiveProxy() ?? "nenhum"}`);
+            lines.push(await Native.getLog() || "sem registros");
         } catch (error) {
-            logger.error("Failed to reach the desktop process", error);
+            lines.push(`nao consegui falar com o processo principal: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
-    if (!wasProxied) return;
-
-    showToast(videoIsBlocked()
-        ? "Discord still has Go Live blocked on this session. Close Discord from the tray and open it again."
-        : "Go Live is unlocked on this session. Only the gateway stays on the proxy, everything else is direct now.",
-    videoIsBlocked() ? Toasts.Type.FAILURE : Toasts.Type.SUCCESS);
+    return lines.join("\n");
 }
 
 export default definePlugin({
@@ -265,6 +365,18 @@ export default definePlugin({
         const region = settings.store.streamRegion;
         return typeof region === "string" && region !== AUTOMATIC ? region : fallback;
     },
+
+    commands: [
+        {
+            name: "golivebypass",
+            description: "Copia um diagnostico do plugin para voce colar no suporte.",
+            async execute(_args, ctx) {
+                const report = await buildReport();
+                copyWithToast(report, "Diagnostico copiado. Cole no canal de suporte.");
+                sendBotMessage(ctx.channel.id, { content: `\`\`\`\n${report.slice(0, 1800)}\n\`\`\`` });
+            }
+        }
+    ],
 
     flux: {
         CONNECTION_OPEN() {
