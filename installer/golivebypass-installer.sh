@@ -36,9 +36,11 @@ else
     C_DIM=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_CYAN=""; C_BOLD=""; C_OFF=""
 fi
 
-step() { printf '  %s[*] %s%s\n' "$C_DIM" "$1" "$C_OFF"; }
-ok()   { printf '  %s[OK] %s%s\n' "$C_GREEN" "$1" "$C_OFF"; }
-warn() { printf '  %s[!] %s%s\n' "$C_YELLOW" "$1" "$C_OFF"; }
+# Sempre em stderr: estas funcoes sao chamadas de dentro de $(...) e qualquer coisa que
+# fosse para stdout seria capturada como se fosse o valor de retorno.
+step() { printf '  %s[*] %s%s\n' "$C_DIM" "$1" "$C_OFF" >&2; }
+ok()   { printf '  %s[OK] %s%s\n' "$C_GREEN" "$1" "$C_OFF" >&2; }
+warn() { printf '  %s[!] %s%s\n' "$C_YELLOW" "$1" "$C_OFF" >&2; }
 fail() { printf '\n  %s[X] %s%s\n\n' "$C_RED" "$1" "$C_OFF" >&2; exit 1; }
 
 banner() {
@@ -193,6 +195,14 @@ injected_from_checkout() {
 # ----------------------------------------------------------------------------- instalacao
 
 choose_mod() {
+    if [ -n "$MOD" ]; then
+        case "${MOD,,}" in
+            equicord) echo "Equicord"; return 0 ;;
+            vencord) echo "Vencord"; return 0 ;;
+            *) fail "--mod aceita equicord ou vencord" ;;
+        esac
+    fi
+
     local installed
     installed="$(installed_mod || true)"
 
@@ -227,11 +237,20 @@ ensure_toolchain() {
 
     if [ ${#missing[@]} -gt 0 ]; then
         warn "Faltando: ${missing[*]}"
-        printf '  %sInstale com o gerenciador da sua distro, por exemplo:%s\n' "$C_DIM" "$C_OFF"
-        printf '  %s  sudo apt install %s%s\n' "$C_DIM" "${missing[*]}" "$C_OFF"
-        printf '  %s  sudo pacman -S %s%s\n' "$C_DIM" "${missing[*]}" "$C_OFF"
-        printf '  %s  sudo dnf install %s%s\n' "$C_DIM" "${missing[*]}" "$C_OFF"
-        fail "Instale e rode de novo. O Node precisa ser 22 ou mais novo."
+
+        local pkgs=()
+        local tool
+        for tool in "${missing[@]}"; do
+            if [ "$tool" = "node" ]; then pkgs+=("nodejs"); else pkgs+=("$tool"); fi
+        done
+
+        printf '  %sInstale com o gerenciador da sua distro, por exemplo:%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '  %s  sudo apt install %s%s\n' "$C_DIM" "${pkgs[*]}" "$C_OFF" >&2
+        printf '  %s  sudo pacman -S %s%s\n' "$C_DIM" "${pkgs[*]}" "$C_OFF" >&2
+        printf '  %s  sudo dnf install %s%s\n' "$C_DIM" "${pkgs[*]}" "$C_OFF" >&2
+        printf '\n  %sO Node precisa ser 22 ou mais novo. O pacote da distro costuma ser mais%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '  %santigo que isso; nesse caso use nvm, fnm ou o repositorio do NodeSource.%s\n' "$C_DIM" "$C_OFF" >&2
+        fail "Instale o que falta e rode de novo."
     fi
 
     if ! have pnpm; then
@@ -330,7 +349,11 @@ inject_mod() {
     local root="$1"
     stop_discord
     step "Injetando no Discord (pode pedir sua senha do sudo)"
-    (cd "$root" && pnpm inject) || fail "pnpm inject falhou"
+    (cd "$root" && pnpm inject) || true
+
+    # O pnpm inject sai com 0 mesmo quando o instalador do mod falha, entao o codigo de saida
+    # nao serve de prova. Conferir se a injecao realmente passou a apontar para este checkout.
+    injected_from_checkout "$root" || fail "A injecao nao pegou. Se o Discord estiver em /usr/share ou /opt, rode: cd $root && sudo pnpm inject"
 }
 
 mod_settings_file() {
@@ -357,18 +380,33 @@ set_plugin_settings() {
     GLB_FILE="$file" GLB_PROXY="$proxy" node -e '
         const fs = require("fs");
         const file = process.env.GLB_FILE;
-        let settings = {};
-        try { settings = JSON.parse(fs.readFileSync(file, "utf8")); } catch (error) { settings = {}; }
-        settings.plugins = settings.plugins || {};
-        settings.plugins.GoLiveBypass = {
-            enabled: true,
-            proxy: process.env.GLB_PROXY || "",
-            excludedCountries: "BR"
-        };
-        fs.writeFileSync(file, JSON.stringify(settings, null, 4));
-    ' || warn "Nao consegui ativar o plugin sozinho, ative na mao em Configuracoes > Plugins."
 
-    step "Plugin ativado em $file"
+        let settings = {};
+        if (fs.existsSync(file)) {
+            const raw = fs.readFileSync(file, "utf8");
+            if (raw.trim() !== "") {
+                try {
+                    settings = JSON.parse(raw);
+                } catch (error) {
+                    // Nunca reescrever por cima de um arquivo ilegivel: isso apagaria todos os
+                    // plugins da pessoa.
+                    const backup = file + ".bak-" + Date.now();
+                    fs.copyFileSync(file, backup);
+                    console.error("ilegivel, copia em " + backup);
+                    process.exit(2);
+                }
+            }
+        }
+
+        const plugin = settings.plugins && settings.plugins.GoLiveBypass ? settings.plugins.GoLiveBypass : {};
+        plugin.enabled = true;
+        plugin.proxy = process.env.GLB_PROXY || "";
+        if (plugin.excludedCountries === undefined) plugin.excludedCountries = "BR";
+
+        settings.plugins = settings.plugins || {};
+        settings.plugins.GoLiveBypass = plugin;
+        fs.writeFileSync(file, JSON.stringify(settings, null, 4));
+    ' && step "Plugin ativado em $file" || warn "Nao mexi no $file. Ative o GoLiveBypass na mao em Configuracoes > Plugins."
 }
 
 show_status() {

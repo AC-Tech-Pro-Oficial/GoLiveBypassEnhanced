@@ -24,6 +24,7 @@ const SESSION_DEADLINE_MS = 120_000;
 const TOR_PORTS = [9150, 9050];
 const TOR_PORT_TIMEOUT_MS = 400;
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const BOOT_PROBE_TIMEOUT_MS = 2500;
 const INTERCEPTING_PORTS = new Set([4145]);
 
 const PROXY_RULES_RE = /^(socks5|https?):\/\/([a-z0-9.-]{1,253}):(\d{1,5})$/;
@@ -90,29 +91,32 @@ function excludedCountries() {
 
 async function bootProxy() {
     const manual = manualProxy();
-    if (manual) return manual;
-
-    if (RendererSettings.plain.plugins?.GoLiveBypass?.enabled !== true) return "";
+    if (manual === null || manual !== "") return manual ?? "";
 
     for (const port of TOR_PORTS) {
-        if (await listening(port, TOR_PORT_TIMEOUT_MS)) return `socks5://127.0.0.1:${port}`;
+        const tor = `socks5://127.0.0.1:${port}`;
+        if (await listening(port, TOR_PORT_TIMEOUT_MS) && await probe(tor, BOOT_PROBE_TIMEOUT_MS) !== null) return tor;
     }
 
     // Sem Tor local a escolha de uma proxy gratuita levaria dezenas de segundos, e o gateway
     // conecta antes disso. Reaproveitar a ultima que funcionou resolve, desde que ela seja
     // testada de novo agora: aplicar uma proxy morta as cegas foi o que travava o Discord.
     const cached = readCachedProxy();
-    if (cached !== null && await probe(cached) !== null) return cached;
+    if (cached !== null && await probe(cached, BOOT_PROBE_TIMEOUT_MS) !== null) return cached;
 
     return await pickFreeProxy(excludedCountries()) ?? "";
 }
 
 function manualProxy() {
     const settings = RendererSettings.plain.plugins?.GoLiveBypass;
-    if (settings?.enabled !== true) return "";
+    if (settings?.enabled !== true) return null;
 
     const { proxy } = settings;
-    return typeof proxy === "string" && parseProxy(proxy.trim()) ? proxy.trim() : "";
+    if (typeof proxy !== "string" || proxy.trim() === "") return "";
+
+    // Invalido nao pode virar "vazio": cair na lista gratuita mandaria a sessao para um proxy
+    // que a pessoa nunca escolheu.
+    return parseProxy(proxy.trim()) === null ? null : proxy.trim();
 }
 
 async function apply(proxy: string) {
@@ -141,7 +145,9 @@ async function clear() {
     markBoot(false);
 
     try {
-        await session.defaultSession.setProxy({ mode: "direct" });
+        // "system" e o que uma sessao intocada usa. Voltar para "direct" arrancaria o proxy
+        // do sistema de quem esta atras de PAC, VPN ou proxy corporativo.
+        await session.defaultSession.setProxy({ mode: "system" });
         await session.defaultSession.closeAllConnections();
     } catch {
         return false;
@@ -199,7 +205,7 @@ function negotiateConnect(socket: Socket, host: string, port: number, done: (ok:
     socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
 }
 
-function openTunnel(proxy: string, host: string, port: number): Promise<Socket | null> {
+function openTunnel(proxy: string, host: string, port: number, timeoutMs = PROBE_TIMEOUT_MS): Promise<Socket | null> {
     const parsed = parseProxy(proxy);
     if (parsed === null) return Promise.resolve(null);
 
@@ -216,8 +222,8 @@ function openTunnel(proxy: string, host: string, port: number): Promise<Socket |
             resolve(tunnel);
         };
 
-        const guard = setTimeout(() => finish(null), PROBE_TIMEOUT_MS);
-        socket.setTimeout(PROBE_TIMEOUT_MS, () => finish(null));
+        const guard = setTimeout(() => finish(null), timeoutMs);
+        socket.setTimeout(timeoutMs, () => finish(null));
         socket.on("error", () => finish(null));
         socket.once("connect", () => {
             const done = (ok: boolean) => finish(ok ? socket : null);
@@ -227,7 +233,7 @@ function openTunnel(proxy: string, host: string, port: number): Promise<Socket |
     });
 }
 
-function readOverTls(socket: Socket, host: string, path: string): Promise<string | null> {
+function readOverTls(socket: Socket, host: string, path: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<string | null> {
     return new Promise(resolve => {
         let body = "";
         let settled = false;
@@ -240,7 +246,7 @@ function readOverTls(socket: Socket, host: string, path: string): Promise<string
             resolve(value);
         };
 
-        const timer = setTimeout(() => finish(null), PROBE_TIMEOUT_MS);
+        const timer = setTimeout(() => finish(null), timeoutMs);
         const tls = connectTls({ socket, servername: host, host }, () => {
             tls.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nAccept: */*\r\nConnection: close\r\n\r\n`);
         });
@@ -255,13 +261,13 @@ function readOverTls(socket: Socket, host: string, path: string): Promise<string
     });
 }
 
-async function probe(proxy: string) {
+async function probe(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
     const started = Date.now();
 
-    const socket = await openTunnel(proxy, DISCORD_HOST, 443);
+    const socket = await openTunnel(proxy, DISCORD_HOST, 443, timeoutMs);
     if (socket === null) return null;
 
-    const response = await readOverTls(socket, DISCORD_HOST, "/api/v9/gateway");
+    const response = await readOverTls(socket, DISCORD_HOST, "/api/v9/gateway", timeoutMs);
     if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
 
     return { proxy, ms: Date.now() - started };
@@ -424,6 +430,8 @@ export async function enable(_: IpcMainInvokeEvent, excludedCountries: unknown) 
     );
 
     const manual = manualProxy();
+    if (manual === null) return { success: false as const, error: "O endereco no campo Proxy nao e valido. Use socks5://host:porta." };
+
     const proxy = manual || await detectTor(excluded) || await pickFreeProxy(excluded);
     if (proxy === null || proxy === "")
         return { success: false as const, error: "No proxy could carry a real request to Discord, so the connection stays direct." };

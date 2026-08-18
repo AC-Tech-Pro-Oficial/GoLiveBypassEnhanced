@@ -10,7 +10,7 @@ import { Logger } from "@utils/Logger";
 import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findStoreLazy } from "@webpack";
-import { Constants, MaskedLink, RestAPI, SearchableSelect, showToast, Toasts, UserStore } from "@webpack/common";
+import { Constants, MaskedLink, RestAPI, SearchableSelect, showToast, Toasts } from "@webpack/common";
 
 const Native = VencordNative?.pluginHelpers?.GoLiveBypass as PluginNative<typeof import("./native")> | undefined;
 
@@ -30,14 +30,12 @@ interface VoiceRegion {
     custom: boolean;
 }
 
-interface ApexExperimentStore {
-    getServerAssignment(kind: string, unitId: string, name: string): unknown;
+interface MediaEngineStore {
+    supportsInApp(kind: string): boolean;
 }
 
 const RTCRegionStore: RegionStore = findStoreLazy("RTCRegionStore");
-const ApexExperimentStore: ApexExperimentStore = findStoreLazy("ApexExperimentStore");
-
-const VIDEO_GUARD = "2026-08-video-guard";
+const MediaEngineStore: MediaEngineStore = findStoreLazy("MediaEngineStore");
 
 const AUTOMATIC = "";
 const VOICE_KEYS: "voiceRegion"[] = ["voiceRegion"];
@@ -120,7 +118,7 @@ const settings = definePluginSettings({
     voiceRegion: {
         type: OptionType.COMPONENT,
         component: VoiceRegionPicker,
-        default: "brazil"
+        default: AUTOMATIC
     },
     streamRegion: {
         type: OptionType.COMPONENT,
@@ -129,8 +127,10 @@ const settings = definePluginSettings({
     },
     proxy: {
         type: OptionType.STRING,
-        description: "Proxy used only while your session is being created, like socks5://127.0.0.1:9050 for Tor. Leave empty to use a local Tor if you have one running, or a tested free proxy.",
-        default: ""
+        description: "Proxy used only while your session is being created, like socks5://127.0.0.1:9050 for Tor. Leave empty and your session is created through a free proxy picked and tested for you, which means a stranger carries your login.",
+        default: "",
+        isValid: (value: string) => value.trim() === "" || /^(socks5|https?):\/\/[a-z0-9.-]{1,253}:\d{1,5}$/.test(value.trim())
+            || "Use socks5://host:porta, http://host:porta ou https://host:porta."
     },
     excludedCountries: {
         type: OptionType.STRING,
@@ -210,9 +210,9 @@ async function startBypass() {
     }
 }
 
-function serverStillBlocks() {
-    const user = UserStore.getCurrentUser();
-    return user != null && ApexExperimentStore.getServerAssignment("user", user.id, VIDEO_GUARD) != null;
+function videoIsBlocked() {
+    const store = MediaEngineStore;
+    return typeof store.supportsInApp === "function" && !store.supportsInApp("VIDEO");
 }
 
 async function releaseProxy() {
@@ -228,10 +228,12 @@ async function releaseProxy() {
         }
     }
 
-    if (serverStillBlocks())
-        showToast("Discord still has Go Live blocked on this session. Start Discord with your proxy already running, then join the call.", Toasts.Type.FAILURE);
-    else if (wasProxied)
-        showToast("Go Live is unlocked on this session. Only the gateway stays on the proxy, everything else is direct now.", Toasts.Type.SUCCESS);
+    if (!wasProxied) return;
+
+    showToast(videoIsBlocked()
+        ? "Discord still has Go Live blocked on this session. Close Discord from the tray and open it again."
+        : "Go Live is unlocked on this session. Only the gateway stays on the proxy, everything else is direct now.",
+    videoIsBlocked() ? Toasts.Type.FAILURE : Toasts.Type.SUCCESS);
 }
 
 export default definePlugin({
@@ -276,7 +278,6 @@ export default definePlugin({
 
     start() {
         forceRegion();
-        releaseProxy();
     },
 
     stop() {

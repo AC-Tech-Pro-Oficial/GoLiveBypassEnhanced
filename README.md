@@ -24,13 +24,13 @@ Ou seja, o fluxo do GoLiveBypass — **boot inteiro atrás da proxy → proxy re
 
 **Ressalvas honestas:**
 
-- A liberação vale enquanto o WebSocket do gateway continuar vivo. Se ele cair e reconectar pelo seu IP real (queda de internet, troca de rede), a próxima entrada em canal de voz volta a ser avaliada como BR — dê Ctrl+R para repetir o ciclo atrás da proxy.
+- A liberação vale enquanto o WebSocket do gateway continuar vivo. Se ele cair e reconectar pelo seu IP real (queda de internet, notebook suspenso), a próxima entrada em canal de voz volta a ser avaliada como BR. **Ctrl+R não resolve**: o proxy só é aplicado antes do gateway nascer, então é preciso fechar o Discord pela bandeja e abrir de novo.
 - Isso depende de comportamento atual do Discord, que pode mudar a qualquer momento.
 - Usar proxy/VPN para contornar a restrição pode violar os Termos de Serviço do Discord. Risco de punição à conta é baixo, mas existe — considere usar uma conta secundária.
 
 ## Avisos importantes
 
-- **Só funciona no app desktop** (Discord com Equicord/Vencord injetado, Vesktop ou Equibop). Não funciona na versão de navegador/extensão.
+- **Só funciona no Discord para computador** com Equicord ou Vencord injetado. Vesktop e Equibop não são suportados pelos instaladores: eles trazem o mod embutido e não carregam de um checkout. Não funciona na versão de navegador/extensão.
 - **Proxies gratuitas são fracas para anonimato**: o operador da proxy vê seus metadados de conexão, muitas estão mortas ou lentas, e o Discord pode pedir captcha para IPs de proxies públicas. Para anonimato real, **use Tor**.
 - Usar clientes modificados viola os Termos de Serviço do Discord. Use por sua conta e risco.
 - A proxy cobre apenas a **criação da sessão**. Depois que a sessão abre (`CONNECTION_OPEN`), o tráfego volta a ser direto com seu IP real.
@@ -74,7 +74,7 @@ Medido: escolher aleatoriamente e testar só o handshake acerta 12% das vezes; r
 - **Prazo no processo principal**: 120s depois de aplicada, a proxy sai sozinha. O prazo vive no processo principal, que tem rede sadia, e não no renderer, que é justamente o que a proxy quebrada impede de carregar.
 - **`did-fail-load`**: se a página principal falhar em carregar, a proxy sai na hora.
 - **Marca de boot**: se uma inicialização aplicou proxy e nunca terminou, a inicialização seguinte se recusa a aplicar.
-- **Proxy gratuita nunca é salva em disco.** Só a proxy manual, que é sua e você controla, é reaplicada no boot.
+- **Proxy gratuita só é reaproveitada depois de passar no teste de novo.** A última que funcionou fica guardada em `native-settings.json` sob `verifiedProxy` por 24h, e no boot seguinte ela é testada outra vez (orçamento de 2,5s) antes de ser aplicada. Descobrir uma do zero leva de 8 a 23 segundos e o gateway conecta antes disso, por isso o cache existe. O que causava o travamento antigo era reaplicar sem testar, e isso não acontece mais.
 
 ## Instalação automática (recomendado)
 
@@ -191,7 +191,7 @@ Se der erro de permissão no Windows, abra o PowerShell **como administrador** e
 O plugin **só funciona no app de computador** (ele usa recursos do Electron que o navegador não tem):
 
 - **Discord normal**: baixe em [discord.com/download](https://discord.com/download) (stable, PTB ou Canary servem); ou
-- **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido.
+- **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido. Os instaladores daqui não mexem neles.
 - **Não funciona** no Discord aberto no navegador nem no celular.
 
 ### Opcional: Tor — só se você quiser mais estabilidade
@@ -263,15 +263,19 @@ O instalador abre uma janelinha perguntando **qual Discord** você usa (Stable, 
 
 1. Abra o Discord
 2. Vá em **Configurações → Equicord (ou Vencord) → Plugins** e ative **GoLiveBypass**
-3. Escolha a região das suas calls em **Voice region** (padrão: `brazil`)
+3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso abaixo antes de mudar)
 4. Reinicie o Discord por completo (bandeja, Quit). O plugin escolhe o proxy e aplica antes do gateway conectar, depois solta o resto
-5. Entre num canal de voz: **Go Live e câmera liberados**, e a call continua em servidor brasileiro
+5. Entre num canal de voz: **Go Live e câmera liberados**. Quem escolhe o servidor de voz é o Discord, e pode não ser o brasileiro. Não force `brazil` em **Voice region** sem ler o aviso na seção Configuração
 
 ## Configuração
 
 Nas settings do plugin:
 
-- **Voice region**: seletor com a lista real de regiões que o Discord expõe. Padrão: `brazil`. Escolha `Automatic` para devolver a decisão ao Discord.
+- **Voice region**: seletor com a lista real de regiões que o Discord expõe. Padrão: `Automatic`, que devolve a decisão ao Discord.
+
+  > **Cuidado ao forçar `brazil` aqui.** Há indício de que o servidor de mídia brasileiro é justamente onde a transmissão é recusada: numa sessão em que a call caiu no Brasil o Go Live não subiu, e numa sessão em que caiu em Santiago funcionou. São duas observações, não uma prova, mas o padrão seguro é não forçar. Use este campo se quiser priorizar latência e estiver disposto a perder o Go Live.
+
+  Vale saber que isto é uma **preferência**, não uma ordem: o Discord pode ignorar e escolher outra região, e foi o que aconteceu no teste.
 - **Proxy**: proxy usada só na criação da sessão, no formato `esquema://host:porta` (`socks5`, `http` ou `https`).
   - Tor, se você usa: `socks5://127.0.0.1:9150` com o **Tor Browser** aberto, ou `socks5://127.0.0.1:9050` para o **daemon** `tor`.
   - **Deixe vazio** para o plugin detectar um Tor local automaticamente e, se não achar, buscar uma proxy gratuita validada.
@@ -288,7 +292,7 @@ Se o Discord reconectar o gateway sozinho no meio da sessão (queda de rede, sus
 
 ## Solução de problemas
 
-- **Discord carregando infinitamente**: com o Discord fechado, abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`) e coloque `"GoLiveBypass": { "enabled": false }`. Se você usou uma versão anterior deste plugin, apague também a chave `lastKnownProxy` em `%APPDATA%/Equicord/settings/native-settings.json` — versões antigas salvavam uma proxy gratuita ali e a reaplicavam em todo boot, que é a causa mais comum desse travamento.
+- **Discord carregando infinitamente**: normalmente ele se resolve sozinho, porque uma inicialização que não terminou deixa uma marca e a seguinte se recusa a aplicar proxy. Se persistir, com o Discord fechado abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`) e coloque `"GoLiveBypass": { "enabled": false }`. Em `native-settings.json` as chaves deste plugin são `verifiedProxy` (a proxy guardada) e `bootPending` (a marca); apagar as duas devolve tudo ao estado inicial. Se você usou uma versão anterior, apague também `lastKnownProxy`, que não é mais lida.
 - **"No proxy could carry a real request to Discord"**: nenhuma candidata passou no teste TLS real naquele momento. Tente de novo, ou use Tor / uma proxy sua no campo Proxy.
 - **A região da call não mudou**: saia e entre de novo no canal. Canais de servidor com região fixada por um admin ignoram sua preferência, e numa call que já está rolando a região já foi decidida.
 - **Captcha ou verificação de telefone no login**: o Discord marca muitos IPs de proxies públicas. Use Tor ou outra proxy.
@@ -334,9 +338,9 @@ desse trabalho.
 
 **GoLiveBypass** is an **Equicord/Vencord** plugin, made by a Brazilian developer, that **restores Go Live and camera for Brazilian Discord users**: it boots Discord entirely behind a proxy outside Brazil (Tor or a tested, automatically fetched free proxy) **on every launch and reload**, so Discord's region gate — evaluated once at voice-channel join using the gateway WebSocket origin IP, and never re-evaluated mid-call — unlocks the features. The proxy is dropped once the session opens, restoring a direct connection. As a bonus, your real IP stays hidden during authentication.
 
-It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). It works while the gateway WebSocket stays alive — if it reconnects over your real IP, press Ctrl+R to boot behind the proxy again. Bypassing the restriction may violate Discord's ToS.
+It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). It works while the gateway WebSocket stays alive. If it reconnects over your real IP, Ctrl+R will not help: the proxy is only applied before the gateway is created, so you have to quit Discord from the tray and open it again. Bypassing the restriction may violate Discord's ToS.
 
-- Desktop only (injected Discord, Vesktop or Equibop). Not available on the browser extension.
+- Desktop Discord with Equicord or Vencord injected. Vesktop and Equibop are not supported by the installers, since they bundle the mod instead of loading it from a checkout. Not available on the browser extension.
 - Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client. Tor is optional, not required: by default the plugin picks and validates a free proxy on its own.
 - **Your calls stay on the region you pick.** Creating the session abroad makes Discord rank foreign voice servers, so the plugin overrides the three `RTCRegionStore` getters that feed `preferred_region` / `preferred_regions` in the gateway `VOICE_STATE_UPDATE`. The override is evaluated at read time, so Discord's latency test cannot undo it, and it writes nothing into Discord's persisted state, so the region is not left pinned after you remove the plugin. Restored on `stop()`.
 - Proxy order: your manual proxy, then a local Tor (`127.0.0.1:9150` for Tor Browser, `9050` for the daemon), then a validated free proxy.

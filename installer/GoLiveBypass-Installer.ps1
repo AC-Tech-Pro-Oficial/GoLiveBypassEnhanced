@@ -119,8 +119,13 @@ function Get-InjectedPath($resources) {
     $candidates = @()
 
     $stub = Join-Path $resources 'app.asar'
-    if ((Test-Path -LiteralPath $stub) -and ((Get-Item -LiteralPath $stub).Length -lt 65536)) {
-        $candidates += [IO.File]::ReadAllText($stub, [Text.Encoding]::ASCII)
+    if (Test-Path -LiteralPath $stub) {
+        $item = Get-Item -LiteralPath $stub
+        # app.asar pode ser uma pasta; nesse caso .Length devolve 1 e nao o tamanho do arquivo.
+        # E a leitura precisa ser UTF-8: em ASCII um caminho com acento vira "Jo??o".
+        if ($item -is [IO.FileInfo] -and $item.Length -lt 65536) {
+            $candidates += [IO.File]::ReadAllText($stub)
+        }
     }
 
     $index = Join-Path $resources 'app\index.js'
@@ -225,6 +230,8 @@ function Test-InjectedFromCheckout($root) {
 }
 
 function Show-ModChoice {
+    if ($Mod) { return $Mod }
+
     $installed = Get-InstalledMod
 
     Write-Host ''
@@ -395,11 +402,12 @@ function Invoke-Install($root) {
     Build-Mod $root
     Set-PluginSettings $root $proxy
 
-    if (Test-InjectedFromCheckout $root) {
+    $weInjected = -not (Test-InjectedFromCheckout $root)
+    if ($weInjected) {
+        Invoke-Injection $root
+    } else {
         Write-Step 'O Discord ja carrega deste checkout, so reiniciando'
         Stop-Discord
-    } else {
-        Invoke-Injection $root
     }
 
     Start-Discord
@@ -413,7 +421,14 @@ function Invoke-Install($root) {
     }
     Write-Host '  Entre numa call e use Go Live ou a camera.' -ForegroundColor DarkGray
 
-    if (-not $permanent) { Wait-DiscordExit $root }
+    if (-not $permanent) {
+        if ($weInjected) {
+            Wait-DiscordExit $root
+        } else {
+            Write-Warn 'O Discord ja estava injetado antes de eu rodar, entao nao vou desfazer isso.'
+            Write-Host '  Para remover depois: .\GoLiveBypass-Installer.ps1 -Mode Uninstall' -ForegroundColor DarkGray
+        }
+    }
 }
 
 function Invoke-Uninstall {
@@ -450,20 +465,36 @@ function Get-ModSettingsFile($root) {
 function Set-PluginSettings($root, $proxy) {
     $file = Get-ModSettingsFile $root
 
-    $settings = @{}
+    $settings = $null
     if (Test-Path -LiteralPath $file) {
-        try { $settings = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { $settings = @{} }
+        try { $settings = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { $settings = 'ilegivel' }
     }
+
+    # Nunca reescrever por cima de um arquivo que nao deu para ler: isso apagaria todos os
+    # plugins da pessoa. Melhor guardar uma copia e deixar ela ativar o plugin na mao.
+    if ($settings -is [string]) {
+        $backup = "$file.bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
+        Copy-Item -LiteralPath $file -Destination $backup -Force
+        Write-Warn "Nao consegui ler $file, entao nao mexi nele. Copia em $backup"
+        Write-Warn 'Ative o GoLiveBypass na mao em Configuracoes > Plugins.'
+        return
+    }
+
+    if ($null -eq $settings) { $settings = [pscustomobject]@{} }
 
     if (-not $settings.PSObject.Properties['plugins']) {
         $settings | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{}) -Force
     }
 
-    $plugin = [pscustomobject]@{
-        enabled            = $true
-        proxy              = $proxy
-        excludedCountries  = 'BR'
+    $existing = $settings.plugins.PSObject.Properties['GoLiveBypass']
+    $plugin = if ($existing) { $existing.Value } else { [pscustomobject]@{} }
+
+    $plugin | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
+    $plugin | Add-Member -NotePropertyName proxy -NotePropertyValue $proxy -Force
+    if (-not $plugin.PSObject.Properties['excludedCountries']) {
+        $plugin | Add-Member -NotePropertyName excludedCountries -NotePropertyValue 'BR' -Force
     }
+
     $settings.plugins | Add-Member -NotePropertyName GoLiveBypass -NotePropertyValue $plugin -Force
 
     Save-Text $file ($settings | ConvertTo-Json -Depth 10)
@@ -494,6 +525,7 @@ function Show-Status($root) {
 
 function Select-Target($root) {
     if (-not $root) { return (Install-Mod (Show-ModChoice)) }
+    if ($Yes) { return $root }
 
     $name = Split-Path -Leaf $root
     Write-Host '  Onde instalar?' -ForegroundColor White
@@ -510,6 +542,8 @@ function Select-Target($root) {
 }
 
 function Select-Proxy {
+    if ($Yes) { return '' }
+
     Write-Host ''
     Write-Host '  Como o bypass vai sair para fora do Brasil?' -ForegroundColor White
     Write-Host ''
@@ -535,6 +569,8 @@ function Select-Proxy {
 }
 
 function Select-Persistence {
+    if ($Yes) { return $true }
+
     Write-Host ''
     Write-Host '  Como voce quer deixar o Discord?' -ForegroundColor White
     Write-Host ''
@@ -551,18 +587,32 @@ function Wait-DiscordExit($root) {
     Write-Host ''
     Write-Ok 'Discord aberto com o GoLiveBypass.'
     Write-Warn 'Deixe esta janela aberta. Quando voce fechar o Discord, eu desfaco a injecao.'
+    Write-Host '  Se fechar esta janela antes, rode: .\GoLiveBypass-Installer.ps1 -Mode Uninstall' -ForegroundColor DarkGray
 
-    Start-Sleep -Seconds 5
-    while (Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 2 }
-
-    Write-Host ''
-    Write-Step 'Discord fechado, desfazendo a injecao'
-    Push-Location -LiteralPath $root
     try {
-        & pnpm uninject
-        if ($LASTEXITCODE -ne 0) { Write-Warn 'O pnpm uninject falhou. Rode "pnpm uninject" na pasta do mod.' }
-        else { Write-Ok 'Discord restaurado.' }
-    } finally { Pop-Location }
+        # Esperar o Discord APARECER antes de esperar ele sumir. Sem isso, o Update.exe ainda
+        # nao trocou de processo e o laco acha que ja fechou, desfazendo tudo em 5 segundos.
+        for ($i = 0; $i -lt 90; $i++) {
+            if (Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue) { break }
+            Start-Sleep -Seconds 1
+        }
+
+        if (-not (Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue)) {
+            Write-Warn 'O Discord nao abriu em 90s. Vou desfazer a injecao agora.'
+        } else {
+            while (Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 2 }
+            Write-Host ''
+            Write-Step 'Discord fechado, desfazendo a injecao'
+        }
+    } finally {
+        # finally para que Ctrl+C tambem desfaca, em vez de deixar o Discord injetado.
+        Push-Location -LiteralPath $root
+        try {
+            & pnpm uninject
+            if ($LASTEXITCODE -ne 0) { Write-Warn 'O pnpm uninject falhou. Rode "pnpm uninject" na pasta do mod.' }
+            else { Write-Ok 'Discord restaurado.' }
+        } finally { Pop-Location }
+    }
 }
 
 function Invoke-RestoreEverything {
