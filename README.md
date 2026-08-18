@@ -1,8 +1,32 @@
 # GoLiveBypass — Bypass do Go Live no Discord (Brasil)
 
-Plugin para **Equicord** e **Vencord**, feito por um desenvolvedor brasileiro, que **devolve o Go Live e a câmera para usuários brasileiros**: ele sobe o Discord inteiro atrás de uma proxy fora do Brasil (Tor ou proxy gratuita automática testada) **em cada abertura e reload do app**, fazendo o gate de região do Discord liberar os recursos — e depois remove a proxy, deixando a conexão direta. De quebra, seu IP real não fica exposto na autenticação.
+Plugin para **Equicord** e **Vencord**, feito por um desenvolvedor brasileiro, que **devolve o Go Live e a câmera para usuários brasileiros**. São duas travas: o Discord desabilita os próprios botões, e o servidor recusa a transmissão. O plugin desarma a primeira direto no cliente, e a segunda criando a sua sessão atrás de uma proxy — só o WebSocket de gateway passa por ela, todo o resto sai direto, na sua velocidade normal.
 
 > **English summary below / Resumo em inglês no final.**
+
+## Índice
+
+**Quero instalar agora**
+
+- [Instalação automática](#instalação-automática-recomendado) — um script faz tudo sozinho, no Windows e no Linux
+- [Instalação manual, passo a passo](#instalação-passo-a-passo-completo) — se preferir fazer cada etapa à mão
+- [Dependências](#dependências-o-que-baixar-e-como-instalar) — só para o caminho manual
+
+**Já instalei**
+
+- [Configuração](#configuração) — região da call, região da transmissão, proxy
+- [Uso](#uso) — o que fazer depois de instalar
+- [Solução de problemas](#solução-de-problemas) — Discord travado, transmissão que não sobe, plugin sumido
+
+**Quero entender antes**
+
+- [Por que este plugin existe](#por-que-este-plugin-existe)
+- [Como funciona](#como-funciona) — as duas travas e como cada uma é desarmada
+- [Avisos importantes](#avisos-importantes) — o que o plugin faz com a sua conexão, e os riscos
+
+**Projeto**
+
+- [Estrutura](#estrutura) · [Licença](#licença) · [Autor](#autor) · [Agradecimentos](#agradecimentos)
 
 ## Por que este plugin existe
 
