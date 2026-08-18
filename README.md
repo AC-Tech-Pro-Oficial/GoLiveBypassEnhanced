@@ -4,6 +4,14 @@ Plugin para **Equicord** e **Vencord**, feito por um desenvolvedor brasileiro, q
 
 > **English summary below / Resumo em inglês no final.**
 
+## A instalação inteira, do começo ao fim
+
+<p align="center">
+  <img src="assets/instalacao.gif" alt="O instalador acha o Equicord, instala o plugin, compila e o Go Live volta a funcionar" width="720">
+</p>
+
+Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e abre o Discord com o Go Live funcionando. **[Começar aqui](#instalação-automática-recomendado)** — ou siga o [passo a passo escrito](#instalação-passo-a-passo-completo) se preferir fazer à mão.
+
 ## Índice
 
 **Quero instalar agora**
@@ -332,7 +340,9 @@ Se o Discord reconectar o gateway sozinho no meio da sessão (queda de rede, sus
 ## Solução de problemas
 
 - **Discord carregando infinitamente**: normalmente ele se resolve sozinho, porque uma inicialização que não terminou deixa uma marca e a seguinte se recusa a aplicar proxy. Se persistir, com o Discord fechado abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`) e coloque `"GoLiveBypass": { "enabled": false }`. Em `native-settings.json` as chaves deste plugin são `verifiedProxy` (a proxy guardada) e `bootPending` (a marca); apagar as duas devolve tudo ao estado inicial. Se você usou uma versão anterior, apague também `lastKnownProxy`, que não é mais lida.
+- **"GoLiveBypass is reconnecting behind the proxy"**: a proxy ficou pronta depois de o gateway já ter conectado, então a sessão nasceu desprotegida e o servidor manteve o bloqueio. O plugin procura uma proxy que responda e recarrega o cliente sozinho para a sessão renascer atrás dela. São no máximo duas tentativas: sem esse teto, um bloqueio que a proxy não resolve viraria recarregamento sem fim.
 - **"No proxy could carry a real request to Discord"**: nenhuma candidata passou no teste TLS real naquele momento. Tente de novo, ou use Tor / uma proxy sua no campo Proxy.
+- **Quer ver o que aconteceu**: rode `/golivebypass` em qualquer canal. Ele copia um diagnóstico com o estado das travas, da transmissão, da região e o registro do processo principal — qual proxy foi testada, quanto tempo levou, em que país ela sai e por que foi recusada.
 - **A região da call não mudou**: saia e entre de novo no canal. Canais de servidor com região fixada por um admin ignoram sua preferência, e numa call que já está rolando a região já foi decidida.
 - **Captcha ou verificação de telefone no login**: o Discord marca muitos IPs de proxies públicas. Use Tor ou outra proxy.
 - **Erro de build `Could not resolve "./plugins/userplugins"`**: você copiou a pasta para dentro de `src/plugins/` por engano. O caminho certo é `src/userplugins/goLiveBypass` — a pasta `userplugins` fica em `src/`, **ao lado** de `plugins`, e pode ser necessário criá-la.
@@ -345,12 +355,15 @@ goLiveBypass/
 ├── index.tsx                      # renderer: patches do video guard e do stream, seletor de região,
 │                                  #   override do RTCRegionStore, eventos de fluxo
 └── native.ts                      # processo principal: session.setProxy, validação TLS das proxies,
-                                   #   detecção de Tor, prazos de segurança
+                                   #   detecção de Tor, registro, nova tentativa, prazos de segurança
 
 installer/
 ├── GoLiveBypass-Installer.bat     # Windows: dois cliques, libera a execução e chama o .ps1
 ├── GoLiveBypass-Installer.ps1     # Windows: instalador automático
 └── golivebypass-installer.sh      # Linux: mesmo instalador, mesmo menu
+
+assets/
+└── instalacao.gif                 # o vídeo do começo deste README
 ```
 
 ## Licença
