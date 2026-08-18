@@ -123,17 +123,28 @@ Ele descobre onde está o seu checkout **lendo a própria injeção do Discord**
 | Equicord ou Vencord já instalado a partir do fonte | Copia o plugin, compila e reinicia o Discord |
 | Instalado, mas o Discord não carrega desse checkout | Compila e roda o `pnpm inject` para apontar o Discord para ele |
 | Você não tem nenhum dos dois | Mostra uma tela para escolher **Equicord** ou **Vencord**, baixa, compila e injeta |
-| Falta Git ou Node | Oferece instalar pelo winget; o pnpm sai do `corepack enable` |
+| Falta Git ou Node | No Windows, oferece instalar pelo winget. No Linux, mostra o comando da sua distro (o pacote do Node é `nodejs`, e costuma ser antigo demais: nesse caso use nvm, fnm ou o NodeSource). O pnpm sai do `corepack enable` nos dois |
 
 A descoberta é automática e roda em milissegundos: primeiro lê a injeção do Discord, depois varre os lugares onde um checkout costuma estar (perfil, Documentos, Desktop, Downloads, `dev`, `repos`, `projects`, `source`, e a raiz de cada disco).
 
 Outros modos:
 
 ```powershell
-.\GoLiveBypass-Installer.ps1 -Source C:\caminho\do\Equicord   # aponta o checkout na mão
-.\GoLiveBypass-Installer.ps1 -Mod Vencord                      # escolhe o mod sem a tela
-.\GoLiveBypass-Installer.ps1 -Yes                              # sem perguntas, para automação
-.\GoLiveBypass-Installer.ps1 -Mode Uninstall                   # remove o plugin e recompila
+.\GoLiveBypass-Installer.ps1 -Source C:\caminho\do\Equicord  # aponta o checkout na mão
+.\GoLiveBypass-Installer.ps1 -Mod Vencord                     # escolhe o mod sem a tela
+.\GoLiveBypass-Installer.ps1 -Yes                             # sem perguntas, para automação
+.\GoLiveBypass-Installer.ps1 -Mode Install                    # instala direto, sem menu
+.\GoLiveBypass-Installer.ps1 -Mode Uninstall                  # remove o plugin e recompila
+.\GoLiveBypass-Installer.ps1 -Mode Restore                    # remove o plugin e desfaz a injeção
+```
+
+```bash
+./golivebypass-installer.sh --source ~/Equicord   # aponta o checkout na mão
+./golivebypass-installer.sh --mod vencord         # escolhe o mod sem a tela
+./golivebypass-installer.sh --yes                 # sem perguntas, para automação
+./golivebypass-installer.sh --install             # instala direto, sem menu
+./golivebypass-installer.sh --uninstall           # remove o plugin e recompila
+./golivebypass-installer.sh --restore             # remove o plugin e desfaz a injeção
 ```
 
 O instalador **baixa o plugin direto deste repositório** em vez de carregar uma cópia embutida, então nunca instala uma versão defasada. Ele nunca mexe no `app.asar`: quem injeta é o instalador oficial do Equicord/Vencord.
@@ -141,6 +152,8 @@ O instalador **baixa o plugin direto deste repositório** em vez de carregar uma
 O instalador já deixa o plugin **ativado e configurado**. Depois que ele terminar, feche o Discord pela bandeja e abra de novo: é isso.
 
 ## Dependências: o que baixar e como instalar
+
+> Se você usou o instalador automático acima, **pule esta seção e a próxima**. O instalador confere o que falta e oferece instalar sozinho. O que vem daqui em diante é o caminho manual, para quem prefere fazer cada passo à mão ou precisa entender o que está acontecendo.
 
 Você precisa de **4 programas** antes de começar. Instale na ordem. Depois de instalar cada um, **feche e abra o terminal de novo** — o Windows só reconhece programas novos em terminais abertos depois da instalação.
 
@@ -201,6 +214,8 @@ O plugin **só funciona no app de computador** (ele usa recursos do Electron que
 O Tor é só uma opção para quem quer mais estabilidade: ele é mais rápido e não morre no meio do caminho como as proxies públicas. Se você já tiver o [Tor Browser](https://www.torproject.org/download/) aberto, o plugin detecta sozinho em `127.0.0.1:9150`; o daemon `tor` fica em `9050`.
 
 ## Instalação: passo a passo completo
+
+> Este é o caminho manual. O [instalador automático](#instalação-automática-recomendado) faz tudo isto sozinho; siga daqui só se preferir fazer na mão.
 
 Escolha **Equicord** ou **Vencord** — os dois funcionam, o processo é idêntico. Os exemplos usam Equicord; para Vencord, troque o link do clone por `https://github.com/Vendicated/Vencord` e a pasta para `Vencord`.
 
