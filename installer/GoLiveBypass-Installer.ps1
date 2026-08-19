@@ -456,6 +456,12 @@ function Start-Discord {
 
 function Invoke-Install($root) {
     $root = Select-Target $root
+
+    # Sem esta checagem, um checkout que nao ficou pronto virava "nao e possivel associar o
+    # argumento ao parametro Path", que nao diz nada a quem esta instalando.
+    if (-not $root -or -not (Test-Path -LiteralPath $root)) {
+        throw 'Nao consegui preparar a pasta do Equicord/Vencord. Rode de novo, ou use -Source "C:\caminho\do\Equicord" apontando para um checkout que voce ja tenha.'
+    }
     $proxy = Select-Proxy
     $permanent = Select-Persistence
 
@@ -768,6 +774,14 @@ try {
 } catch {
     Write-Host ''
     Write-Err $_.Exception.Message
+
+    # Sem isto o relato vira so a mensagem do PowerShell, que nao diz onde quebrou. Com a linha
+    # e o comando, um print de tela ja basta para achar a causa.
+    $info = $_.InvocationInfo
+    if ($info -and $info.ScriptLineNumber) {
+        Write-Host "      linha $($info.ScriptLineNumber): $($info.Line.Trim())" -ForegroundColor DarkGray
+    }
+    Write-Host '      Se for relatar, mande esta linha junto.' -ForegroundColor DarkGray
     exit 1
 }
 
