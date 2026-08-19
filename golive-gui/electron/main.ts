@@ -140,7 +140,7 @@ function startDiscord(exePath: string) {
   } catch {}
 }
 
-async function activateBypass() {
+async function activateBypass(event: any, proxyAddress: string = '') {
   const installs = getDiscordInstalls();
   if (installs.length === 0) throw new Error('Nenhum Discord encontrado.');
 
@@ -160,6 +160,7 @@ async function activateBypass() {
         fs.mkdirSync(asar);
         fs.writeFileSync(path.join(asar, 'package.json'), JSON.stringify({ name: "discord", main: "index.js" }));
         fs.writeFileSync(path.join(asar, 'golivebypass.js'), bypassCode);
+        fs.writeFileSync(path.join(asar, 'settings.json'), JSON.stringify({ enabled: true, proxy: proxyAddress }));
         fs.writeFileSync(path.join(asar, 'index.js'), `require('./golivebypass.js');`);
       });
     }

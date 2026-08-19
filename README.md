@@ -9,12 +9,12 @@ Plugin para **Equicord** e **Vencord**, feito por um desenvolvedor brasileiro, q
 Criamos um aplicativo completo que faz todo o trabalho de forma **100% automática**, sem precisar abrir terminais, usar scripts ou instalar modificações complexas como o Equicord.
 
 <p align="center">
-  <img src="golive-gui/src/assets/hero.png" alt="Screenshot da Interface Gráfica" width="400">
+  <img src="golive-gui/src/assets/hero2.png" alt="Screenshot da Interface Gráfica" width="400">
 </p>
 
 ### Como Baixar e Instalar
 1. Vá na aba de **[Releases](https://github.com/bezumiya/GoLiveBypass/releases)** aqui no GitHub.
-2. Baixe o arquivo mais recente chamado `GoLiveBypass X.X.X.exe`.
+2. Baixe o arquivo mais recente chamado `GoLiveBypass 1.0.0.exe` (ou versão superior).
 3. Abra o arquivo que você acabou de baixar (ele é portátil, roda direto sem sujar seu PC).
 
 ### Como Usar

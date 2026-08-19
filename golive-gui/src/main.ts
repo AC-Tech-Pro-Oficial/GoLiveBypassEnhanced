@@ -3,7 +3,7 @@ import './style.css'
 declare global {
   interface Window {
     api: {
-      activate: () => Promise<void>;
+      activate: (proxy?: string) => Promise<void>;
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
     }
@@ -15,6 +15,7 @@ const statusText = document.getElementById('statusText')!;
 const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
 const btnText = document.getElementById('btnText')!;
 const warningAlert = document.getElementById('warningAlert')!;
+const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 
 let currentState = 'INACTIVE';
 
@@ -63,7 +64,11 @@ toggleBtn.addEventListener('click', async () => {
     if (currentState === 'ACTIVE') {
       await window.api.deactivate();
     } else {
-      await window.api.activate();
+      const proxy = proxyInput.value.trim();
+      await window.api.activate(proxy);
+      
+      // Popup de aviso
+      alert("GoLiveBypass Ativado!\n\nAVISO IMPORTANTE: Se a transmissão ficar preta ou não carregar, aperte Ctrl + R dentro do Discord.");
     }
   } catch (err) {
     alert('Erro: ' + err);
