@@ -1,7 +1,7 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { ipcRenderer } from 'electron';
 
-contextBridge.exposeInMainWorld('api', {
+(window as any).api = {
   activate: (proxy?: string) => ipcRenderer.invoke('activate', proxy),
   deactivate: () => ipcRenderer.invoke('deactivate'),
   getStatus: () => ipcRenderer.invoke('get-status'),
-});
+};
