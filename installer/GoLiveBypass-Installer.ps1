@@ -95,12 +95,21 @@ function Test-Tool($name) {
 # busca essa versao no registro do npm e confere a assinatura com chaves embutidas nele; as
 # chaves do corepack que vem no Node 22 estao velhas, entao o atalho existe e mesmo assim
 # quebra com "Cannot find matching keyid". So testar se o comando existe nao prova nada.
+$script:PnpmVersion = ''
+
 function Test-Pnpm {
     if (-not (Test-Tool 'pnpm')) { return $false }
 
-    # 2>$null para o erro do corepack nao assustar quem so vai ver a instalacao seguir.
-    & pnpm --version 2>$null | Out-Null
-    return $LASTEXITCODE -eq 0
+    # Um atalho do corepack existe mesmo quando nao funciona, entao a unica prova que vale e
+    # executar. O 2>$null evita assustar quem so vai ver a instalacao seguir depois.
+    # A saida e capturada inteira antes de olhar o codigo. Filtrar com Select-Object no meio do
+    # cano interrompe o comando por cima, e o codigo de saida deixa de valer: um pnpm que
+    # funciona era reprovado.
+    $found = & pnpm --version 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+
+    $script:PnpmVersion = ($found | Select-Object -First 1)
+    return $true
 }
 
 function Update-PathFromEnvironment {
@@ -309,22 +318,22 @@ function Install-Toolchain($needGit) {
         exit 0
     }
 
-    if (-not (Test-Pnpm) -and (Test-Tool 'corepack')) {
-        Write-Step 'Habilitando o pnpm (corepack enable)'
-        & corepack enable
-        Update-PathFromEnvironment
-    }
-
     if (-not (Test-Pnpm)) {
-        # O npm instala o pnpm direto, sem a conferencia de assinatura que derruba o corepack.
-        Write-Step 'O corepack nao entregou um pnpm que roda, instalando pelo npm'
+        # Sem corepack de proposito. Ele so serviria para fixar a versao do campo packageManager,
+        # que o proprio pnpm ja respeita, e em troca traz dois modos de falha: as chaves de
+        # assinatura vencidas que vem no Node 22, e uma pergunta interativa antes de baixar que
+        # deixa o instalador parado esperando uma resposta que ninguem sabe que precisa dar.
+        Write-Step 'Instalando o pnpm pelo npm'
         & npm install -g pnpm
+        if ($LASTEXITCODE -ne 0) { throw 'O npm nao conseguiu instalar o pnpm. Rode "npm install -g pnpm" na mao e tente de novo.' }
         Update-PathFromEnvironment
     }
 
     if (-not (Test-Pnpm)) {
         throw 'Nao consegui deixar o pnpm funcionando. Abra um terminal e rode: npm install -g pnpm'
     }
+
+    Write-Ok "pnpm $script:PnpmVersion"
 }
 
 function Install-Mod($choice) {

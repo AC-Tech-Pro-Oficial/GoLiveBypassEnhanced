@@ -360,10 +360,10 @@ ensure_toolchain() {
         fail "Atualize o Node e rode de novo."
     fi
 
-    if ! have_pnpm && have corepack; then
-        step "Habilitando o pnpm (corepack enable)"
-        corepack enable >/dev/null 2>&1 || true
-    fi
+    # Sem corepack de proposito. Ele so serviria para fixar a versao do campo packageManager,
+    # que o proprio pnpm ja respeita, e em troca traz dois modos de falha: as chaves de
+    # assinatura vencidas que vem no Node 22, e uma pergunta interativa antes de baixar que
+    # deixa o instalador parado esperando uma resposta que ninguem sabe que precisa dar.
 
     # No Arch o pnpm e um pacote como qualquer outro, e sai mais limpo que um -g do npm em
     # /usr/lib, que fica fora do controle do pacman.
@@ -374,13 +374,13 @@ ensure_toolchain() {
     fi
 
     if ! have_pnpm; then
-        # O npm instala o pnpm direto, sem a conferencia de assinatura que derruba o corepack.
-        step "O corepack nao entregou um pnpm que roda, instalando pelo npm"
+        step "Instalando o pnpm pelo npm"
         npm install -g pnpm >/dev/null 2>&1 || sudo npm install -g pnpm >/dev/null 2>&1 || true
         hash -r 2>/dev/null || true
     fi
 
     have_pnpm || fail 'Nao consegui deixar o pnpm funcionando. Rode: sudo npm install -g pnpm'
+    ok "pnpm $(pnpm --version 2>/dev/null)"
 }
 
 install_mod() {
