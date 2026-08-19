@@ -36,7 +36,9 @@ const BOOT_MARK_MAX_AGE_MS = 10 * 60 * 1000;
 const BOOT_PROBE_TIMEOUT_MS = 2500;
 const INTERCEPTING_PORTS = new Set([4145]);
 
-const PROXY_RULES_RE = /^(socks5|https?):\/\/([a-z0-9.-]{1,253}):(\d{1,5})$/;
+// O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
+// precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
+const PROXY_RULES_RE = /^(socks5|https?):\/\/(?:(.+)@)?([a-z0-9.-]{1,253}):(\d{1,5})$/;
 // Os unicos hosts que precisam passar pelo proxy: e na conexao do gateway que o servidor
 // decide se a conta pode transmitir. Imagem, anexo, GIF, video incorporado e a propria voz
 // nunca encostam nele.
@@ -91,10 +93,38 @@ function parseProxy(proxyRules: string) {
     const match = PROXY_RULES_RE.exec(proxyRules);
     if (!match) return null;
 
-    const port = Number(match[3]);
+    const port = Number(match[4]);
     if (port < 1 || port > 65535) return null;
 
-    return { scheme: match[1], host: match[2], port };
+    // Dividido no primeiro dois-pontos, entao a senha pode ter quantos quiser.
+    const credentials = match[2] ?? "";
+    const split = credentials.indexOf(":");
+    const decode = (value: string) => {
+        try {
+            return decodeURIComponent(value);
+        } catch {
+            // Um % solto no meio da senha nao e escape, e literal.
+            return value;
+        }
+    };
+
+    return {
+        scheme: match[1],
+        user: credentials === "" ? "" : decode(split < 0 ? credentials : credentials.slice(0, split)),
+        pass: credentials === "" || split < 0 ? "" : decode(credentials.slice(split + 1)),
+        host: match[3],
+        port
+    };
+}
+
+// Nunca registrar a senha: o registro vai para arquivo e as pessoas colam ele em relato de
+// problema.
+function safeProxy(proxyRules: string) {
+    const parsed = parseProxy(proxyRules);
+    if (parsed === null) return "endereco invalido";
+
+    const credentials = parsed.user === "" ? "" : `${parsed.user}:***@`;
+    return `${parsed.scheme}://${credentials}${parsed.host}:${parsed.port}`;
 }
 
 function markBoot(pending: boolean) {
@@ -161,11 +191,11 @@ async function bootProxy() {
         // bypass falharia em silencio, que foi exatamente o que aconteceu com o Tor fechado.
         const started = Date.now();
         if (await probe(manual, BOOT_PROBE_TIMEOUT_MS) !== null) {
-            log(`seu proxy respondeu em ${Date.now() - started}ms: ${manual}`);
+            log(`seu proxy respondeu em ${Date.now() - started}ms: ${safeProxy(manual)}`);
             return manual;
         }
 
-        log(`seu proxy nao respondeu: ${manual}`);
+        log(`seu proxy nao respondeu: ${safeProxy(manual)}`);
         log("se for Tor, ele precisa estar aberto ANTES do Discord. Procurando alternativa.");
     }
 
@@ -257,7 +287,7 @@ async function apply(proxy: string) {
     const pacScript = await pacFor(proxy);
     if (pacScript === null) return false;
 
-    log(`aplicando ${proxy} so em ${GATEWAY_HOSTS.join(", ")}; o resto da sessao sai direto`);
+    log(`aplicando ${safeProxy(proxy)} so em ${GATEWAY_HOSTS.join(", ")}; o resto da sessao sai direto`);
     try {
         await session.defaultSession.setProxy({ mode: "pac_script", pacScript });
         await session.defaultSession.closeAllConnections();
@@ -267,7 +297,7 @@ async function apply(proxy: string) {
 
     appliedProxy = proxy;
     markBoot(true);
-    log(`proxy aplicado: ${proxy}`);
+    log(`proxy aplicado: ${safeProxy(proxy)}`);
 
     clearTimeout(deadline);
     deadline = setTimeout(() => {
@@ -278,7 +308,7 @@ async function apply(proxy: string) {
 }
 
 async function clear() {
-    if (appliedProxy !== null) log(`soltando ${appliedProxy}, o resto da sessao volta para a regra do sistema`);
+    if (appliedProxy !== null) log(`soltando ${safeProxy(appliedProxy)}, o resto da sessao volta para a regra do sistema`);
     clearTimeout(deadline);
     deadline = undefined;
     appliedProxy = null;
@@ -330,10 +360,8 @@ function readReply(socket: Socket, size: (buffer: Buffer) => number, done: (repl
     socket.resume();
 }
 
-function negotiateSocks5(socket: Socket, host: string, port: number, done: (ok: boolean) => void) {
-    readReply(socket, buffer => buffer.length < 2 ? -1 : 2, greeting => {
-        if (greeting === null || greeting[1] !== 0) return done(false);
-
+function negotiateSocks5(socket: Socket, host: string, port: number, credentials: { user: string; pass: string; }, done: (ok: boolean) => void) {
+    const requestTarget = () => {
         readReply(socket, buffer => {
             if (buffer.length < 4) return -1;
             if (buffer[3] === 1) return 10;
@@ -347,18 +375,49 @@ function negotiateSocks5(socket: Socket, host: string, port: number, done: (ok: 
             target,
             Buffer.from([port >> 8, port & 0xff])
         ]));
+    };
+
+    readReply(socket, buffer => buffer.length < 2 ? -1 : 2, greeting => {
+        if (greeting === null) return done(false);
+
+        // 0 = sem autenticacao, 2 = usuario e senha (RFC 1929). Qualquer outro metodo, ou 0xFF,
+        // significa que o proxy nao aceita nada que a gente sabe fazer.
+        if (greeting[1] === 0) return requestTarget();
+        if (greeting[1] !== 2) return done(false);
+
+        const user = Buffer.from(credentials.user, "utf8");
+        const pass = Buffer.from(credentials.pass, "utf8");
+        if (user.length > 255 || pass.length > 255) return done(false);
+
+        readReply(socket, buffer => buffer.length < 2 ? -1 : 2, reply => {
+            if (reply === null || reply[1] !== 0) return done(false);
+            requestTarget();
+        });
+
+        socket.write(Buffer.concat([
+            Buffer.from([1, user.length]), user,
+            Buffer.from([pass.length]), pass
+        ]));
     });
 
-    socket.write(Buffer.from([5, 1, 0]));
+    // Oferecer o metodo 2 so quando ha credencial: um proxy que aceita os dois escolheria a
+    // autenticacao a toa, e ai um usuario vazio seria recusado.
+    socket.write(credentials.user === "" ? Buffer.from([5, 1, 0]) : Buffer.from([5, 2, 0, 2]));
 }
 
-function negotiateConnect(socket: Socket, host: string, port: number, done: (ok: boolean) => void) {
+function negotiateConnect(socket: Socket, host: string, port: number, credentials: { user: string; pass: string; }, done: (ok: boolean) => void) {
     readReply(socket, buffer => {
         const end = buffer.indexOf("\r\n\r\n");
         return end < 0 ? -1 : end + 4;
     }, reply => done(reply !== null && /^HTTP\/1\.[01] 200/.test(reply.toString("latin1"))));
 
-    socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
+    // O proxy HTTP nao negocia metodo: ou a credencial vai junto do CONNECT, ou ele responde
+    // 407 e a conexao ja era.
+    const auth = credentials.user === ""
+        ? ""
+        : `Proxy-Authorization: Basic ${Buffer.from(`${credentials.user}:${credentials.pass}`, "utf8").toString("base64")}\r\n`;
+
+    socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
 }
 
 function openTunnel(proxy: string, host: string, port: number, timeoutMs = PROBE_TIMEOUT_MS): Promise<Socket | null> {
@@ -383,8 +442,8 @@ function openTunnel(proxy: string, host: string, port: number, timeoutMs = PROBE
         socket.on("error", () => finish(null));
         socket.once("connect", () => {
             const done = (ok: boolean) => finish(ok ? socket : null);
-            if (parsed.scheme === "socks5") negotiateSocks5(socket, host, port, done);
-            else negotiateConnect(socket, host, port, done);
+            if (parsed.scheme === "socks5") negotiateSocks5(socket, host, port, parsed, done);
+            else negotiateConnect(socket, host, port, parsed, done);
         });
     });
 }
@@ -532,11 +591,11 @@ async function pickFreeProxy(excluded: Set<string>) {
         for (const candidate of working) {
             const { proxy, ms, country } = candidate;
             if (country !== null && !excluded.has(country)) {
-                log(`${proxy} passou: ${ms}ms, saida em ${country}`);
+                log(`${safeProxy(proxy)} passou: ${ms}ms, saida em ${country}`);
                 storeCachedProxy(proxy);
                 return proxy;
             }
-            log(`${proxy} recusada: saida em ${country ?? "pais desconhecido"}`);
+            log(`${safeProxy(proxy)} recusada: saida em ${country ?? "pais desconhecido"}`);
         }
     }
 
@@ -593,6 +652,22 @@ function downloadText(url: string): Promise<string> {
 }
 
 app.whenReady().then(async () => {
+    // A regra do PAC nao carrega usuario e senha: ela so diz o endereco. Quando o proxy pede
+    // autenticacao, quem responde e o Chromium, por este evento. Sem isto o proxy com senha
+    // passaria nos nossos testes, que negociam na mao, e falharia no uso de verdade.
+    app.on("login", (event, _webContents, _request, authInfo, callback) => {
+        // Sem isto responderiamos a qualquer site que pedisse senha, entregando a credencial do
+        // proxy para quem nao tem nada a ver com ela.
+        if (!authInfo.isProxy || appliedProxy === null) return;
+
+        const parsed = parseProxy(appliedProxy);
+        if (parsed === null || parsed.user === "") return;
+        if (authInfo.host !== parsed.host || authInfo.port !== parsed.port) return;
+
+        event.preventDefault();
+        callback(parsed.user, parsed.pass);
+    });
+
     app.on("browser-window-created", (_event, win) => {
         win.webContents.on("did-fail-load", (_failed, code, _description, _url, isMainFrame) => {
             if (isMainFrame && code !== -3 && appliedProxy !== null) {
@@ -681,7 +756,7 @@ export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountrie
     // jeito. A partir da segunda tentativa a saida precisa ser outra.
     let proxy = retries === 0 ? stale : null;
     if (proxy !== null && await probe(proxy) === null) {
-        log(`${proxy} parou de responder no meio da sessao`);
+        log(`${safeProxy(proxy)} parou de responder no meio da sessao`);
         proxy = null;
     }
     if (proxy === null && stale !== null) await clear();
@@ -711,7 +786,7 @@ export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountrie
     if (event.sender.isDestroyed()) return { retried: false as const, reason: "janela indisponivel" };
 
     retries++;
-    log(`o servidor bloqueou esta sessao, recarregando atras de ${proxy} (tentativa ${retries} de ${MAX_RETRIES})`);
+    log(`o servidor bloqueou esta sessao, recarregando atras de ${safeProxy(proxy)} (tentativa ${retries} de ${MAX_RETRIES})`);
 
     // event.sender e a janela que roda o plugin. Guardar a primeira janela criada nao servia:
     // a primeira do Discord e a tela de abertura, e recarregar ela nao recarrega o cliente.

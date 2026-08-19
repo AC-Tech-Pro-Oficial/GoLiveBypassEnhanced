@@ -101,14 +101,45 @@ const excludedCountries = new Set(
         .split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
 );
 
+// O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
+// precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
+const PROXY_RE = /^(socks5|socks4|http|https):\/\/(?:(.+)@)?([^:/?#\s@]+):(\d{1,5})$/;
+
 function parseProxy(value) {
-    const match = /^(socks5|socks4|http|https):\/\/([^:/?#\s]+):(\d{1,5})$/.exec(String(value).trim());
+    const match = PROXY_RE.exec(String(value).trim());
     if (match === null) return null;
 
-    const port = Number(match[3]);
+    const port = Number(match[4]);
     if (port < 1 || port > 65535) return null;
 
-    return { scheme: match[1], host: match[2], port };
+    // Dividido no primeiro dois-pontos, entao a senha pode ter quantos quiser.
+    const credentials = match[2] === undefined ? "" : match[2];
+    const split = credentials.indexOf(":");
+    const decode = value => {
+        try {
+            return decodeURIComponent(value);
+        } catch {
+            // Um % solto no meio da senha nao e escape, e literal.
+            return value;
+        }
+    };
+
+    return {
+        scheme: match[1],
+        user: credentials === "" ? "" : decode(split < 0 ? credentials : credentials.slice(0, split)),
+        pass: credentials === "" || split < 0 ? "" : decode(credentials.slice(split + 1)),
+        host: match[3],
+        port: port
+    };
+}
+
+// Nunca registrar a senha: o registro vai para arquivo e as pessoas colam ele em relato de
+// problema.
+function safeProxy(value) {
+    const parsed = parseProxy(value);
+    if (parsed === null) return "endereco invalido";
+
+    return parsed.scheme + "://" + (parsed.user === "" ? "" : parsed.user + ":***@") + parsed.host + ":" + parsed.port;
 }
 
 function manualProxy() {
@@ -152,12 +183,38 @@ function readReply(socket, size, done) {
     socket.resume();
 }
 
-function negotiateSocks5(socket, host, port, done) {
-    socket.write(Buffer.from([5, 1, 0]));
+function negotiateSocks5(socket, host, port, credentials, done) {
+    // Oferecer o metodo 2 so quando ha credencial: um proxy que aceita os dois escolheria a
+    // autenticacao a toa, e ai um usuario vazio seria recusado.
+    socket.write(credentials.user === "" ? Buffer.from([5, 1, 0]) : Buffer.from([5, 2, 0, 2]));
 
     readReply(socket, buffer => (buffer.length < 2 ? -1 : 2), greeting => {
-        if (greeting === null || greeting[0] !== 5 || greeting[1] !== 0) return done(false);
+        if (greeting === null || greeting[0] !== 5) return done(false);
 
+        // 0 = sem autenticacao, 2 = usuario e senha (RFC 1929). Qualquer outra coisa, inclusive
+        // 0xFF, significa que o proxy nao aceita nada que a gente sabe fazer.
+        if (greeting[1] === 2) {
+            const user = Buffer.from(credentials.user, "utf8");
+            const pass = Buffer.from(credentials.pass, "utf8");
+            if (user.length > 255 || pass.length > 255) return done(false);
+
+            readReply(socket, buffer => (buffer.length < 2 ? -1 : 2), reply => {
+                if (reply === null || reply[1] !== 0) return done(false);
+                sendTarget();
+            });
+
+            socket.write(Buffer.concat([
+                Buffer.from([1, user.length]), user,
+                Buffer.from([pass.length]), pass
+            ]));
+            return;
+        }
+
+        if (greeting[1] !== 0) return done(false);
+        sendTarget();
+    });
+
+    function sendTarget() {
         const name = Buffer.from(host, "utf8");
         const message = Buffer.alloc(7 + name.length);
         message[0] = 5;
@@ -176,11 +233,17 @@ function negotiateSocks5(socket, host, port, done) {
             if (buffer[3] === 3) return 7 + buffer[4];
             return -1;
         }, reply => done(reply !== null && reply[1] === 0));
-    });
+    }
 }
 
-function negotiateConnect(socket, host, port, done) {
-    socket.write("CONNECT " + host + ":" + port + " HTTP/1.1\r\nHost: " + host + ":" + port + "\r\n\r\n");
+function negotiateConnect(socket, host, port, credentials, done) {
+    // O proxy HTTP nao negocia metodo: ou a credencial vai junto do CONNECT, ou ele responde
+    // 407 e a conexao ja era.
+    const auth = credentials.user === ""
+        ? ""
+        : "Proxy-Authorization: Basic " + Buffer.from(credentials.user + ":" + credentials.pass, "utf8").toString("base64") + "\r\n";
+
+    socket.write("CONNECT " + host + ":" + port + " HTTP/1.1\r\nHost: " + host + ":" + port + "\r\n" + auth + "\r\n");
 
     readReply(socket, buffer => {
         const end = buffer.indexOf("\r\n\r\n");
@@ -207,8 +270,8 @@ function openTunnel(proxy, host, port, timeoutMs) {
         socket.on("error", () => finish(null));
         socket.once("connect", () => {
             const done = ok => finish(ok ? socket : null);
-            if (parsed.scheme === "socks5") negotiateSocks5(socket, host, port, done);
-            else negotiateConnect(socket, host, port, done);
+            if (parsed.scheme === "socks5") negotiateSocks5(socket, host, port, parsed, done);
+            else negotiateConnect(socket, host, port, parsed, done);
         });
     });
 }
@@ -425,10 +488,10 @@ async function chooseExit() {
         log("o endereco em proxy nao e valido, ignorando");
     } else if (manual !== "") {
         if (await probe(manual, 2500) !== null) {
-            log("usando a saida que voce configurou: " + manual);
+            log("usando a saida que voce configurou: " + safeProxy(manual));
             return manual;
         }
-        log("a saida que voce configurou nao respondeu: " + manual);
+        log("a saida que voce configurou nao respondeu: " + safeProxy(manual));
     }
 
     const cached = await cachedExit();
@@ -525,12 +588,12 @@ async function openThroughPool(target) {
         const socket = await openTunnel(candidate, target.host, target.port, PROBE_TIMEOUT_MS);
         if (socket !== null) {
             if (candidate !== chosenExit) {
-                log("a saida " + chosenExit + " parou de entregar, troquei para " + candidate);
+                log("a saida " + safeProxy(chosenExit) + " parou de entregar, troquei para " + safeProxy(candidate));
                 chosenExit = candidate;
             }
             return socket;
         }
-        log(candidate + " nao entregou " + target.host);
+        log(safeProxy(candidate) + " nao entregou " + target.host);
     }
 
     return null;
@@ -711,12 +774,28 @@ async function start() {
         return;
     }
 
+    // A regra do PAC nao carrega usuario e senha: ela so diz o endereco. Quando a saida pede
+    // autenticacao, quem responde e o Chromium, por este evento. Sem isto a saida com senha
+    // passaria no nosso teste, que negocia na mao, e falharia no uso de verdade.
+    app.on("login", (event, _webContents, _request, authInfo, callback) => {
+        // Sem esta checagem responderiamos a qualquer site que pedisse senha, entregando a
+        // credencial da saida para quem nao tem nada a ver com ela.
+        if (!authInfo.isProxy || chosenExit === null) return;
+
+        const parsed = parseProxy(chosenExit);
+        if (parsed === null || parsed.user === "") return;
+        if (authInfo.host !== parsed.host || authInfo.port !== parsed.port) return;
+
+        event.preventDefault();
+        callback(parsed.user, parsed.pass);
+    });
+
     if (!await startRouter()) return;
     if (!await installPac()) return;
 
     const exit = await chooseExit();
     settleExit(exit);
-    log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + exit);
+    log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + safeProxy(exit));
 }
 
 try {

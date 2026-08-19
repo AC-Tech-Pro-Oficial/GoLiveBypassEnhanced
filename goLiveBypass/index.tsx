@@ -145,10 +145,12 @@ const settings = definePluginSettings({
     },
     proxy: {
         type: OptionType.STRING,
-        description: "Proxy used only while your session is being created, like socks5://127.0.0.1:9050 for Tor. Leave empty and your session is created through a free proxy picked and tested for you, which means a stranger carries your login.",
+        description: "Proxy that carries the gateway connection, like socks5://127.0.0.1:9050 for Tor. Add a login as socks5://user:password@host:port when your proxy needs one. Leave empty and a free proxy is picked and tested for you, which means a stranger carries your login.",
         default: "",
-        isValid: (value: string) => value.trim() === "" || /^(socks5|https?):\/\/[a-z0-9.-]{1,253}:\d{1,5}$/.test(value.trim())
-            || "Use socks5://host:porta, http://host:porta ou https://host:porta."
+        // Aceita usuario e senha antes do @. O trecho e casado com ganancia para a senha poder
+        // conter @ e :, que e comum em credencial gerada por provedor.
+        isValid: (value: string) => value.trim() === "" || /^(socks5|https?):\/\/(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}$/.test(value.trim())
+            || "Use socks5://host:porta, ou socks5://usuario:senha@host:porta se o seu proxy pedir login."
     },
     excludedCountries: {
         type: OptionType.STRING,
