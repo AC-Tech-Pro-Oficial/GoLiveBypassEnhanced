@@ -1,0 +1,30 @@
+{
+  "name": "golive-gui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && electron-builder --win --x64",
+    "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.golivebypass.gui",
+    "productName": "GoLiveBypass",
+    "directories": {
+      "output": "dist-app"
+    },
+    "win": {
+      "target": "portable"
+    }
+  },
+  "devDependencies": {
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "vite-plugin-electron": "^1.1.1",
+    "vite-plugin-electron-renderer": "^1.0.0"
+  }
+}
