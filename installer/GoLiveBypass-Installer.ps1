@@ -320,7 +320,7 @@ function Install-Toolchain($needGit) {
         foreach ($tool in $missing) {
             $id = if ($tool -eq 'git') { 'Git.Git' } else { 'OpenJS.NodeJS.LTS' }
             Write-Step "winget install $id"
-            & winget install --id $id --accept-source-agreements --accept-package-agreements --silent
+            & winget install --id $id --accept-source-agreements --accept-package-agreements --silent | Out-Host
         }
 
         Write-Host ''
@@ -334,7 +334,10 @@ function Install-Toolchain($needGit) {
         # assinatura vencidas que vem no Node 22, e uma pergunta interativa antes de baixar que
         # deixa o instalador parado esperando uma resposta que ninguem sabe que precisa dar.
         Write-Step 'Instalando o pnpm pelo npm'
-        & npm install -g pnpm
+        # Out-Host, e nao a saida solta: um comando nativo escreve na saida da funcao, e esta
+        # funcao roda dentro de outra cujo retorno vira o caminho do checkout. Sem isto, as
+        # linhas de aviso do npm entram no valor de retorno e o caminho vira um array.
+        & npm install -g pnpm | Out-Host
         if ($LASTEXITCODE -ne 0) { throw 'O npm nao conseguiu instalar o pnpm. Rode "npm install -g pnpm" na mao e tente de novo.' }
         Update-PathFromEnvironment
     }
@@ -370,7 +373,7 @@ function Install-Mod($choice) {
     }
 
     Write-Step "git clone $($info.Git)"
-    & git clone --depth 1 $info.Git $target
+    & git clone --depth 1 $info.Git $target | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'git clone falhou' }
 
     return $target
@@ -456,6 +459,12 @@ function Start-Discord {
 
 function Invoke-Install($root) {
     $root = Select-Target $root
+
+    # Um comando nativo escreve na saida da funcao que o chama, e Select-Target chama outras que
+    # rodam npm e git. Se qualquer uma voltar a deixar escapar, $root chega como array e o
+    # Test-Path quebra ao ligar um elemento vazio, com uma mensagem sobre parametro que nao diz
+    # nada. Ficar com a ultima linha nao esconde erro: a checagem logo abaixo continua valendo.
+    $root = @($root) | Where-Object { $_ } | Select-Object -Last 1
 
     # Sem esta checagem, um checkout que nao ficou pronto virava "nao e possivel associar o
     # argumento ao parametro Path", que nao diz nada a quem esta instalando.
