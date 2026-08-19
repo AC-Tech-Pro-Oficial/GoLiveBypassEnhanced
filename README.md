@@ -140,7 +140,43 @@ Medido: escolher aleatoriamente e testar só o handshake acerta 12% das vezes; r
 
 Um script encontra sozinho o Equicord ou o Vencord que você tem, instala o plugin, compila e injeta. Se você não tiver nenhum dos dois, ele pergunta qual você quer e instala junto.
 
-**Windows, jeito mais simples:** baixe o [`GoLiveBypass-Installer.bat`](installer/GoLiveBypass-Installer.bat) e dê dois cliques. Ele libera a execução só para aquele processo (`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`), baixa o `.ps1` se ele não estiver do lado, e roda tudo.
+### Um comando só
+
+**Windows**, no PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm https://bezu.dev/golive.ps1)))
+```
+
+**Linux**, no terminal:
+
+```bash
+bash <(curl -fsSL https://bezu.dev/golive.sh)
+```
+
+Os dois abrem o mesmo menu da instalação normal.
+
+Se quiser passar opções, elas vão no fim:
+
+```powershell
+& ([scriptblock]::Create((irm https://bezu.dev/golive.ps1))) -Proxy "socks5://usuario:senha@host:1080"
+```
+
+```bash
+bash <(curl -fsSL https://bezu.dev/golive.sh) --proxy socks5://usuario:senha@host:1080
+```
+
+> **Por que não `irm ... | iex` e `curl ... | bash`?** As duas formas curtas funcionam, mas em silêncio pela metade. No Windows, `iex` **ignora as opções** — um `-Proxy` no fim simplesmente não chega. No Linux é pior: o `bash` passa a ler o script pela entrada padrão, então o menu tenta ler a sua resposta e acaba consumindo a próxima linha do próprio script. A pergunta nunca aparece.
+
+Se o seu shell não tiver `<(...)`, como `sh` ou `dash`, baixe antes:
+
+```bash
+curl -fsSL https://bezu.dev/golive.sh -o golive.sh && bash golive.sh
+```
+
+### Baixando o arquivo
+
+**Windows:** baixe o [`GoLiveBypass-Installer.bat`](installer/GoLiveBypass-Installer.bat) e dê dois cliques. Ele libera a execução só para aquele processo (`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`), baixa o `.ps1` se ele não estiver do lado, e roda tudo.
 
 **Linux:**
 
