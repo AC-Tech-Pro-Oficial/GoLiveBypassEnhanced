@@ -63,6 +63,12 @@ confirm() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# O endereco da proxy pode carregar usuario e senha, e ele e mostrado na tela. A senha some.
+hide_proxy_secret() {
+    printf '%s\n' "$1" | sed -E 's#^([a-z0-9]+)://([^:@/]+)(:[^@/]*)?@#\1://\2:***@#'
+    return 0
+}
+
 # O corepack cria o atalho do pnpm antes de saber que versao usar. Na primeira execucao ele
 # busca essa versao no registro do npm e confere a assinatura com chaves embutidas nele; as
 # chaves do corepack que vem no Node 22 estao velhas, entao o atalho existe e mesmo assim
@@ -631,8 +637,12 @@ select_proxy() {
     case "$choice" in
         2) printf 'socks5://127.0.0.1:9050\n' ;;
         3)
+            printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
+            printf '  %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A)%s\n' "$C_DIM" "$C_OFF" >&2
             read -r -p "  Endereco da proxy: " manual
-            [[ "$manual" =~ ^(socks5|https?)://[a-z0-9.-]{1,253}:[0-9]{1,5}$ ]] || fail "Formato invalido. Use socks5://host:porta."
+            # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
+            # : codificados. Recusar aqui deixaria o suporte a login existindo so no plugin.
+            [[ "$manual" =~ ^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}$ ]] || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
             printf '%s\n' "$manual"
             ;;
         *) printf '\n' ;;
@@ -708,7 +718,9 @@ do_install() {
     printf '\n'
     ok "Pronto. O plugin ja vem ativado, nao precisa mexer em nada."
     if [ -n "$proxy" ]; then
-        printf '  %sProxy: %s%s\n' "$C_DIM" "$proxy" "$C_OFF"
+        # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
+        # deu certo.
+        printf '  %sProxy: %s%s\n' "$C_DIM" "$(hide_proxy_secret "$proxy")" "$C_OFF"
     else
         printf '  %sProxy: gratuita, escolhida e testada sozinha a cada abertura%s\n' "$C_DIM" "$C_OFF"
     fi

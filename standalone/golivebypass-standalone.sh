@@ -56,6 +56,16 @@ os_field() {
     return 0
 }
 
+# O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e :
+# codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
+# bypass cairia para a lista gratuita sem dizer por que.
+if [ -n "$PROXY" ] && ! [[ "$PROXY" =~ ^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}$ ]]; then
+    printf '\n  %s[X]%s Endereco de proxy invalido.\n' "$C_RED" "$C_OFF" >&2
+    printf '      %sUse socks5://host:porta, ou socks5://usuario:senha@host:porta.%s\n' "$C_DIM" "$C_OFF" >&2
+    printf '      %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A).%s\n\n' "$C_DIM" "$C_OFF" >&2
+    exit 1
+fi
+
 confirm() {
     [ "$ASSUME_YES" -eq 1 ] && return 0
     local answer
@@ -186,13 +196,21 @@ install_patcher() {
         proxy_value="$(sed -n 's/.*"proxy"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
     fi
 
+    # A barra invertida e a aspas quebrariam o JSON, e uma senha pode ter as duas. Sem escapar,
+    # o arquivo sairia invalido e o bypass voltaria ao padrao em silencio.
+    local proxy_json
+    proxy_json="$(printf '%s' "$proxy_value" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+
     cat > "$INSTALL_DIR/settings.json" <<JSON
 {
     "enabled": true,
-    "proxy": "$proxy_value",
+    "proxy": "$proxy_json",
     "excludedCountries": "$EXCLUDED"
 }
 JSON
+
+    # 600 porque o arquivo pode conter a senha da proxy da pessoa.
+    chmod 600 "$INSTALL_DIR/settings.json" 2>/dev/null || true
     ok "Configuracao gravada em $INSTALL_DIR/settings.json"
 }
 

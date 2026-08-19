@@ -91,6 +91,16 @@ function Test-Tool($name) {
     return [bool] (Get-Command $name -ErrorAction SilentlyContinue)
 }
 
+# O endereco da proxy pode carregar usuario e senha, e ele e mostrado na tela e em resumo de
+# instalacao. A senha some daqui.
+function Hide-ProxySecret($proxy) {
+    if ($proxy -match '^([a-z0-9]+)://(?:([^:@]+)(?::[^@]*)?@)?(.+)$') {
+        $user = if ($matches[2]) { "$($matches[2]):***@" } else { '' }
+        return "$($matches[1])://$user$($matches[3])"
+    }
+    return $proxy
+}
+
 # O corepack cria o atalho do pnpm antes de saber que versao usar. Na primeira execucao ele
 # busca essa versao no registro do npm e confere a assinatura com chaves embutidas nele; as
 # chaves do corepack que vem no Node 22 estao velhas, entao o atalho existe e mesmo assim
@@ -470,7 +480,9 @@ function Invoke-Install($root) {
     Write-Host ''
     Write-Ok 'Pronto. O plugin ja vem ativado, nao precisa mexer em nada.'
     if ($proxy) {
-        Write-Host "  Proxy: $proxy" -ForegroundColor DarkGray
+        # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
+        # deu certo.
+        Write-Host "  Proxy: $(Hide-ProxySecret $proxy)" -ForegroundColor DarkGray
     } else {
         Write-Host '  Proxy: gratuita, escolhida e testada sozinha a cada abertura' -ForegroundColor DarkGray
     }
@@ -640,9 +652,13 @@ function Select-Proxy {
     switch (Read-Host '  Escolha') {
         '2' { return 'socks5://127.0.0.1:9150' }
         '3' {
+            Write-Host '  Se a sua proxy pedir login, use socks5://usuario:senha@host:porta' -ForegroundColor DarkGray
+            Write-Host '  Senha com @ ou : precisa vir codificada (@ vira %40, : vira %3A)' -ForegroundColor DarkGray
             $manual = (Read-Host '  Endereco da proxy').Trim()
-            if ($manual -notmatch '^(socks5|https?)://[a-z0-9.-]{1,253}:\d{1,5}$') {
-                throw 'Formato invalido. Use socks5://host:porta.'
+            # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
+            # : codificados. Recusar isso aqui deixaria o suporte a login existindo so no plugin.
+            if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}$') {
+                throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
             }
             return $manual
         }
