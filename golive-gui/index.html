@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GoLiveBypass</title>
+  </head>
+  <body>
+    <div id="app">
+      <div class="drag-region"></div>
+      <div class="container">
+        <div class="header">
+          <div class="logo-circle"></div>
+          <h1>GoLiveBypass</h1>
+          <p>Devolve o Go Live no Brasil.</p>
+        </div>
+        
+        <div class="status-card" id="statusCard">
+          <div class="status-indicator" id="statusIndicator"></div>
+          <span id="statusText">Verificando...</span>
+        </div>
+
+        <button id="toggleBtn" class="toggle-btn" disabled>
+          <span class="btn-text" id="btnText">Carregando</span>
+          <div class="spinner" id="btnSpinner"></div>
+        </button>
+
+        <p class="disclaimer">
+          O Discord reiniciará automaticamente. Fechar esta janela reverte tudo ao normal.
+        </p>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
