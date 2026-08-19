@@ -17,7 +17,8 @@ Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e 
 **Quero instalar agora**
 
 - [Instalação automática](#instalação-automática-recomendado) — um script faz tudo sozinho, no Windows e no Linux
-- [**Só uso o Discord, não quero instalar mod**](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — o modo standalone, sem Equicord e sem Vencord
+- [**Interface Gráfica Standalone (Windows - Novo!)**](#interface-gráfica-standalone-windows---novo) — 1 clique para ativar/desativar sem precisar de scripts ou terminal
+- [Modo Standalone (Scripts)](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — o modo standalone via terminal/scripts
 - [**Linux: Arch, Debian, Ubuntu, Fedora**](#linux-arch-debian-ubuntu-fedora) — onde o Discord fica em cada distro, e a pedra do Node no Debian
 - [Instalação manual, passo a passo](#instalação-passo-a-passo-completo) — se preferir fazer cada etapa à mão
 - [Dependências](#dependências-o-que-baixar-e-como-instalar) — só para o caminho manual
@@ -38,6 +39,25 @@ Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e 
 **Projeto**
 
 - [Estrutura](#estrutura) · [Licença](#licença) · [Autor](#autor) · [Agradecimentos](#agradecimentos)
+
+## Interface Gráfica Standalone (Windows - Novo!)
+
+Se você usa Windows e não quer lidar com terminais, scripts ou mods como Equicord/Vencord, nós criamos uma **interface gráfica completa e Plug and Play**. 
+
+<p align="center">
+  <img src="golive-gui/src/assets/hero.png" alt="Screenshot da Interface Gráfica" width="400">
+</p>
+
+A versão gráfica **já embute tudo o que você precisa** (Node.js, Electron, Scripts de Injeção). Você não precisa instalar nada no seu computador.
+
+### Como baixar e rodar:
+1. Vá na aba de [**Releases**](https://github.com/bezumiya/GoLiveBypass/releases) aqui no GitHub.
+2. Baixe o arquivo `GoLiveBypass X.X.X.exe`.
+3. Abra o aplicativo (ele é portátil, não instala nada no seu PC).
+4. O aplicativo vai detectar o seu Discord automaticamente. Basta clicar em **Ativar GoLiveBypass**!
+5. Se você quiser remover, abra o aplicativo novamente e clique em **Desativar e Restaurar**.
+
+> **Nota de Segurança:** O aplicativo lida automaticamente com o encerramento dos processos do Discord para evitar erros de arquivo bloqueado (`EBUSY`), e força o contorno do asar-interceptor do Electron para garantir que os arquivos sejam limpos sem travamentos.
 
 ## Por que este plugin existe
 
