@@ -6,12 +6,14 @@
 
 import { NativeSettings, RendererSettings } from "@main/settings";
 import { app, IpcMainInvokeEvent, session } from "electron";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { request } from "https";
 import { connect, Socket } from "net";
+import { dirname, join } from "path";
 import { connect as connectTls } from "tls";
 
 const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
-const GEO_HOST = "ifconfig.co";
+const GEO_HOST = "cloudflare.com";
 const DISCORD_HOST = "discord.com";
 
 const MAX_LIST_BYTES = 1024 * 1024;
@@ -21,20 +23,24 @@ const MAX_CANDIDATES = 40;
 const MIN_UPTIME = 90;
 const MAX_LISTED_TIMEOUT = 1500;
 const SESSION_DEADLINE_MS = 120_000;
-// Portas SOCKS de clientes Tor, em ordem de preferencia. A 9052 vem primeiro porque e a que
-// o instalador configura com bridge meek: ela atravessa rede censurada, que e exatamente o
-// cenario de quem precisa deste plugin. As outras sao Tor Browser, daemon e Brave, que podem
-// estar sem bridge nenhuma.
+// Portas SOCKS de clientes Tor, em ordem de preferencia: 9052 e a porta comum de um Tor
+// configurado a mao com bridge, e as outras sao Tor Browser, daemon e Brave. Uma porta
+// fechada recusa na hora, entao tentar as quatro nao custa relogio nenhum.
 const TOR_PORTS = [9052, 9150, 9050, 9250];
 const TOR_PORT_TIMEOUT_MS = 400;
-const MAX_LOG_LINES = 200;
+const MAX_LOG_LINES = 400;
+const MAX_LOG_BYTES = 256 * 1024;
 const MAX_RETRIES = 2;
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const BOOT_MARK_MAX_AGE_MS = 10 * 60 * 1000;
 const BOOT_PROBE_TIMEOUT_MS = 2500;
 const INTERCEPTING_PORTS = new Set([4145]);
 
 const PROXY_RULES_RE = /^(socks5|https?):\/\/([a-z0-9.-]{1,253}):(\d{1,5})$/;
-const PROXY_BYPASS_RULES = "cdn.discordapp.com;*.discordapp.net;*.discord.media;<local>";
+// Os unicos hosts que precisam passar pelo proxy: e na conexao do gateway que o servidor
+// decide se a conta pode transmitir. Imagem, anexo, GIF, video incorporado e a propria voz
+// nunca encostam nele.
+const GATEWAY_HOSTS = ["gateway.discord.gg", "remote-auth-gateway.discord.gg"];
 
 let appliedProxy: string | null = null;
 let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -43,10 +49,42 @@ const history: string[] = [];
 
 let retries = 0;
 
+// A pasta e a mesma que o modo standalone usa. Quem experimentou os dois acha um arquivo so,
+// em vez de descobrir depois que estava lendo o registro do outro.
+function logDir() {
+    const local = process.platform === "win32"
+        ? process.env.LOCALAPPDATA
+        : process.env.XDG_DATA_HOME ?? (process.env.HOME === undefined ? undefined : join(process.env.HOME, ".local", "share"));
+
+    return local === undefined ? null : join(local, "GoLiveBypass");
+}
+
+const LOG_FILE = logDir() === null ? null : join(logDir() as string, "golivebypass.log");
+
 function log(message: string) {
-    const line = `${new Date().toISOString().slice(11, 19)} ${message}`;
+    const line = `${new Date().toISOString().slice(11, 23)} ${message}`;
     history.push(line);
     if (history.length > MAX_LOG_LINES) history.shift();
+
+    if (LOG_FILE === null) return;
+    try {
+        // Cortado sozinho para nao crescer sem fim numa maquina que ninguem limpa.
+        if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > MAX_LOG_BYTES)
+            writeFileSync(LOG_FILE, readFileSync(LOG_FILE, "utf8").slice(-MAX_LOG_BYTES / 2));
+        else if (!existsSync(LOG_FILE))
+            mkdirSync(dirname(LOG_FILE), { recursive: true });
+
+        appendFileSync(LOG_FILE, `${line}\n`);
+    } catch (error) {
+        // Ficar sem registro e ruim; derrubar o Discord por causa do registro e pior.
+        history.push(`${new Date().toISOString().slice(11, 23)} nao consegui gravar o arquivo de registro: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+// O renderer tem o que o processo principal nao ve: a atribuicao do servidor, o estado da
+// transmissao, a regiao. Sem isto o arquivo contaria metade da historia.
+export function logFromRenderer(_: IpcMainInvokeEvent, message: unknown) {
+    if (typeof message === "string" && message.length > 0) log(message.slice(0, 2000));
 }
 
 function parseProxy(proxyRules: string) {
@@ -61,11 +99,18 @@ function parseProxy(proxyRules: string) {
 
 function markBoot(pending: boolean) {
     NativeSettings.store.plugins.GoLiveBypass ??= {};
-    NativeSettings.store.plugins.GoLiveBypass.bootPending = pending;
+    NativeSettings.store.plugins.GoLiveBypass.bootPending = pending ? Date.now() : 0;
 }
 
 function bootWasPending() {
-    return NativeSettings.plain.plugins?.GoLiveBypass?.bootPending === true;
+    const mark: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.bootPending;
+    if (mark === true) return true;
+    if (typeof mark !== "number" || mark === 0) return false;
+
+    // A marca so e limpa quando o proxy e solto, entao fechar o Discord antes disso, mesmo
+    // depois de horas de uso, deixava ela de pe e a abertura seguinte recusava proxy em
+    // silencio. Uma abertura que travou de verdade e reaberta em minutos, nao em horas.
+    return Date.now() - mark < BOOT_MARK_MAX_AGE_MS;
 }
 
 function listening(port: number, timeoutMs: number): Promise<boolean> {
@@ -167,12 +212,54 @@ function manualProxy() {
     return parseProxy(proxy.trim()) === null ? null : proxy.trim();
 }
 
-async function apply(proxy: string) {
+// Traduz o endereco para a diretiva que o PAC entende. Um proxy HTTP e "PROXY", um SOCKS4 e
+// "SOCKS", e so o SOCKS5 tem nome proprio.
+function pacDirective(proxy: string) {
+    const parsed = parseProxy(proxy);
+    if (parsed === null) return null;
+
+    // O campo Proxy so aceita socks5, http e https, entao nao ha caso de SOCKS4 para tratar.
+    return `${parsed.scheme === "socks5" ? "SOCKS5" : "PROXY"} ${parsed.host}:${parsed.port}`;
+}
+
+// So os hosts de gateway atravessam o proxy. O gate e decidido na conexao do gateway, entao
+// mandar o resto junto nao compra nada e custa velocidade em imagem, anexo, GIF e video
+// incorporado, que e o que o usuario sente.
+async function pacFor(proxy: string) {
+    const directive = pacDirective(proxy);
+    if (directive === null) return null;
+
+    let fallback = "DIRECT";
     try {
-        await session.defaultSession.setProxy({
-            proxyRules: `${proxy},direct://`,
-            proxyBypassRules: PROXY_BYPASS_RULES
-        });
+        // Lido antes de instalar a nossa regra, senao leriamos a nossa propria. Quem esta atras
+        // de proxy corporativo perderia o Discord se isto virasse DIRECT na marra.
+        const resolved = await session.defaultSession.resolveProxy(`https://${DISCORD_HOST}`);
+        if (typeof resolved === "string" && resolved.trim() !== "") fallback = resolved.trim();
+    } catch (error) {
+        log(`nao consegui ler a regra do sistema, usando DIRECT: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // O "; DIRECT" depois da diretiva e a rede anti-travamento: sem ele, um proxy morto faria o
+    // gateway simplesmente nao conectar, e o Discord ficaria presa na tela de abertura. O preco
+    // e degradar em silencio, e quem cobre isso e a nova tentativa, que detecta o bloqueio e
+    // recarrega atras de outra saida.
+    const script = `var routed = ${JSON.stringify(GATEWAY_HOSTS)};\n`
+        + "function FindProxyForURL(url, host) {\n"
+        + "    for (var i = 0; i < routed.length; i++)\n"
+        + `        if (host === routed[i]) return ${JSON.stringify(`${directive}; DIRECT`)};\n`
+        + `    return ${JSON.stringify(fallback)};\n`
+        + "}\n";
+
+    return `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(script, "utf8").toString("base64")}`;
+}
+
+async function apply(proxy: string) {
+    const pacScript = await pacFor(proxy);
+    if (pacScript === null) return false;
+
+    log(`aplicando ${proxy} so em ${GATEWAY_HOSTS.join(", ")}; o resto da sessao sai direto`);
+    try {
+        await session.defaultSession.setProxy({ mode: "pac_script", pacScript });
         await session.defaultSession.closeAllConnections();
     } catch {
         return false;
@@ -191,6 +278,7 @@ async function apply(proxy: string) {
 }
 
 async function clear() {
+    if (appliedProxy !== null) log(`soltando ${appliedProxy}, o resto da sessao volta para a regra do sistema`);
     clearTimeout(deadline);
     deadline = undefined;
     appliedProxy = null;
@@ -211,6 +299,15 @@ async function clear() {
 
 function readReply(socket: Socket, size: (buffer: Buffer) => number, done: (reply: Buffer | null) => void) {
     const chunks: Buffer[] = [];
+    let settled = false;
+
+    const finish = (reply: Buffer | null) => {
+        if (settled) return;
+        settled = true;
+        socket.off("data", onData);
+        socket.off("close", onClose);
+        done(reply);
+    };
 
     const onData = (chunk: Buffer) => {
         chunks.push(chunk);
@@ -218,13 +315,18 @@ function readReply(socket: Socket, size: (buffer: Buffer) => number, done: (repl
         const wanted = size(buffer);
         if (wanted < 0 || buffer.length < wanted) return;
 
-        socket.off("data", onData);
         socket.pause();
         if (buffer.length > wanted) socket.unshift(buffer.subarray(wanted));
-        done(buffer.subarray(0, wanted));
+        finish(buffer.subarray(0, wanted));
     };
 
+    // Um proxy que aceita a conexao e fecha limpo no meio da negociacao nao gera erro nenhum:
+    // FIN nao e erro. Sem escutar o fechamento o callback nunca era chamado e a candidata
+    // gastava o prazo inteiro antes de cair, uma por uma, no caminho sequencial.
+    const onClose = () => finish(null);
+
     socket.on("data", onData);
+    socket.on("close", onClose);
     socket.resume();
 }
 
@@ -327,17 +429,30 @@ async function probe(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
     return { proxy, ms: Date.now() - started };
 }
 
-async function exitCountry(proxy: string) {
-    const socket = await openTunnel(proxy, GEO_HOST, 443);
+async function exitCountry(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
+    const socket = await openTunnel(proxy, GEO_HOST, 443, timeoutMs);
     if (socket === null) return null;
 
-    const response = await readOverTls(socket, GEO_HOST, "/json");
-    if (response === null) return null;
+    // O trace responde em cerca de 200 bytes com loc=XX. O ifconfig.co que estava aqui
+    // devolvia um JSON inteiro e, pior, a resposta nao era conferida: um 429 dele nao casava
+    // o padrao e uma candidata boa era descartada como pais desconhecido.
+    const response = await readOverTls(socket, GEO_HOST, "/cdn-cgi/trace", timeoutMs);
+    if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
 
-    const match = /"country_iso"\s*:\s*"([A-Za-z]{2})"|"country(?:Code)?"\s*:\s*"([A-Za-z]{2})"/.exec(response);
-    if (match === null) return null;
+    const match = /^loc=([A-Z]{2})/m.exec(response);
+    return match === null ? null : match[1];
+}
 
-    return (match[1] ?? match[2]).toUpperCase();
+// As duas conexoes sao feitas em sequencia de proposito: proxy gratuita sobrecarregada costuma
+// limitar conexoes simultaneas, e abrir duas de uma vez reprovaria candidata boa. O paralelismo
+// que importa e entre candidatas, e esta funcao inteira roda dentro do lote. Antes o pais era
+// conferido uma candidata por vez DEPOIS de o lote terminar, o que sozinho somava dezenas de
+// segundos ao tempo ate a primeira saida, bem no caminho em que o gateway ja esta conectando.
+async function probeExit(proxy: string) {
+    const result = await probe(proxy);
+    if (result === null) return null;
+
+    return { ...result, country: await exitCountry(proxy) };
 }
 
 async function accepts(proxy: string, excluded: Set<string>) {
@@ -407,19 +522,21 @@ async function pickFreeProxy(excluded: Set<string>) {
     for (let i = 0; i < candidates.length; i += PARALLEL_PROBES) {
         // map passa (item, indice, array), entao .map(probe) mandava o indice como timeout
         // e todas as candidatas estouravam o prazo em milissegundos.
-        const batch = await Promise.all(candidates.slice(i, i + PARALLEL_PROBES).map(candidate => probe(candidate)));
+        const batch = await Promise.all(candidates.slice(i, i + PARALLEL_PROBES).map(candidate => probeExit(candidate)));
         const working = batch
-            .filter((result): result is { proxy: string; ms: number; } => result !== null)
+            .filter((result): result is { proxy: string; ms: number; country: string | null; } => result !== null)
             .sort((a, b) => a.ms - b.ms);
 
+        log(`lote ${Math.floor(i / PARALLEL_PROBES) + 1}: ${batch.length} testadas, ${working.length} alcancaram o Discord`);
+
         for (const candidate of working) {
-            const country = await exitCountry(candidate.proxy);
+            const { proxy, ms, country } = candidate;
             if (country !== null && !excluded.has(country)) {
-                log(`${candidate.proxy} passou: ${candidate.ms}ms, saida em ${country}`);
-                storeCachedProxy(candidate.proxy);
-                return candidate.proxy;
+                log(`${proxy} passou: ${ms}ms, saida em ${country}`);
+                storeCachedProxy(proxy);
+                return proxy;
             }
-            log(`${candidate.proxy} recusada: saida em ${country ?? "pais desconhecido"}`);
+            log(`${proxy} recusada: saida em ${country ?? "pais desconhecido"}`);
         }
     }
 
@@ -485,9 +602,17 @@ app.whenReady().then(async () => {
         });
     });
 
+    log("=".repeat(60));
+    log(`abrindo | ${process.platform} ${process.arch} | electron ${process.versions.electron} | chrome ${process.versions.chrome}`);
+
+    const stored: Record<string, unknown> = RendererSettings.plain.plugins?.GoLiveBypass ?? {};
+    const show = (key: string, fallback: string) => (typeof stored[key] === "string" && stored[key] !== "" ? String(stored[key]) : fallback);
+    log(`configuracao | proxy ${show("proxy", "") === "" ? "automatico" : "definido por voce"} | regiao de call ${show("voiceRegion", "automatica")} | regiao de stream ${show("streamRegion", "automatica")} | paises fora ${show("excludedCountries", "BR")}`);
+
     if (bootWasPending()) {
         markBoot(false);
-        log("a abertura anterior nao terminou, entao nao vou aplicar proxy desta vez");
+        log("a abertura anterior nao terminou dentro de 10 minutos, entao nao vou aplicar proxy desta vez");
+        log("isso e a rede de seguranca contra Discord travado; a proxima abertura volta ao normal");
         return;
     }
 
@@ -547,14 +672,19 @@ export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountrie
         return { retried: false as const, reason: "tentativas esgotadas" };
     }
 
-    // Se o proxy que esta no ar ainda responde, a causa foi a corrida: o gateway nasceu antes
-    // dele. Recarregar faz o gateway renascer por tras do proxy, e isso conserta a sessao.
-    let proxy = appliedProxy;
+    const stale = appliedProxy;
+
+    // Na primeira tentativa a causa provavel e a corrida: o gateway nasceu antes de o proxy
+    // ficar pronto, e recarregar por tras do mesmo endereco conserta. Se ele falhou de novo,
+    // insistir nao adianta: o Chromium lembra por alguns minutos de um proxy que falhou e
+    // passa a usar o direct:// da nossa lista, entao a sessao renasceria direta de qualquer
+    // jeito. A partir da segunda tentativa a saida precisa ser outra.
+    let proxy = retries === 0 ? stale : null;
     if (proxy !== null && await probe(proxy) === null) {
         log(`${proxy} parou de responder no meio da sessao`);
-        await clear();
         proxy = null;
     }
+    if (proxy === null && stale !== null) await clear();
 
     // Sem proxy no ar, recarregar cairia no fallback direct:// e repetiria a mesma falha. Aqui
     // nao ha corrida com o gateway para ganhar, entao vale a busca completa em vez dos prazos
@@ -563,14 +693,18 @@ export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountrie
         const excluded = requestedCountries(excludedCountries);
         const manual = manualProxy();
 
-        proxy = (manual !== null && manual !== "" && await probe(manual) !== null ? manual : null)
+        const found = (manual !== null && manual !== "" && await probe(manual) !== null ? manual : null)
             ?? await detectTor(excluded)
             ?? await sharedFreeProxy(excluded);
 
+        // Achar de novo o endereco que acabou de falhar nao ajuda: para o Chromium ele
+        // continua marcado, e a sessao nasceria direta outra vez.
+        proxy = found === stale ? null : found;
+
         if (proxy === null || !await apply(proxy)) {
-            log("nenhum proxy respondeu, a sessao continua direta");
+            log(found === null ? "nenhum proxy respondeu, a sessao continua direta" : "so achei a mesma saida que ja falhou");
             await clear();
-            return { retried: false as const, reason: "nenhum proxy respondeu" };
+            return { retried: false as const, reason: found === null ? "nenhum proxy respondeu" : "sem saida nova" };
         }
     }
 
