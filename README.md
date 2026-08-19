@@ -4,60 +4,63 @@ Plugin para **Equicord** e **Vencord**, feito por um desenvolvedor brasileiro, q
 
 > **English summary below / Resumo em inglês no final.**
 
-## A instalação inteira, do começo ao fim
+## 🌟 NOVO: Interface Gráfica Plug and Play (Apenas Windows)
+
+Criamos um aplicativo completo que faz todo o trabalho de forma **100% automática**, sem precisar abrir terminais, usar scripts ou instalar modificações complexas como o Equicord.
 
 <p align="center">
-  <img src="assets/instalacao.gif" alt="O instalador acha o Equicord, instala o plugin, compila e o Go Live volta a funcionar" width="720">
+  <img src="golive-gui/src/assets/hero.png" alt="Screenshot da Interface Gráfica" width="400">
 </p>
 
-Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e abre o Discord com o Go Live funcionando. **[Começar aqui](#instalação-automática-recomendado)** — ou siga o [passo a passo escrito](#instalação-passo-a-passo-completo) se preferir fazer à mão.
+### ⬇️ Como Baixar e Instalar
+1. Vá na aba de **[Releases](https://github.com/bezumiya/GoLiveBypass/releases)** aqui no GitHub.
+2. Baixe o arquivo mais recente chamado `GoLiveBypass X.X.X.exe`.
+3. Abra o arquivo que você acabou de baixar (ele é portátil, roda direto sem sujar seu PC).
+
+### 🚀 Como Usar
+1. O aplicativo vai detectar o seu Discord automaticamente.
+2. Clique no botão azul **"Ativar GoLiveBypass"**.
+3. O Discord vai reiniciar automaticamente com o Go Live desbloqueado!
+
+> **Dica Importante:** Se a sua transmissão ficar com a tela preta ou não carregar de primeira, basta apertar **Ctrl + R** dentro do Discord para recarregar a tela, e ela voltará a funcionar!
+
+**(Se quiser remover no futuro:** basta abrir o aplicativo novamente e clicar no botão vermelho "Desativar e Restaurar".)
+
+---
 
 ## Índice
 
 **Quero instalar agora**
-
-- [Instalação automática](#instalação-automática-recomendado) — um script faz tudo sozinho, no Windows e no Linux
-- [**Interface Gráfica Standalone (Windows - Novo!)**](#interface-gráfica-standalone-windows---novo) — 1 clique para ativar/desativar sem precisar de scripts ou terminal
+- [**Interface Gráfica Standalone (Windows - Novo!)**](#-novo-interface-gráfica-plug-and-play-apenas-windows) — 1 clique para ativar/desativar sem precisar de scripts ou terminal
+- [Instalação via Plugin (Equicord/Vencord)](#para-quem-prefere-usar-via-plugin-vencordequicord-ou-scripts) — a forma nativa de injetar
 - [Modo Standalone (Scripts)](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — o modo standalone via terminal/scripts
 - [**Linux: Arch, Debian, Ubuntu, Fedora**](#linux-arch-debian-ubuntu-fedora) — onde o Discord fica em cada distro, e a pedra do Node no Debian
 - [Instalação manual, passo a passo](#instalação-passo-a-passo-completo) — se preferir fazer cada etapa à mão
 - [Dependências](#dependências-o-que-baixar-e-como-instalar) — só para o caminho manual
 
 **Já instalei**
-
 - [Configuração](#configuração) — região da call, região da transmissão, proxy
 - [Uso](#uso) — o que fazer depois de instalar
 - [Solução de problemas](#solução-de-problemas) — Discord travado, transmissão que não sobe, plugin sumido
 - [O registro](#o-registro-o-que-o-plugin-anotou) — o arquivo que conta o que aconteceu, para relatar um problema
 
 **Quero entender antes**
-
 - [Por que este plugin existe](#por-que-este-plugin-existe)
 - [Como funciona](#como-funciona) — as duas travas e como cada uma é desarmada
 - [Avisos importantes](#avisos-importantes) — o que o plugin faz com a sua conexão, e os riscos
 
 **Projeto**
-
 - [Estrutura](#estrutura) · [Licença](#licença) · [Autor](#autor) · [Agradecimentos](#agradecimentos)
 
-## Interface Gráfica Standalone (Windows - Novo!)
+---
 
-Se você usa Windows e não quer lidar com terminais, scripts ou mods como Equicord/Vencord, nós criamos uma **interface gráfica completa e Plug and Play**. 
+## Para quem prefere usar via Plugin (Vencord/Equicord) ou Scripts
 
 <p align="center">
-  <img src="golive-gui/src/assets/hero.png" alt="Screenshot da Interface Gráfica" width="400">
+  <img src="assets/instalacao.gif" alt="O instalador acha o Equicord, instala o plugin, compila e o Go Live volta a funcionar" width="720">
 </p>
 
-A versão gráfica **já embute tudo o que você precisa** (Node.js, Electron, Scripts de Injeção). Você não precisa instalar nada no seu computador.
-
-### Como baixar e rodar:
-1. Vá na aba de [**Releases**](https://github.com/bezumiya/GoLiveBypass/releases) aqui no GitHub.
-2. Baixe o arquivo `GoLiveBypass X.X.X.exe`.
-3. Abra o aplicativo (ele é portátil, não instala nada no seu PC).
-4. O aplicativo vai detectar o seu Discord automaticamente. Basta clicar em **Ativar GoLiveBypass**!
-5. Se você quiser remover, abra o aplicativo novamente e clique em **Desativar e Restaurar**.
-
-> **Nota de Segurança:** O aplicativo lida automaticamente com o encerramento dos processos do Discord para evitar erros de arquivo bloqueado (`EBUSY`), e força o contorno do asar-interceptor do Electron para garantir que os arquivos sejam limpos sem travamentos.
+Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e abre o Discord com o Go Live funcionando. **[Começar aqui](#instalação-automática-recomendado)** — ou siga o [passo a passo escrito](#instalação-passo-a-passo-completo) se preferir fazer à mão.
 
 ## Por que este plugin existe
 

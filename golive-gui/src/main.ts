@@ -14,6 +14,7 @@ const statusIndicator = document.getElementById('statusIndicator')!;
 const statusText = document.getElementById('statusText')!;
 const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
 const btnText = document.getElementById('btnText')!;
+const warningAlert = document.getElementById('warningAlert')!;
 
 let currentState = 'INACTIVE';
 
@@ -31,18 +32,22 @@ async function updateStatus() {
       statusText.innerText = 'GoLiveBypass está Ativo';
       btnText.innerText = 'Desativar Bypass';
       toggleBtn.classList.add('deactivate');
+      warningAlert.style.display = 'block';
     } else if (status === 'OTHER_MOD') {
       statusIndicator.classList.add('danger');
       statusText.innerText = 'Outro mod detectado';
       btnText.innerText = 'Sobrescrever e Ativar';
+      warningAlert.style.display = 'none';
     } else if (status === 'NOT_FOUND') {
       statusIndicator.classList.add('danger');
       statusText.innerText = 'Discord não encontrado';
       toggleBtn.disabled = true;
       btnText.innerText = 'Não Disponível';
+      warningAlert.style.display = 'none';
     } else {
       statusText.innerText = 'Discord limpo. Pronto para injetar.';
       btnText.innerText = 'Ativar Bypass';
+      warningAlert.style.display = 'none';
     }
   } catch (err) {
     console.error(err);
