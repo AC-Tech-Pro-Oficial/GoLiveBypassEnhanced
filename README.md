@@ -12,19 +12,19 @@ Criamos um aplicativo completo que faz todo o trabalho de forma **100% automáti
   <img src="golive-gui/src/assets/hero.png" alt="Screenshot da Interface Gráfica" width="400">
 </p>
 
-### ⬇️ Como Baixar e Instalar
+### Como Baixar e Instalar
 1. Vá na aba de **[Releases](https://github.com/bezumiya/GoLiveBypass/releases)** aqui no GitHub.
 2. Baixe o arquivo mais recente chamado `GoLiveBypass X.X.X.exe`.
 3. Abra o arquivo que você acabou de baixar (ele é portátil, roda direto sem sujar seu PC).
 
-### 🚀 Como Usar
+### Como Usar
 1. O aplicativo vai detectar o seu Discord automaticamente.
 2. Clique no botão azul **"Ativar GoLiveBypass"**.
 3. O Discord vai reiniciar automaticamente com o Go Live desbloqueado!
 
 > **Dica Importante:** Se a sua transmissão ficar com a tela preta ou não carregar de primeira, basta apertar **Ctrl + R** dentro do Discord para recarregar a tela, e ela voltará a funcionar!
 
-**(Se quiser remover no futuro:** basta abrir o aplicativo novamente e clicar no botão vermelho "Desativar e Restaurar".)
+
 
 ---
 
