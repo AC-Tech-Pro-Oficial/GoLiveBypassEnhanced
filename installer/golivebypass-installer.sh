@@ -8,6 +8,7 @@
 # Uso:
 #   ./golivebypass-installer.sh
 #   ./golivebypass-installer.sh --source ~/Equicord
+#   ./golivebypass-installer.sh --plugin-source ~/GoLiveBypass/goLiveBypass
 #   ./golivebypass-installer.sh --mod vencord --yes
 #   ./golivebypass-installer.sh --uninstall
 #
@@ -25,6 +26,10 @@ VENCORD_GIT="https://github.com/Vendicated/Vencord"
 MODE="menu"
 MOD=""
 SOURCE=""
+# Instala o plugin de uma pasta local em vez de baixar do GitHub, para testar uma mudanca
+# antes de publicar. Sem isto o instalador sempre traz o que esta no repositorio, e um teste
+# feito assim mede a versao errada sem avisar.
+PLUGIN_SOURCE=""
 ASSUME_YES=0
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,6 +81,7 @@ while [ $# -gt 0 ]; do
         --restore) MODE="restore" ;;
         --mod) MOD="${2:-}"; shift ;;
         --source) SOURCE="${2:-}"; shift ;;
+        --plugin-source) PLUGIN_SOURCE="${2:-}"; shift ;;
         --yes|-y) ASSUME_YES=1 ;;
         --help|-h) usage ;;
         *) fail "Opcao desconhecida: $1" ;;
@@ -91,15 +97,42 @@ is_checkout() {
     [ -f "$1/src/utils/types.ts" ]
 }
 
+# Procura o app.asar de verdade em vez de confiar numa lista de caminhos.
+#
+# Desde a versao 1.0.136, de maio de 2026, o pacote de Linux do Discord (tar.gz, .deb, o
+# oficial do Arch e o RPM) traz SO um bootstrap: o app de verdade, com o app.asar, e baixado na
+# primeira execucao para dentro do HOME. Quem so olha /usr/share e /opt nao acha Discord nenhum
+# numa instalacao atual.
 discord_resources() {
-    local dir
-    for dir in \
-        /usr/share/discord /usr/share/discord-canary /usr/share/discord-ptb \
-        /opt/discord /opt/Discord /opt/discord-canary /opt/discord-ptb \
-        /usr/lib/discord /usr/lib64/discord \
-        "$HOME/.local/share/discord" "$HOME/.local/share/DiscordCanary"
+    local raiz sub base
+
+    base="${XDG_CONFIG_HOME:-$HOME/.config}"
+    for sub in \
+        "$base"/discord/app-*/resources \
+        "$base"/discordptb/app-*/resources \
+        "$base"/discordcanary/app-*/resources
     do
-        [ -d "$dir/resources" ] && printf '%s\n' "$dir/resources"
+        if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+            printf '%s\n' "$sub"
+        fi
+    done
+
+    # Pacotes que ainda embutem o app: discord_arch_electron e os AUR de PTB e Canary.
+    for raiz in \
+        /usr/share/discord /usr/share/discord-ptb /usr/share/discord-canary \
+        /usr/lib/discord /usr/lib/discord-ptb /usr/lib/discord-canary /usr/lib64/discord \
+        /opt/discord /opt/Discord /opt/discord-ptb /opt/discord-canary \
+        /usr/local/share/discord \
+        "$HOME/.local/share/discord" "$HOME/Discord" "$HOME/discord" \
+        "$HOME/.local/share/DiscordPTB" "$HOME/.local/share/DiscordCanary"
+    do
+        [ -d "$raiz" ] || continue
+        for sub in "$raiz/resources" "$raiz"; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                printf '%s\n' "$sub"
+                break
+            fi
+        done
     done
     return 0
 }
@@ -235,28 +268,96 @@ choose_mod() {
     esac
 }
 
+os_field() {
+    [ -r /etc/os-release ] || return 0
+    sed -n "s/^$1=//p" /etc/os-release | tr -d '"' | head -1
+    return 0
+}
+
+# Detectado pelo binario, e nao pelo ID da distro: derivada de Arch e de Ubuntu aparece toda
+# semana, e o pacman nao muda de nome por causa disso.
+package_manager() {
+    have pacman  && { printf 'pacman\n';  return 0; }
+    have apt-get && { printf 'apt\n';     return 0; }
+    have dnf     && { printf 'dnf\n';     return 0; }
+    have zypper  && { printf 'zypper\n';  return 0; }
+    have apk     && { printf 'apk\n';     return 0; }
+    printf 'desconhecido\n'
+    return 0
+}
+
+install_cmd() {
+    case "$(package_manager)" in
+        pacman) printf 'sudo pacman -S --needed %s\n' "$*" ;;
+        apt)    printf 'sudo apt-get install -y %s\n' "$*" ;;
+        dnf)    printf 'sudo dnf install -y %s\n' "$*" ;;
+        zypper) printf 'sudo zypper install -y %s\n' "$*" ;;
+        apk)    printf 'sudo apk add %s\n' "$*" ;;
+        *)      printf '' ;;
+    esac
+    return 0
+}
+
+node_major() {
+    local v=""
+    have node && v="$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p' | head -1)"
+    printf '%s\n' "${v:-0}"
+    return 0
+}
+
+# O Node do Debian estavel e do Ubuntu LTS costuma ser mais antigo que 22, e o build so quebra
+# la na frente, com um erro que nao diz "seu Node e velho". Melhor barrar aqui e explicar.
+node_velho_ajuda() {
+    printf '\n  %sO Equicord precisa do Node 22 ou mais novo, e o seu e o %s.%s\n' "$C_YELLOW" "$(node_major)" "$C_OFF" >&2
+    case "$(package_manager)" in
+        pacman)
+            printf '  %sNo Arch o pacote nodejs ja e atual. Rode: sudo pacman -Syu nodejs npm%s\n' "$C_DIM" "$C_OFF" >&2 ;;
+        apt)
+            printf '  %sO pacote do Debian/Ubuntu e antigo demais. Duas saidas:%s\n' "$C_DIM" "$C_OFF" >&2
+            printf '  %s  1) nvm:  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash%s\n' "$C_DIM" "$C_OFF" >&2
+            printf '  %s           depois: nvm install 22%s\n' "$C_DIM" "$C_OFF" >&2
+            printf '  %s  2) NodeSource: https://github.com/nodesource/distributions%s\n' "$C_DIM" "$C_OFF" >&2 ;;
+        dnf)
+            printf '  %sNo Fedora: sudo dnf module reset nodejs && sudo dnf module enable nodejs:22%s\n' "$C_DIM" "$C_OFF" >&2 ;;
+        *)
+            printf '  %sInstale o Node 22 pelo nvm ou pelo fnm.%s\n' "$C_DIM" "$C_OFF" >&2 ;;
+    esac
+    return 0
+}
+
 ensure_toolchain() {
-    local need_git="$1" missing=()
+    local need_git="$1" faltando=()
 
-    [ "$need_git" -eq 1 ] && ! have git && missing+=("git")
-    have node || missing+=("node")
+    [ "$need_git" -eq 1 ] && ! have git && faltando+=("git")
+    have node || faltando+=("nodejs")
+    have npm  || faltando+=("npm")
 
-    if [ ${#missing[@]} -gt 0 ]; then
-        warn "Faltando: ${missing[*]}"
+    if [ ${#faltando[@]} -gt 0 ]; then
+        warn "Faltando: ${faltando[*]}"
 
-        local pkgs=()
-        local tool
-        for tool in "${missing[@]}"; do
-            if [ "$tool" = "node" ]; then pkgs+=("nodejs"); else pkgs+=("$tool"); fi
-        done
+        local cmd
+        cmd="$(install_cmd "${faltando[@]}")"
+        if [ -z "$cmd" ]; then
+            printf '  %sNao reconheci o gerenciador de pacotes. Instale na mao: %s%s\n' "$C_DIM" "${faltando[*]}" "$C_OFF" >&2
+            fail "Instale o que falta e rode de novo."
+        fi
 
-        printf '  %sInstale com o gerenciador da sua distro, por exemplo:%s\n' "$C_DIM" "$C_OFF" >&2
-        printf '  %s  sudo apt install %s%s\n' "$C_DIM" "${pkgs[*]}" "$C_OFF" >&2
-        printf '  %s  sudo pacman -S %s%s\n' "$C_DIM" "${pkgs[*]}" "$C_OFF" >&2
-        printf '  %s  sudo dnf install %s%s\n' "$C_DIM" "${pkgs[*]}" "$C_OFF" >&2
-        printf '\n  %sO Node precisa ser 22 ou mais novo. O pacote da distro costuma ser mais%s\n' "$C_DIM" "$C_OFF" >&2
-        printf '  %santigo que isso; nesse caso use nvm, fnm ou o repositorio do NodeSource.%s\n' "$C_DIM" "$C_OFF" >&2
-        fail "Instale o que falta e rode de novo."
+        printf '  %sSua distro: %s%s\n' "$C_DIM" "$(os_field PRETTY_NAME)" "$C_OFF" >&2
+        printf '  %sComando: %s%s\n' "$C_DIM" "$cmd" "$C_OFF" >&2
+
+        # Rodar por conta propria um comando com sudo seria abuso de confianca; perguntar antes
+        # e o minimo, e quem preferir faz na mao com o comando ali em cima.
+        if confirm "Posso rodar isso agora?"; then
+            eval "$cmd" || fail "A instalacao das dependencias falhou. Rode na mao: $cmd"
+            hash -r 2>/dev/null || true
+        else
+            fail "Instale o que falta e rode de novo."
+        fi
+    fi
+
+    if [ "$(node_major)" -lt 22 ]; then
+        node_velho_ajuda
+        fail "Atualize o Node e rode de novo."
     fi
 
     if ! have_pnpm && have corepack; then
@@ -264,10 +365,19 @@ ensure_toolchain() {
         corepack enable >/dev/null 2>&1 || true
     fi
 
+    # No Arch o pnpm e um pacote como qualquer outro, e sai mais limpo que um -g do npm em
+    # /usr/lib, que fica fora do controle do pacman.
+    if ! have_pnpm && [ "$(package_manager)" = "pacman" ]; then
+        step "Instalando o pnpm pelo pacman"
+        sudo pacman -S --needed --noconfirm pnpm >/dev/null 2>&1 || true
+        hash -r 2>/dev/null || true
+    fi
+
     if ! have_pnpm; then
         # O npm instala o pnpm direto, sem a conferencia de assinatura que derruba o corepack.
         step "O corepack nao entregou um pnpm que roda, instalando pelo npm"
         npm install -g pnpm >/dev/null 2>&1 || sudo npm install -g pnpm >/dev/null 2>&1 || true
+        hash -r 2>/dev/null || true
     fi
 
     have_pnpm || fail 'Nao consegui deixar o pnpm funcionando. Rode: sudo npm install -g pnpm'
@@ -343,8 +453,19 @@ copy_plugin() {
     rm -f "$target/index.ts"
 
     for file in "${PLUGIN_FILES[@]}"; do
-        repo_file "$file" > "$target/$(basename "$file")"
+        if [ -n "$PLUGIN_SOURCE" ]; then
+            [ -f "$PLUGIN_SOURCE/$(basename "$file")" ] || fail "Nao achei $(basename "$file") em $PLUGIN_SOURCE."
+            cp "$PLUGIN_SOURCE/$(basename "$file")" "$target/$(basename "$file")"
+        else
+            repo_file "$file" > "$target/$(basename "$file")"
+        fi
     done
+
+    # `&&` sozinho como ultima linha deixaria a funcao com o codigo de saida do teste, e sob
+    # `set -e` uma pasta vazia derrubaria o instalador inteiro.
+    if [ -n "$PLUGIN_SOURCE" ]; then
+        warn "Plugin copiado de $PLUGIN_SOURCE, e nao do GitHub."
+    fi
 }
 
 build_mod() {

@@ -7,6 +7,7 @@
     Uso:
       .\GoLiveBypass-Installer.ps1
       .\GoLiveBypass-Installer.ps1 -Source "C:\caminho\do\Equicord"
+      .\GoLiveBypass-Installer.ps1 -PluginSource "C:\caminho\do\GoLiveBypass\goLiveBypass"
       .\GoLiveBypass-Installer.ps1 -Mod Equicord -Yes
       .\GoLiveBypass-Installer.ps1 -Mode Uninstall
 
@@ -23,6 +24,11 @@ param(
     [string] $Mod = '',
 
     [string] $Source = '',
+
+    # Instala o plugin de uma pasta local em vez de baixar do GitHub. Serve para testar uma
+    # mudanca antes de publicar: sem isto o instalador sempre traz o que esta no repositorio,
+    # e um teste feito assim mede a versao errada sem avisar.
+    [string] $PluginSource = '',
 
     [switch] $Yes
 )
@@ -376,8 +382,18 @@ function Copy-Plugin($root) {
     if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
 
     foreach ($file in $PluginFiles) {
-        Save-Text (Join-Path $target (Split-Path -Leaf $file)) (Get-RepoFile $file)
+        $leaf = Split-Path -Leaf $file
+        if ($PluginSource -eq '') {
+            Save-Text (Join-Path $target $leaf) (Get-RepoFile $file)
+            continue
+        }
+
+        $local = Join-Path $PluginSource $leaf
+        if (-not (Test-Path -LiteralPath $local)) { throw "Nao achei $leaf em $PluginSource." }
+        Copy-Item -LiteralPath $local -Destination (Join-Path $target $leaf) -Force
     }
+
+    if ($PluginSource -ne '') { Write-Warn "Plugin copiado de $PluginSource, e nao do GitHub." }
 }
 
 function Build-Mod($root) {
