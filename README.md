@@ -34,6 +34,7 @@ O Windows pode mostrar um aviso do SmartScreen na primeira vez, porque o program
 
 **Quero instalar agora**
 - [**Interface Gráfica Standalone (Windows - Novo!)**](#-novo-interface-gráfica-plug-and-play-apenas-windows) — 1 clique para ativar/desativar sem precisar de scripts ou terminal
+- [**Instalação por um comando só**](#um-comando-só) — uma linha no PowerShell ou no terminal, sem baixar nada
 - [Instalação via Plugin (Equicord/Vencord)](#para-quem-prefere-usar-via-plugin-vencordequicord-ou-scripts) — a forma nativa de injetar
 - [Modo Standalone (Scripts)](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — o modo standalone via terminal/scripts
 - [**Linux: Arch, Debian, Ubuntu, Fedora**](#linux-arch-debian-ubuntu-fedora) — onde o Discord fica em cada distro, e a pedra do Node no Debian
