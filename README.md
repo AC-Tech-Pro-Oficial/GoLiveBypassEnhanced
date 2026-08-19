@@ -640,6 +640,12 @@ Ele escreveu o primeiro instalador do GoLiveBypass por conta própria, e foi ele
 que dava para automatizar tudo isso num script só. O instalador que está aqui hoje nasceu
 desse trabalho.
 
+**Obrigado ao [cleo-dev](https://github.com/cleo-dev)** pela interface gráfica.
+
+Ele construiu o aplicativo inteiro, do zero, e com ele o projeto passou a alcançar quem nunca
+vai abrir um terminal — que sempre foi a maior barreira aqui. Antes disso, usar o GoLiveBypass
+exigia entender o que é um checkout, um gerenciador de pacotes e uma etapa de compilação.
+
 # English
 
 **GoLiveBypass** is an **Equicord/Vencord** plugin, made by a Brazilian developer, that **restores Go Live and camera for Brazilian Discord users**: it boots Discord entirely behind a proxy outside Brazil (Tor or a tested, automatically fetched free proxy) **on every launch and reload**, so Discord's region gate — evaluated once at voice-channel join using the gateway WebSocket origin IP, and never re-evaluated mid-call — unlocks the features. The proxy is dropped once the session opens, restoring a direct connection. As a bonus, your real IP stays hidden during authentication.
