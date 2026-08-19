@@ -13,9 +13,11 @@ Criamos um aplicativo completo que faz todo o trabalho de forma **100% automáti
 </p>
 
 ### Como Baixar e Instalar
-1. Vá na aba de **[Releases](https://github.com/bezumiya/GoLiveBypass/releases)** aqui no GitHub.
-2. Baixe o arquivo mais recente chamado `GoLiveBypass 1.0.0.exe` (ou versão superior).
+1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)** aqui no GitHub.
+2. Baixe o **`GoLiveBypass-GUI.exe`**, na lista de arquivos no fim da página.
 3. Abra o arquivo que você acabou de baixar (ele é portátil, roda direto sem sujar seu PC).
+
+O Windows pode mostrar um aviso do SmartScreen na primeira vez, porque o programa não é assinado. Se quiser abrir mesmo assim, é em **Mais informações → Executar assim mesmo**. Se preferir não correr esse risco, use a [instalação por comando](#instalação-automática-recomendado), que é o mesmo bypass sem executável.
 
 ### Como Usar
 1. O aplicativo vai detectar o seu Discord automaticamente.
