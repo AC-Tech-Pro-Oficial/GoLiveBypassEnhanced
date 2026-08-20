@@ -276,3 +276,19 @@ p {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+.startup-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.startup-row input {
+  accent-color: var(--primary);
+  cursor: pointer;
+}

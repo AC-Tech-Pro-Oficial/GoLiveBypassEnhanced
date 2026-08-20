@@ -16,7 +16,7 @@ Criamos um aplicativo completo que faz todo o trabalho de forma **100% automáti
 
 ### Como Baixar e Instalar
 1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)** aqui no GitHub.
-2. Baixe o **`GoLiveBypass-GUI.exe`**, na lista de arquivos no fim da página.
+2. Baixe o **`GoLiveBypass.exe`**, na lista de arquivos no fim da página.
 3. Abra o arquivo que você acabou de baixar (ele é portátil, roda direto sem sujar seu PC).
 
 O Windows pode mostrar um aviso do SmartScreen na primeira vez, porque o programa não é assinado. Se quiser abrir mesmo assim, é em **Mais informações → Executar assim mesmo**. Se preferir não correr esse risco, use a [instalação por comando](#um-comando-só), que é o mesmo bypass sem executável.
@@ -25,6 +25,8 @@ O Windows pode mostrar um aviso do SmartScreen na primeira vez, porque o program
 1. O aplicativo vai detectar o seu Discord automaticamente.
 2. Clique no botão azul **"Ativar GoLiveBypass"**.
 3. O Discord vai reiniciar automaticamente com o Go Live desbloqueado!
+4. Pode fechar a janela sem medo: o app fica na **bandeja**, junto do relógio do Windows. Clique no ícone de lá para reabrir, ativar/desativar ou **Sair** — sair pela bandeja é o que reverte tudo ao normal.
+5. Se quiser que ele já abra com o PC (direto na bandeja, sem janela pulando na tela), marque **"Iniciar com o Windows"** na janela ou no menu da bandeja.
 
 > **Dica Importante:** Se a sua transmissão ficar com a tela preta ou não carregar de primeira, basta apertar **Ctrl + R** dentro do Discord para recarregar a tela, e ela voltará a funcionar!
 
@@ -630,8 +632,9 @@ standalone/
 ├── GoLiveBypass-Standalone.ps1    # Windows: instala direto no Discord
 └── golivebypass-standalone.sh     # Linux: o mesmo
 
-golive-gui/                        # app Electron de um clique (Windows): injeta o standalone
-                                   #   e reverte ao fechar a janela; scripts/sync-bypass.mjs mantém
+golive-gui/                        # app Electron de um clique (Windows): injeta o standalone,
+                                   #   mora na bandeja e reverte ao sair pelo ícone de lá;
+                                   #   scripts/sync-bypass.mjs mantém
                                    #   a cópia embutida idêntica ao standalone
 
 assets/

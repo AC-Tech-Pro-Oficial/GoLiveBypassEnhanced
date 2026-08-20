@@ -6,6 +6,9 @@ declare global {
       activate: (proxy?: string) => Promise<void>;
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
+      getStartup: () => Promise<boolean>;
+      setStartup: (enabled: boolean) => Promise<void>;
+      onRefreshStartup: (callback: () => void) => void;
     }
   }
 }
@@ -16,6 +19,7 @@ const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
 const btnText = document.getElementById('btnText')!;
 const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
+const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 
 let currentState = 'INACTIVE';
 
@@ -79,3 +83,19 @@ toggleBtn.addEventListener('click', async () => {
 
 // Inicialização
 updateStatus();
+refreshStartup();
+
+async function refreshStartup() {
+  try {
+    startupToggle.checked = await window.api.getStartup();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+startupToggle.addEventListener('change', async () => {
+  await window.api.setStartup(startupToggle.checked);
+});
+
+// A bandeja tambem tem esse controle; sem o aviso, os dois ficariam dessincronizados.
+window.api.onRefreshStartup(refreshStartup);

@@ -13,11 +13,20 @@
   "build": {
     "appId": "com.golivebypass.gui",
     "productName": "GoLiveBypass",
+    "files": [
+      "dist",
+      "dist-electron",
+      "assets"
+    ],
     "directories": {
       "output": "dist-app"
     },
     "win": {
-      "target": "portable"
+      "target": "portable",
+      "icon": "build/icon.ico"
+    },
+    "portable": {
+      "artifactName": "${productName}.${ext}"
     }
   },
   "devDependencies": {
