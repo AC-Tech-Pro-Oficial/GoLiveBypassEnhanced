@@ -607,7 +607,7 @@ O instalador abre uma janelinha perguntando **qual Discord** você usa (Stable, 
 
 1. Abra o Discord
 2. Vá em **Configurações → Equicord (ou Vencord) → Plugins** e ative **GoLiveBypass**
-3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso abaixo antes de mudar)
+3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso na seção [Configuração](#configuração) antes de mudar)
 4. Reinicie o Discord por completo (bandeja, Quit). O roteador local sobe antes do gateway conectar, e só ele passa pela proxy
 5. Entre num canal de voz: **Go Live e câmera liberados**. Quem escolhe o servidor de voz é o Discord, e pode não ser o brasileiro. Não force `brazil` em **Voice region** sem ler o aviso na seção Configuração
 
@@ -674,7 +674,7 @@ Isso gera a pasta `dist/` com o Vencord modificado já incluindo o plugin.
 
 1. Abra o Vesktop
 2. Vá em **Configurações → Vencord → Plugins** e ative **GoLiveBypass**
-3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso abaixo antes de mudar)
+3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso na seção [Configuração](#configuração) antes de mudar)
 4. Reinicie o Vesktop por completo (bandeja, Quit)
 5. Entre num canal de voz: **Go Live e câmera liberados**
 
@@ -752,6 +752,12 @@ pasta do bypass para o sandbox com `flatpak override`, e documentou cada pegadin
 que um `flatpak update` refaz o deploy inteiro e leva a injeção junto, então é preciso rodar
 o instalador de novo depois de atualizar.
 
+**Obrigado à [StellaThimoty](https://github.com/StellaThimoty) e ao [pdl-clay](https://github.com/pdl-clay)** pelo caminho do Vesktop.
+
+Ela abriu a issue mostrando que dava para instalar o plugin no Vesktop apontando o "Vencord
+Location" para um build manual — e testou até funcionar. Ele transformou o relato dela no
+passo a passo completo que está no README, com direito à pegadinha do Flatpak.
+
 # English
 
 **GoLiveBypass** is an **Equicord/Vencord** plugin, made by a Brazilian developer, that **restores Go Live and camera for Brazilian Discord users**. On every launch it brings up a small local SOCKS router (loopback only) and points only Discord's gateway WebSocket hosts at it; the router carries that traffic through an exit outside Brazil — your own proxy, a local Tor, or a free proxy picked and tested for you — while **everything else stays direct at full speed**. Discord's region gate, evaluated once at voice-channel join from the gateway origin IP and never re-evaluated mid-call, then unlocks Go Live and camera. As a bonus, the login itself can optionally be routed too, hiding your real IP during authentication.
@@ -767,5 +773,5 @@ It was written after Brazil's data protection authority (ANPD) [ordered Discord 
 - It cannot leave you unable to open Discord: the fallback decision lives inside the local router, not in the PAC (no `PROXY;DIRECT` for Chromium to silently prefer), a per-connection 12s stall budget fails open to direct, reserve exits take over mid-session, and a system proxy policy that varies per host (corporate PAC) makes the plugin refuse to enable rather than trample it.
 - Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings. On **Vesktop**, skip `pnpm inject` and point Vesktop's *Vencord Location* at your build's `dist` folder instead (see [Instalação no Vesktop](#instalação-no-vesktop)).
 - Made by **bezumiya** — [GitHub](https://github.com/bezumiya/GoLiveBypass), [Twitter](https://twitter.com/obezumiya), Discord `1366453661970071633`.
-- Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[shubh2294](https://github.com/shubh2294)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override.
+- Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[shubh2294](https://github.com/shubh2294)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override. Thanks to **[StellaThimoty](https://github.com/StellaThimoty)** for finding and testing the manual Vesktop path, and to **[pdl-clay](https://github.com/pdl-clay)** for turning it into the step-by-step guide in this README.
 - License: GPL-3.0-or-later.
