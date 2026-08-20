@@ -8,48 +8,75 @@ import { NativeSettings, RendererSettings } from "@main/settings";
 import { app, IpcMainInvokeEvent, session } from "electron";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { request } from "https";
-import { connect, Socket } from "net";
+import { AddressInfo, connect, createServer, Server, Socket } from "net";
 import { dirname, join } from "path";
 import { connect as connectTls } from "tls";
 
 const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
-const GEO_HOST = "cloudflare.com";
 const DISCORD_HOST = "discord.com";
+
+// O trace da Cloudflare (~200 bytes) confirma tunel, TLS valido e pais de saida numa conexao
+// so. O ifconfig.co que estava aqui devolvia um JSON inteiro e, pior, um 429 dele nao casava
+// o padrao e uma candidata boa era descartada como pais desconhecido.
+const TRACE_HOST = "cloudflare.com";
+const TRACE_PATH = "/cdn-cgi/trace";
+
+// Os unicos hosts que precisam passar pela saida: e na conexao do gateway que o servidor
+// decide se a conta pode transmitir. Imagem, anexo, GIF, video incorporado e a propria voz
+// nunca encostam nela. Os hosts de login so entram na lista quando a pessoa pede, pela
+// setting sessionRouting: esconde o IP real na autenticacao, ao custo de uma abertura lenta.
+const GATEWAY_HOSTS = ["gateway.discord.gg", "remote-auth-gateway.discord.gg"];
+const LOGIN_HOSTS = ["discord.com", "canary.discord.com", "ptb.discord.com"];
 
 const MAX_LIST_BYTES = 1024 * 1024;
 const PROBE_TIMEOUT_MS = 6000;
-const PARALLEL_PROBES = 10;
-const MAX_CANDIDATES = 40;
+
+// Prazo curto para as checagens no caminho de abertura: cada segundo aqui sai do orcamento
+// que segura o gateway a espera de uma saida.
+const WARM_PROBE_TIMEOUT_MS = 2500;
+
+const PARALLEL_PROBES = 12;
+const MAX_CANDIDATES = 48;
 const MIN_UPTIME = 90;
 const MAX_LISTED_TIMEOUT = 1500;
-const SESSION_DEADLINE_MS = 120_000;
+
 // Portas SOCKS de clientes Tor, em ordem de preferencia: 9052 e a porta comum de um Tor
 // configurado a mao com bridge, e as outras sao Tor Browser, daemon e Brave. Uma porta
 // fechada recusa na hora, entao tentar as quatro nao custa relogio nenhum.
 const TOR_PORTS = [9052, 9150, 9050, 9250];
 const TOR_PORT_TIMEOUT_MS = 400;
+
+const POOL_SIZE = 5;
+const POOL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 const MAX_LOG_LINES = 400;
 const MAX_LOG_BYTES = 256 * 1024;
 const MAX_RETRIES = 2;
-const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const BOOT_MARK_MAX_AGE_MS = 10 * 60 * 1000;
-const BOOT_PROBE_TIMEOUT_MS = 2500;
+
+// Quanto uma conexao de gateway espera por uma saida antes de sair direta. Segurar para
+// sempre travaria o login; soltar na hora perderia a corrida em toda abertura fria. Se
+// estourar, perde-se o Go Live daquela sessao, nunca o Discord.
+const STALL_BUDGET_MS = 12_000;
+
+// Menores que o teste de candidata: uma saida agonizante que demora a falhar no trafego vivo
+// faria o Chromium desistir do roteador inteiro.
+const RELAY_TUNNEL_TIMEOUT_MS = 2500;
+const RELAY_DIRECT_TIMEOUT_MS = 8000;
+
 const INTERCEPTING_PORTS = new Set([4145]);
 
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
 const PROXY_RULES_RE = /^(socks5|https?):\/\/(?:(.+)@)?([a-z0-9.-]{1,253}):(\d{1,5})$/;
-// Os unicos hosts que precisam passar pelo proxy: e na conexao do gateway que o servidor
-// decide se a conta pode transmitir. Imagem, anexo, GIF, video incorporado e a propria voz
-// nunca encostam nele.
-const GATEWAY_HOSTS = ["gateway.discord.gg", "remote-auth-gateway.discord.gg"];
 
-let appliedProxy: string | null = null;
-let deadline: ReturnType<typeof setTimeout> | undefined;
+export type Scope = "login" | "gateway" | "off";
 
-const history: string[] = [];
-
-let retries = 0;
+interface PoolEntry {
+    proxy: string;
+    country: string;
+    ms: number;
+    at: number;
+}
 
 // A pasta e a mesma que o modo standalone usa. Quem experimentou os dois acha um arquivo so,
 // em vez de descobrir depois que estava lendo o registro do outro.
@@ -62,6 +89,10 @@ function logDir() {
 }
 
 const LOG_FILE = logDir() === null ? null : join(logDir() as string, "golivebypass.log");
+
+const history: string[] = [];
+
+let retries = 0;
 
 function log(message: string) {
     const line = `${new Date().toISOString().slice(11, 23)} ${message}`;
@@ -127,205 +158,81 @@ function safeProxy(proxyRules: string) {
     return `${parsed.scheme}://${credentials}${parsed.host}:${parsed.port}`;
 }
 
-function markBoot(pending: boolean) {
-    NativeSettings.store.plugins.GoLiveBypass ??= {};
-    NativeSettings.store.plugins.GoLiveBypass.bootPending = pending ? Date.now() : 0;
+function pluginSettings() {
+    return RendererSettings.plain.plugins?.GoLiveBypass;
 }
 
-function bootWasPending() {
-    const mark: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.bootPending;
-    if (mark === true) return true;
-    if (typeof mark !== "number" || mark === 0) return false;
-
-    // A marca so e limpa quando o proxy e solto, entao fechar o Discord antes disso, mesmo
-    // depois de horas de uso, deixava ela de pe e a abertura seguinte recusava proxy em
-    // silencio. Uma abertura que travou de verdade e reaberta em minutos, nao em horas.
-    return Date.now() - mark < BOOT_MARK_MAX_AGE_MS;
+function pluginEnabled() {
+    return pluginSettings()?.enabled === true;
 }
 
-function listening(port: number, timeoutMs: number): Promise<boolean> {
-    return new Promise(resolve => {
-        const socket = connect({ host: "127.0.0.1", port });
-        const finish = (open: boolean) => {
-            socket.destroy();
-            resolve(open);
-        };
+// Tres respostas: campo vazio (procure sozinho), endereco bom (use este), lixo (nao invente
+// uma saida que a pessoa nao escolheu: invalido nao pode virar "vazio", ou a sessao cairia
+// na lista gratuita sem a pessoa saber).
+function manualProxy(): { proxy: string; } | "auto" | "invalid" {
+    const proxy = pluginSettings()?.proxy;
+    if (typeof proxy !== "string" || proxy.trim() === "") return "auto";
 
-        socket.setTimeout(timeoutMs, () => finish(false));
-        socket.once("connect", () => finish(true));
-        socket.on("error", () => finish(false));
-    });
-}
-
-function readCachedProxy() {
-    const cache: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.verifiedProxy;
-    if (typeof cache !== "object" || cache === null) return null;
-
-    const { proxy, at } = cache as { proxy?: unknown; at?: unknown; };
-    if (typeof proxy !== "string" || parseProxy(proxy) === null) return null;
-    if (typeof at !== "number" || Date.now() - at > CACHE_MAX_AGE_MS) return null;
-
-    return proxy;
-}
-
-function storeCachedProxy(proxy: string) {
-    NativeSettings.store.plugins.GoLiveBypass ??= {};
-    NativeSettings.store.plugins.GoLiveBypass.verifiedProxy = { proxy, at: Date.now() };
+    const trimmed = proxy.trim();
+    return parseProxy(trimmed) === null ? "invalid" : { proxy: trimmed };
 }
 
 function excludedCountries() {
-    const raw: unknown = RendererSettings.plain.plugins?.GoLiveBypass?.excludedCountries;
+    const raw: unknown = pluginSettings()?.excludedCountries;
     const codes = typeof raw === "string" ? raw.split(",") : ["BR"];
 
     return new Set(codes.map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code)));
 }
 
-async function bootProxy() {
-    const manual = manualProxy();
-    if (manual === null) {
-        log("o proxy do campo Proxy nao e valido, nada foi aplicado");
-        return "";
-    }
-    if (manual !== "") {
-        // Sem testar, um proxy fora do ar viraria conexao direta pelo fallback direct:// e o
-        // bypass falharia em silencio, que foi exatamente o que aconteceu com o Tor fechado.
-        const started = Date.now();
-        if (await probe(manual, BOOT_PROBE_TIMEOUT_MS) !== null) {
-            log(`seu proxy respondeu em ${Date.now() - started}ms: ${safeProxy(manual)}`);
-            return manual;
-        }
-
-        log(`seu proxy nao respondeu: ${safeProxy(manual)}`);
-        log("se for Tor, ele precisa estar aberto ANTES do Discord. Procurando alternativa.");
-    }
-
-    for (const port of TOR_PORTS) {
-        const tor = `socks5://127.0.0.1:${port}`;
-        if (!await listening(port, TOR_PORT_TIMEOUT_MS)) continue;
-
-        if (await probe(tor, BOOT_PROBE_TIMEOUT_MS) !== null) {
-            log(`Tor local encontrado na porta ${port}`);
-            return tor;
-        }
-        log(`porta ${port} aberta mas nao respondeu como proxy, ignorando`);
-    }
-
-    // Sem Tor local a escolha de uma proxy gratuita levaria dezenas de segundos, e o gateway
-    // conecta antes disso. Reaproveitar a ultima que funcionou resolve, desde que ela seja
-    // testada de novo agora: aplicar uma proxy morta as cegas foi o que travava o Discord.
-    const cached = readCachedProxy();
-    if (cached !== null) {
-        const started = Date.now();
-        if (await probe(cached, BOOT_PROBE_TIMEOUT_MS) !== null) {
-            log(`proxy guardada revalidada em ${Date.now() - started}ms: ${cached}`);
-            return cached;
-        }
-        log("a proxy guardada morreu, procurando outra");
-    }
-
-    log("procurando uma proxy nova, isso demora e o gateway pode conectar antes");
-    const picked = await sharedFreeProxy(excludedCountries());
-    log(picked === null ? "nenhuma proxy passou nos testes" : `proxy escolhida: ${picked}`);
-
-    return picked ?? "";
+// O renderer manda a propria lista nas chamadas que ele inicia: e a copia que a pessoa esta
+// vendo agora. O nome do parametro cobre o da funcao acima dentro daquelas funcoes, entao a
+// leitura das settings precisa de nome proprio.
+function requestedCountries(raw: unknown) {
+    return new Set(
+        typeof raw === "string"
+            ? raw.split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
+            : []
+    );
 }
 
-function manualProxy() {
-    const settings = RendererSettings.plain.plugins?.GoLiveBypass;
-    if (settings?.enabled !== true) return null;
-
-    const { proxy } = settings;
-    if (typeof proxy !== "string" || proxy.trim() === "") return "";
-
-    // Invalido nao pode virar "vazio": cair na lista gratuita mandaria a sessao para um proxy
-    // que a pessoa nunca escolheu.
-    return parseProxy(proxy.trim()) === null ? null : proxy.trim();
+function routesLogin() {
+    return pluginSettings()?.sessionRouting === "login";
 }
 
-// Traduz o endereco para a diretiva que o PAC entende. Um proxy HTTP e "PROXY", um SOCKS4 e
-// "SOCKS", e so o SOCKS5 tem nome proprio.
-function pacDirective(proxy: string) {
-    const parsed = parseProxy(proxy);
-    if (parsed === null) return null;
-
-    // O campo Proxy so aceita socks5, http e https, entao nao ha caso de SOCKS4 para tratar.
-    return `${parsed.scheme === "socks5" ? "SOCKS5" : "PROXY"} ${parsed.host}:${parsed.port}`;
-}
-
-// So os hosts de gateway atravessam o proxy. O gate e decidido na conexao do gateway, entao
-// mandar o resto junto nao compra nada e custa velocidade em imagem, anexo, GIF e video
-// incorporado, que e o que o usuario sente.
-async function pacFor(proxy: string) {
-    const directive = pacDirective(proxy);
-    if (directive === null) return null;
-
-    let fallback = "DIRECT";
+function readPool(): PoolEntry[] {
+    let stored: unknown;
     try {
-        // Lido antes de instalar a nossa regra, senao leriamos a nossa propria. Quem esta atras
-        // de proxy corporativo perderia o Discord se isto virasse DIRECT na marra.
-        const resolved = await session.defaultSession.resolveProxy(`https://${DISCORD_HOST}`);
-        if (typeof resolved === "string" && resolved.trim() !== "") fallback = resolved.trim();
-    } catch (error) {
-        log(`nao consegui ler a regra do sistema, usando DIRECT: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
-    // O "; DIRECT" depois da diretiva e a rede anti-travamento: sem ele, um proxy morto faria o
-    // gateway simplesmente nao conectar, e o Discord ficaria presa na tela de abertura. O preco
-    // e degradar em silencio, e quem cobre isso e a nova tentativa, que detecta o bloqueio e
-    // recarrega atras de outra saida.
-    const script = `var routed = ${JSON.stringify(GATEWAY_HOSTS)};\n`
-        + "function FindProxyForURL(url, host) {\n"
-        + "    for (var i = 0; i < routed.length; i++)\n"
-        + `        if (host === routed[i]) return ${JSON.stringify(`${directive}; DIRECT`)};\n`
-        + `    return ${JSON.stringify(fallback)};\n`
-        + "}\n";
-
-    return `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(script, "utf8").toString("base64")}`;
-}
-
-async function apply(proxy: string) {
-    const pacScript = await pacFor(proxy);
-    if (pacScript === null) return false;
-
-    log(`aplicando ${safeProxy(proxy)} so em ${GATEWAY_HOSTS.join(", ")}; o resto da sessao sai direto`);
-    try {
-        await session.defaultSession.setProxy({ mode: "pac_script", pacScript });
-        await session.defaultSession.closeAllConnections();
+        stored = NativeSettings.plain.plugins?.GoLiveBypass?.pool;
     } catch {
-        return false;
+        return [];
     }
 
-    appliedProxy = proxy;
-    markBoot(true);
-    log(`proxy aplicado: ${safeProxy(proxy)}`);
+    if (!Array.isArray(stored)) return [];
 
-    clearTimeout(deadline);
-    deadline = setTimeout(() => {
-        log("a sessao nao abriu no prazo, soltando o proxy para nao travar o Discord");
-        clear();
-    }, SESSION_DEADLINE_MS);
-    return true;
+    return stored.filter((entry): entry is PoolEntry => {
+        if (typeof entry !== "object" || entry === null) return false;
+
+        const { proxy, country, ms, at } = entry as Partial<PoolEntry>;
+        return typeof proxy === "string" && parseProxy(proxy) !== null
+            && typeof country === "string" && typeof ms === "number"
+            && typeof at === "number" && Date.now() - at < POOL_MAX_AGE_MS;
+    });
 }
 
-async function clear() {
-    if (appliedProxy !== null) log(`soltando ${safeProxy(appliedProxy)}, o resto da sessao volta para a regra do sistema`);
-    clearTimeout(deadline);
-    deadline = undefined;
-    appliedProxy = null;
-    markBoot(false);
-
-    log("proxy liberado, so o gateway continua nele");
-
+// Duas instancias do Discord dividem este arquivo; gravar pode falhar por disputa. Perder o
+// pote custa uma busca a mais no proximo boot -- deixar a excecao subir custava o processo.
+function writePool(entries: PoolEntry[]) {
     try {
-        // "system" e o que uma sessao intocada usa. Voltar para "direct" arrancaria o proxy
-        // do sistema de quem esta atras de PAC, VPN ou proxy corporativo.
-        await session.defaultSession.setProxy({ mode: "system" });
-        await session.defaultSession.closeAllConnections();
+        NativeSettings.store.plugins.GoLiveBypass ??= {};
+        NativeSettings.store.plugins.GoLiveBypass.pool = entries
+            .sort((a, b) => a.ms - b.ms)
+            .slice(0, POOL_SIZE);
     } catch {
-        return false;
+        // sem pote guardado, o proximo boot procura de novo
     }
-    return true;
 }
+
+// ------------------------------------------------------------------ falar com uma saida
 
 function readReply(socket: Socket, size: (buffer: Buffer) => number, done: (reply: Buffer | null) => void) {
     const chunks: Buffer[] = [];
@@ -360,14 +267,16 @@ function readReply(socket: Socket, size: (buffer: Buffer) => number, done: (repl
     socket.resume();
 }
 
+function socksReplySize(buffer: Buffer) {
+    if (buffer.length < 4) return -1;
+    if (buffer[3] === 1) return 10;
+    if (buffer[3] === 4) return 22;
+    return buffer.length < 5 ? -1 : 7 + buffer[4];
+}
+
 function negotiateSocks5(socket: Socket, host: string, port: number, credentials: { user: string; pass: string; }, done: (ok: boolean) => void) {
     const requestTarget = () => {
-        readReply(socket, buffer => {
-            if (buffer.length < 4) return -1;
-            if (buffer[3] === 1) return 10;
-            if (buffer[3] === 4) return 22;
-            return buffer.length < 5 ? -1 : 7 + buffer[4];
-        }, reply => done(reply !== null && reply[1] === 0));
+        readReply(socket, socksReplySize, reply => done(reply !== null && reply[1] === 0));
 
         const target = Buffer.from(host, "latin1");
         socket.write(Buffer.concat([
@@ -378,7 +287,7 @@ function negotiateSocks5(socket: Socket, host: string, port: number, credentials
     };
 
     readReply(socket, buffer => buffer.length < 2 ? -1 : 2, greeting => {
-        if (greeting === null) return done(false);
+        if (greeting === null || greeting[0] !== 5) return done(false);
 
         // 0 = sem autenticacao, 2 = usuario e senha (RFC 1929). Qualquer outro metodo, ou 0xFF,
         // significa que o proxy nao aceita nada que a gente sabe fazer.
@@ -418,6 +327,27 @@ function negotiateConnect(socket: Socket, host: string, port: number, credential
         : `Proxy-Authorization: Basic ${Buffer.from(`${credentials.user}:${credentials.pass}`, "utf8").toString("base64")}\r\n`;
 
     socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
+}
+
+function openDirect(host: string, port: number, timeoutMs: number): Promise<Socket | null> {
+    return new Promise(resolve => {
+        const socket = connect({ host, port });
+        let settled = false;
+
+        const finish = (result: Socket | null) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(guard);
+            socket.setTimeout(0);
+            if (result === null) socket.destroy();
+            resolve(result);
+        };
+
+        const guard = setTimeout(() => finish(null), timeoutMs);
+        socket.setTimeout(timeoutMs, () => finish(null));
+        socket.on("error", () => finish(null));
+        socket.once("connect", () => finish(socket));
+    });
 }
 
 function openTunnel(proxy: string, host: string, port: number, timeoutMs = PROBE_TIMEOUT_MS): Promise<Socket | null> {
@@ -476,139 +406,18 @@ function readOverTls(socket: Socket, host: string, path: string, timeoutMs = PRO
     });
 }
 
-async function probe(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
-    const started = Date.now();
-
-    const socket = await openTunnel(proxy, DISCORD_HOST, 443, timeoutMs);
-    if (socket === null) return null;
-
-    const response = await readOverTls(socket, DISCORD_HOST, "/api/v9/gateway", timeoutMs);
-    if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
-
-    return { proxy, ms: Date.now() - started };
-}
-
-async function exitCountry(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
-    const socket = await openTunnel(proxy, GEO_HOST, 443, timeoutMs);
-    if (socket === null) return null;
-
-    // O trace responde em cerca de 200 bytes com loc=XX. O ifconfig.co que estava aqui
-    // devolvia um JSON inteiro e, pior, a resposta nao era conferida: um 429 dele nao casava
-    // o padrao e uma candidata boa era descartada como pais desconhecido.
-    const response = await readOverTls(socket, GEO_HOST, "/cdn-cgi/trace", timeoutMs);
-    if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
-
-    const match = /^loc=([A-Z]{2})/m.exec(response);
-    return match === null ? null : match[1];
-}
-
-// As duas conexoes sao feitas em sequencia de proposito: proxy gratuita sobrecarregada costuma
-// limitar conexoes simultaneas, e abrir duas de uma vez reprovaria candidata boa. O paralelismo
-// que importa e entre candidatas, e esta funcao inteira roda dentro do lote. Antes o pais era
-// conferido uma candidata por vez DEPOIS de o lote terminar, o que sozinho somava dezenas de
-// segundos ao tempo ate a primeira saida, bem no caminho em que o gateway ja esta conectando.
-async function probeExit(proxy: string) {
-    const result = await probe(proxy);
-    if (result === null) return null;
-
-    return { ...result, country: await exitCountry(proxy) };
-}
-
-async function accepts(proxy: string, excluded: Set<string>) {
-    const country = await exitCountry(proxy);
-    return country !== null && !excluded.has(country);
-}
-
-function rankFreeProxies(body: string, excluded: Set<string>) {
-    const data: unknown = JSON.parse(body);
-    const { proxies } = data as { proxies?: unknown };
-    if (!Array.isArray(proxies)) return [];
-
-    const usable: { proxy: string; uptime: number; timeout: number; }[] = [];
-
-    for (const item of proxies) {
-        if (typeof item !== "object" || item === null) continue;
-
-        const entry = item as {
-            proxy?: unknown;
-            alive?: unknown;
-            uptime?: unknown;
-            timeout?: unknown;
-            ip_data?: { countryCode?: unknown; };
+function listening(port: number, timeoutMs: number): Promise<boolean> {
+    return new Promise(resolve => {
+        const socket = connect({ host: "127.0.0.1", port });
+        const finish = (open: boolean) => {
+            socket.destroy();
+            resolve(open);
         };
 
-        if (typeof entry.proxy !== "string" || entry.alive !== true) continue;
-
-        const parsed = parseProxy(entry.proxy);
-        if (parsed === null || INTERCEPTING_PORTS.has(parsed.port)) continue;
-
-        const uptime = typeof entry.uptime === "number" ? entry.uptime : 0;
-        const timeout = typeof entry.timeout === "number" ? entry.timeout : MAX_LISTED_TIMEOUT;
-        if (uptime < MIN_UPTIME || timeout > MAX_LISTED_TIMEOUT) continue;
-
-        const country = typeof entry.ip_data?.countryCode === "string" ? entry.ip_data.countryCode.toUpperCase() : "";
-        if (excluded.has(country)) continue;
-
-        usable.push({ proxy: entry.proxy, uptime, timeout });
-    }
-
-    return usable
-        .sort((a, b) => b.uptime - a.uptime || a.timeout - b.timeout)
-        .slice(0, MAX_CANDIDATES)
-        .map(entry => entry.proxy);
-}
-
-// O boot e o pedido do renderer procuram proxy ao mesmo tempo. Duas buscas paralelas disputam
-// a mesma banda e dobram o tempo ate a primeira proxy ficar pronta, que e exatamente a janela
-// em que o gateway conecta sem protecao. Quem chegar depois espera a busca que ja esta correndo.
-let hunting: Promise<string | null> | null = null;
-
-function sharedFreeProxy(excluded: Set<string>) {
-    hunting ??= pickFreeProxy(excluded).finally(() => { hunting = null; });
-    return hunting;
-}
-
-async function pickFreeProxy(excluded: Set<string>) {
-    let candidates: string[];
-    try {
-        candidates = rankFreeProxies(await downloadText(FREE_PROXY_API), excluded);
-    } catch {
-        return null;
-    }
-
-    log(`${candidates.length} candidatas depois do ranqueamento`);
-
-    for (let i = 0; i < candidates.length; i += PARALLEL_PROBES) {
-        // map passa (item, indice, array), entao .map(probe) mandava o indice como timeout
-        // e todas as candidatas estouravam o prazo em milissegundos.
-        const batch = await Promise.all(candidates.slice(i, i + PARALLEL_PROBES).map(candidate => probeExit(candidate)));
-        const working = batch
-            .filter((result): result is { proxy: string; ms: number; country: string | null; } => result !== null)
-            .sort((a, b) => a.ms - b.ms);
-
-        log(`lote ${Math.floor(i / PARALLEL_PROBES) + 1}: ${batch.length} testadas, ${working.length} alcancaram o Discord`);
-
-        for (const candidate of working) {
-            const { proxy, ms, country } = candidate;
-            if (country !== null && !excluded.has(country)) {
-                log(`${safeProxy(proxy)} passou: ${ms}ms, saida em ${country}`);
-                storeCachedProxy(proxy);
-                return proxy;
-            }
-            log(`${safeProxy(proxy)} recusada: saida em ${country ?? "pais desconhecido"}`);
-        }
-    }
-
-    return null;
-}
-
-async function detectTor(excluded: Set<string>) {
-    for (const port of TOR_PORTS) {
-        const proxy = `socks5://127.0.0.1:${port}`;
-        if (await probe(proxy) !== null && await accepts(proxy, excluded)) return proxy;
-    }
-
-    return null;
+        socket.setTimeout(timeoutMs, () => finish(false));
+        socket.once("connect", () => finish(true));
+        socket.on("error", () => finish(false));
+    });
 }
 
 function downloadText(url: string): Promise<string> {
@@ -651,81 +460,625 @@ function downloadText(url: string): Promise<string> {
     });
 }
 
-app.whenReady().then(async () => {
-    // A regra do PAC nao carrega usuario e senha: ela so diz o endereco. Quando o proxy pede
-    // autenticacao, quem responde e o Chromium, por este evento. Sem isto o proxy com senha
-    // passaria nos nossos testes, que negociam na mao, e falharia no uso de verdade.
-    app.on("login", (event, _webContents, _request, authInfo, callback) => {
-        // Sem isto responderiamos a qualquer site que pedisse senha, entregando a credencial do
-        // proxy para quem nao tem nada a ver com ela.
-        if (!authInfo.isProxy || appliedProxy === null) return;
+// ------------------------------------------------------------------ provar uma saida
 
-        const parsed = parseProxy(appliedProxy);
-        if (parsed === null || parsed.user === "") return;
-        if (authInfo.host !== parsed.host || authInfo.port !== parsed.port) return;
+// O trace da Cloudflare prova que a saida chega na internet, nao que alcanca o Discord --
+// uma rede que bloqueia so dominios do Discord passaria no Cloudflare e falharia aqui. Nao
+// exige HTTP 200 (gateway.discord.gg responde 404 a um GET comum): qualquer status valido
+// ja prova que a conexao e o TLS chegaram la.
+async function reachesGateway(proxy: string, timeoutMs: number) {
+    const socket = await openTunnel(proxy, GATEWAY_HOSTS[0], 443, timeoutMs);
+    if (socket === null) return false;
 
-        event.preventDefault();
-        callback(parsed.user, parsed.pass);
+    const response = await readOverTls(socket, GATEWAY_HOSTS[0], "/", timeoutMs);
+    return response !== null && /^HTTP\/1\.[01] \d{3}/.test(response);
+}
+
+// Prova o que interessa numa saida: o tunel negocia (com login, se houver), o TLS fecha com
+// certificado valido, o pais de saida e conhecido e o gateway do Discord responde por ela.
+// Saida barrada por reputacao falha exatamente aqui, que e o motivo de o teste nao ser contra
+// um endereco qualquer.
+async function measure(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
+    const started = Date.now();
+
+    const socket = await openTunnel(proxy, TRACE_HOST, 443, timeoutMs);
+    if (socket === null) return null;
+
+    const response = await readOverTls(socket, TRACE_HOST, TRACE_PATH, timeoutMs);
+    if (response === null || !/^HTTP\/1\.[01] 200/.test(response)) return null;
+
+    const country = /(?:^|\n)loc=([A-Za-z]{2})/.exec(response);
+    if (country === null) return null;
+
+    const ip = /(?:^|\n)ip=(\S+)/.exec(response);
+
+    // As duas conexoes sao feitas em sequencia de proposito: proxy gratuita sobrecarregada
+    // costuma limitar conexoes simultaneas, e abrir duas de uma vez reprovaria candidata boa.
+    if (!(await reachesGateway(proxy, timeoutMs))) return null;
+
+    return { proxy, country: country[1].toUpperCase(), ip: ip?.[1] ?? "", ms: Date.now() - started };
+}
+
+// Todo o lote anda junto e a primeira que responder bem ganha -- testar candidata por
+// candidata podia somar um minuto sozinho, bem no caminho em que o gateway ja esta conectando.
+function firstUsable(candidates: string[], excluded: Set<string>, timeoutMs: number): Promise<PoolEntry | null> {
+    return new Promise(resolve => {
+        let pending = candidates.length;
+        if (pending === 0) return resolve(null);
+
+        let settled = false;
+
+        // candidates.map(measure) pareceria igual mas nao e: map passa (item, indice, array),
+        // e o indice cairia em timeoutMs, dando zero ms para a candidata numero zero.
+        for (const candidate of candidates) {
+            measure(candidate, timeoutMs).then(result => {
+                if (!settled && result !== null && !excluded.has(result.country)) {
+                    settled = true;
+                    log(`${safeProxy(result.proxy)} passou: ${result.ms}ms, saida em ${result.country}`);
+                    resolve({ proxy: result.proxy, country: result.country, ms: result.ms, at: Date.now() });
+                    return;
+                }
+
+                if (result !== null && excluded.has(result.country)) log(`${safeProxy(result.proxy)} recusada: saida em ${result.country}`);
+                if (--pending === 0 && !settled) resolve(null);
+            });
+        }
     });
+}
 
-    app.on("browser-window-created", (_event, win) => {
-        win.webContents.on("did-fail-load", (_failed, code, _description, _url, isMainFrame) => {
-            if (isMainFrame && code !== -3 && appliedProxy !== null) {
-                log(`a pagina falhou ao carregar (${code}), voltando para conexao direta`);
-                clear();
-            }
-        });
-    });
+async function torExit(excluded: Set<string>, timeoutMs: number) {
+    for (const port of TOR_PORTS) {
+        const proxy = `socks5://127.0.0.1:${port}`;
+        if (!await listening(port, TOR_PORT_TIMEOUT_MS)) continue;
 
-    log("=".repeat(60));
-    log(`abrindo | ${process.platform} ${process.arch} | electron ${process.versions.electron} | chrome ${process.versions.chrome}`);
+        const found = await firstUsable([proxy], excluded, timeoutMs);
+        if (found !== null) {
+            log(`Tor local encontrado na porta ${port}`);
+            return found;
+        }
 
-    const stored: Record<string, unknown> = RendererSettings.plain.plugins?.GoLiveBypass ?? {};
-    const show = (key: string, fallback: string) => (typeof stored[key] === "string" && stored[key] !== "" ? String(stored[key]) : fallback);
-    log(`configuracao | proxy ${show("proxy", "") === "" ? "automatico" : "definido por voce"} | regiao de call ${show("voiceRegion", "automatica")} | regiao de stream ${show("streamRegion", "automatica")} | paises fora ${show("excludedCountries", "BR")}`);
-
-    if (bootWasPending()) {
-        markBoot(false);
-        log("a abertura anterior nao terminou dentro de 10 minutos, entao nao vou aplicar proxy desta vez");
-        log("isso e a rede de seguranca contra Discord travado; a proxima abertura volta ao normal");
-        return;
+        log(`porta ${port} aberta mas nao respondeu como proxy, ignorando`);
     }
 
-    const proxy = await bootProxy();
-    if (proxy) apply(proxy);
-});
-
-function requestedCountries(raw: unknown) {
-    return new Set(
-        typeof raw === "string"
-            ? raw.split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
-            : []
-    );
+    return null;
 }
 
-export async function enable(_: IpcMainInvokeEvent, excludedCountries: unknown) {
-    if (appliedProxy !== null) return { success: true as const, proxy: appliedProxy };
+function rankFreeProxies(body: string, excluded: Set<string>) {
+    const data: unknown = JSON.parse(body);
+    const { proxies } = data as { proxies?: unknown; };
+    if (!Array.isArray(proxies)) return [];
 
-    const excluded = requestedCountries(excludedCountries);
+    const usable: { proxy: string; uptime: number; timeout: number; }[] = [];
 
+    for (const item of proxies) {
+        if (typeof item !== "object" || item === null) continue;
+
+        const entry = item as {
+            proxy?: unknown;
+            alive?: unknown;
+            uptime?: unknown;
+            timeout?: unknown;
+            ip_data?: { countryCode?: unknown; };
+        };
+
+        if (typeof entry.proxy !== "string" || entry.alive !== true) continue;
+
+        const parsed = parseProxy(entry.proxy);
+        // A porta 4145 e quase toda de intermediario que responde por qualquer destino sem
+        // encaminhar nada. Ela reprova no teste, mas so depois de gastar o prazo.
+        if (parsed === null || INTERCEPTING_PORTS.has(parsed.port)) continue;
+
+        const uptime = typeof entry.uptime === "number" ? entry.uptime : 0;
+        const timeout = typeof entry.timeout === "number" ? entry.timeout : MAX_LISTED_TIMEOUT;
+        if (uptime < MIN_UPTIME || timeout > MAX_LISTED_TIMEOUT) continue;
+
+        const country = typeof entry.ip_data?.countryCode === "string" ? entry.ip_data.countryCode.toUpperCase() : "";
+        if (excluded.has(country)) continue;
+
+        usable.push({ proxy: entry.proxy, uptime, timeout });
+    }
+
+    return usable
+        .sort((a, b) => b.uptime - a.uptime || a.timeout - b.timeout)
+        .slice(0, MAX_CANDIDATES)
+        .map(entry => entry.proxy);
+}
+
+async function freeExit(excluded: Set<string>, want: number): Promise<PoolEntry[]> {
+    let candidates: string[];
+    try {
+        candidates = rankFreeProxies(await downloadText(FREE_PROXY_API), excluded);
+    } catch {
+        return [];
+    }
+
+    log(`${candidates.length} candidatas depois do ranqueamento`);
+
+    const found: PoolEntry[] = [];
+
+    for (let i = 0; i < candidates.length && found.length < want; i += PARALLEL_PROBES) {
+        const winner = await firstUsable(candidates.slice(i, i + PARALLEL_PROBES), excluded, PROBE_TIMEOUT_MS);
+        if (winner !== null) found.push(winner);
+    }
+
+    return found;
+}
+
+// Reabastecer o pote e uma escolha nova podem correr ao mesmo tempo; duas buscas paralelas
+// disputam a mesma banda e dobram o tempo ate a primeira saida ficar pronta, que e exatamente
+// a janela em que o gateway conecta sem protecao. Quem chegar depois espera a que ja corre.
+let hunting: Promise<PoolEntry[]> | null = null;
+
+function sharedFreeExit(excluded: Set<string>, want: number) {
+    hunting ??= freeExit(excluded, want).finally(() => { hunting = null; });
+    return hunting;
+}
+
+// ------------------------------------------------------------------ escolher a saida
+
+let exit: string | null = null;
+let exitSettled = false;
+let waiting: ((value: string | null) => void)[] = [];
+
+function settleExit(value: string | null) {
+    exit = value;
+    exitSettled = true;
+
+    const pending = waiting;
+    waiting = [];
+    for (const resume of pending) resume(value);
+}
+
+// Uma conexao de gateway que chega antes de existir saida espera aqui, e nao para sempre:
+// estourado o prazo ela sai direta. Discord aberto sem bypass e ruim; Discord que nao abre e
+// muito pior, e foi o pior defeito que este projeto ja teve.
+function currentExit(): Promise<string | null> {
+    if (exitSettled) return Promise.resolve(exit);
+
+    return new Promise(resolve => {
+        const resume = (value: string | null) => {
+            clearTimeout(guard);
+            resolve(value);
+        };
+
+        const guard = setTimeout(() => {
+            waiting = waiting.filter(entry => entry !== resume);
+            log("nenhuma saida ficou pronta a tempo, esta conexao vai direta");
+            resolve(null);
+        }, STALL_BUDGET_MS);
+
+        waiting.push(resume);
+    });
+}
+
+// Saida que falhou no trafego vivo sai do pote e a busca recomeca em segundo plano. Ate a
+// nova chegar, o roteador manda direto: custa o Go Live daquela sessao, nunca a conexao.
+function dropExit(dead: string, excluded?: Set<string>) {
+    if (exit !== dead) return;
+
+    log(`${safeProxy(dead)} parou de entregar, tirando do pote e procurando outra`);
+    writePool(readPool().filter(entry => entry.proxy !== dead));
+    exit = null;
+    chooseExit(excluded);
+}
+
+// Guarda a promessa, nao um booleano: retryWithProxy precisa esperar o resultado antes de
+// recarregar, senao veria "ja tem alguem escolhendo" e recarregaria sem saida nenhuma.
+let choosing: Promise<void> | null = null;
+
+function chooseExit(excluded?: Set<string>) {
+    choosing ??= runChoice(excluded ?? excludedCountries()).finally(() => { choosing = null; });
+    return choosing;
+}
+
+// Nada aqui pode escapar: no processo principal do Discord, uma promessa rejeitada sem
+// tratamento derruba o processo inteiro.
+async function runChoice(excluded: Set<string>) {
+    try {
+        await pickExit(excluded);
+    } catch {
+        // Quem ja escolheu nao perde a saida por um erro vindo depois.
+        if (!exitSettled) settleExit(null);
+    }
+}
+
+async function pickExit(excluded: Set<string>) {
     const manual = manualProxy();
-    if (manual === null) return { success: false as const, error: "O endereco no campo Proxy nao e valido. Use socks5://host:porta." };
+    if (manual === "invalid") {
+        log("o endereco do campo Proxy nao e valido, nenhuma saida foi usada");
+        return settleExit(null);
+    }
 
-    const proxy = manual || await detectTor(excluded) || await sharedFreeProxy(excluded);
-    if (proxy === null || proxy === "")
-        return { success: false as const, error: "No proxy could carry a real request to Discord, so the connection stays direct." };
+    if (manual !== "auto") {
+        // Sem testar, uma saida fora do ar viraria conexao direta dentro do roteador e o
+        // bypass falharia em silencio, que foi exatamente o que aconteceu com o Tor fechado.
+        const started = Date.now();
+        if (await measure(manual.proxy, WARM_PROBE_TIMEOUT_MS) !== null) {
+            log(`seu proxy respondeu em ${Date.now() - started}ms: ${safeProxy(manual.proxy)}`);
+            return settleExit(manual.proxy);
+        }
 
-    return await apply(proxy)
-        ? { success: true as const, proxy }
-        : { success: false as const, error: "Electron refused the proxy." };
+        log(`seu proxy nao respondeu: ${safeProxy(manual.proxy)}`);
+        log("se for Tor, ele precisa estar aberto ANTES do Discord. Procurando alternativa.");
+    }
+
+    return autoExit(excluded);
 }
 
-export async function disable(_: IpcMainInvokeEvent) {
-    return { success: await clear() };
+async function autoExit(excluded: Set<string>) {
+    const pool = readPool();
+    if (pool.length > 0) {
+        const warm = await firstUsable(pool.map(entry => entry.proxy), excluded, WARM_PROBE_TIMEOUT_MS);
+        if (warm !== null) {
+            log(`saida guardada revalidada em ${warm.ms}ms: ${safeProxy(warm.proxy)}`);
+            settleExit(warm.proxy);
+
+            // Solta sem esperar: o pote so serve para o proximo boot, e prender a escolha ate
+            // encher deixaria a sessao atual esperando uma lista inteira a toa.
+            refillPool(excluded, warm).catch(() => { });
+            return;
+        }
+
+        log("as saidas guardadas morreram, procurando outra");
+    }
+
+    const tor = await torExit(excluded, PROBE_TIMEOUT_MS);
+    if (tor !== null) return settleExit(tor.proxy);
+
+    log(`procurando uma saida nova, o gateway fica segurado por ate ${Math.round(STALL_BUDGET_MS / 1000)}s`);
+    const [first] = await sharedFreeExit(excluded, 1);
+    log(first === undefined ? "nenhuma saida passou nos testes" : `saida escolhida: ${safeProxy(first.proxy)}`);
+
+    settleExit(first?.proxy ?? null);
+    if (first !== undefined) writePool([first]);
+}
+
+// A busca cara acontece com a sessao ja aberta, para o proximo boot ter opcao pronta --
+// diferenca entre abrir em dois segundos e esperar meio minuto por uma lista.
+async function refillPool(excluded: Set<string>, keep: PoolEntry) {
+    try {
+        const found = await sharedFreeExit(excluded, POOL_SIZE);
+        writePool([keep, ...found.filter(entry => entry.proxy !== keep.proxy)]);
+        log(`pote guardado com ${Math.min(found.length + 1, POOL_SIZE)} saida(s)`);
+    } catch {
+        writePool([keep]);
+    }
+}
+
+// ------------------------------------------------------------------ o roteador local
+
+let socks: Server | undefined;
+let scope: Scope = "off";
+let fallbackRule = "DIRECT";
+
+function refuse(client: Socket) {
+    // 2 = "nao permitido pelas regras": o roteador so encaminha os hosts que o PAC manda.
+    if (!client.destroyed) client.end(Buffer.from([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]));
+}
+
+function readTarget(request: Buffer) {
+    if (request[3] === 1) {
+        return { host: Array.from(request.subarray(4, 8)).join("."), port: request.readUInt16BE(8) };
+    }
+
+    if (request[3] === 3) {
+        const size = request[4];
+        return { host: request.subarray(5, 5 + size).toString("latin1"), port: request.readUInt16BE(5 + size) };
+    }
+
+    return null;
+}
+
+function serveSocks(client: Socket) {
+    client.on("error", () => client.destroy());
+    // Entrada malformada deixaria o socket pendurado para sempre, porque a negociacao nunca
+    // completa e ninguem fecha. O prazo cobre isso; ele e zerado assim que o tunel sobe.
+    client.setTimeout(PROBE_TIMEOUT_MS, () => client.destroy());
+
+    readReply(client, buffer => (buffer.length < 2 ? -1 : 2 + buffer[1]), greeting => {
+        if (greeting === null || greeting[0] !== 5) return client.destroy();
+        client.write(Buffer.from([5, 0]));
+
+        readReply(client, socksReplySize, request => {
+            // Cada conexao e isolada: o que der errado aqui fecha este socket e mais nada.
+            // Sem o catch, um erro em qualquer await abaixo viraria rejeicao nao tratada e
+            // levaria junto o processo principal do Discord.
+            serveRequest(client, request).catch(() => client.destroy());
+        });
+    });
+}
+
+async function serveRequest(client: Socket, request: Buffer | null) {
+    if (request === null || request[0] !== 5 || request[1] !== 1) return client.destroy();
+
+    const target = readTarget(request);
+    if (target === null) return refuse(client);
+
+    // O roteador so aceita os hosts que o PAC manda para ele. Sem esta linha ele seria um
+    // SOCKS aberto no loopback: qualquer processo da maquina usaria a sua saida para qualquer
+    // destino, com a identidade do Discord no firewall.
+    if (!routedHosts().includes(target.host)) {
+        log(`recusando destino fora da lista: ${target.host}`);
+        return refuse(client);
+    }
+
+    // Sucesso respondido antes de saber a saida, de proposito: o Chromium para de usar um
+    // roteador que responda lento ou negativo, sem avisar. Uma saida que falhe vira conexao
+    // fechada (problema do destino, nao do proxy) -- o socket segue pausado pelo readReply.
+    client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+    client.setTimeout(0);
+
+    const through = await currentExit();
+    if (client.destroyed) return;
+
+    // Login (autenticacao) falha fechado -- diferente do gateway, onde cair para direto e
+    // proposital. Vazar o IP real no login seria o oposto do que a setting promete.
+    const isLoginHost = LOGIN_HOSTS.includes(target.host);
+
+    let upstream: Socket | null = null;
+    if (through !== null) {
+        upstream = await openTunnel(through, target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS);
+
+        // Trocar para uma reserva ja testada custa uma conexao; esperar a proxima abertura do
+        // Discord custa a sessao inteira sem bypass.
+        if (upstream === null) {
+            for (const reserve of readPool()) {
+                if (reserve.proxy === through) continue;
+                upstream = await openTunnel(reserve.proxy, target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS);
+                if (upstream !== null) {
+                    log(`${safeProxy(through)} falhou, usando a reserva ${safeProxy(reserve.proxy)}`);
+                    writePool(readPool().filter(entry => entry.proxy !== through));
+                    exit = reserve.proxy;
+                    break;
+                }
+            }
+        }
+
+        if (upstream === null) {
+            dropExit(through);
+            upstream = isLoginHost ? null : await openDirect(target.host, target.port, RELAY_DIRECT_TIMEOUT_MS);
+        }
+    } else {
+        upstream = isLoginHost ? null : await openDirect(target.host, target.port, RELAY_DIRECT_TIMEOUT_MS);
+    }
+
+    if (upstream === null) return client.destroy();
+    if (client.destroyed) return upstream.destroy();
+
+    upstream.on("error", () => client.destroy());
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => client.destroy());
+
+    upstream.pipe(client);
+    client.pipe(upstream);
+}
+
+function pacScript(socksPort: number, routed: string[]) {
+    const list = routed.map(host => `"${host}"`).join(",");
+
+    // Sem alternativa depois do ponto e virgula de proposito: uma vez que o Chromium marca o
+    // SOCKS como ruim ele passa a usar a alternativa do PAC sem avisar -- regra servida,
+    // roteador de pe, e nenhuma conexao passando. A rede de seguranca fica dentro do
+    // roteador, que cai para direto sozinho e registra isso. Quem nao esta na lista mantem a
+    // regra que o sistema ja usava (proxy corporativo, PAC, VPN).
+    return `var routed = [${list}];\n`
+        + "function FindProxyForURL(url, host) {\n"
+        + "    for (var i = 0; i < routed.length; i++)\n"
+        + `        if (host === routed[i]) return "SOCKS5 127.0.0.1:${socksPort}";\n`
+        + `    return ${JSON.stringify(fallbackRule)};\n`
+        + "}\n";
+}
+
+function routedHosts(): string[] {
+    if (scope === "off") return [];
+    return scope === "login" ? [...GATEWAY_HOSTS, ...LOGIN_HOSTS] : [...GATEWAY_HOSTS];
+}
+
+// PAC embutido na propria URL, nao servido de um HTTP local: buscar o arquivo com a rede
+// ainda montando ja derrubou o processo principal em silencio numa build de Electron antiga.
+function pacDataUrl(socksPort: number) {
+    const script = pacScript(socksPort, routedHosts());
+    return "data:application/x-ns-proxy-autoconfig;base64," + Buffer.from(script, "utf8").toString("base64");
+}
+
+async function installPac(redial: boolean) {
+    if (socks === undefined) return false;
+
+    try {
+        const socksPort = (socks.address() as AddressInfo | null)?.port;
+        if (socksPort === undefined) return false;
+
+        await session.defaultSession.setProxy({ mode: "pac_script", pacScript: pacDataUrl(socksPort) });
+
+        // Confere o endereco inteiro, nao so a porta: a regra do sistema (quando o PAC e
+        // ignorado) pode conter os mesmos digitos da porta por coincidencia. E conferir em
+        // vez de supor: se a regra nao pegou, melhor saber agora do que pelo usuario dizendo
+        // que nao funciona.
+        const route = await session.defaultSession.resolveProxy(`https://${GATEWAY_HOSTS[0]}`);
+        if (typeof route !== "string" || !route.includes(`127.0.0.1:${socksPort}`)) {
+            log("o Chromium ignorou o PAC, voltando para a regra do sistema");
+
+            // "system", nao "direct": arrancaria o proxy de quem esta atras de VPN/corporativo.
+            await session.defaultSession.setProxy({ mode: "system" });
+            return false;
+        }
+
+        // Regra nova nao muda socket que ja nasceu. Derrubar tudo depois do login reconectaria
+        // a sessao recem autenticada a toa; no boot nao ha socket que valha preservar.
+        if (redial) await session.defaultSession.closeAllConnections();
+    } catch {
+        // O setProxy pode ter pegado mesmo com uma etapa seguinte lancando excecao -- reverter
+        // aqui tambem, senao o PAC fica roteando trafego enquanto a funcao devolve falha.
+        log("nao consegui aplicar a regra de rota, revertendo para a regra do sistema");
+        try { await session.defaultSession.setProxy({ mode: "system" }); } catch { }
+        return false;
+    }
+
+    log(`rota aplicada: ${routedHosts().join(", ")} pelo roteador local, o resto em ${fallbackRule}`);
+    return true;
+}
+
+async function startRouter(next: Scope) {
+    scope = next;
+
+    if (socks === undefined) {
+        const server = createServer(serveSocks);
+        server.on("error", () => { });
+
+        // Resolve tambem no erro: esperar um listen que nunca acontece penduraria o boot.
+        const started = await new Promise<boolean>(resolve => {
+            server.once("error", () => resolve(false));
+            server.listen(0, "127.0.0.1", () => resolve(true));
+        });
+
+        if (!started) {
+            log("nao consegui subir o roteador local, a sessao inteira continua direta");
+            scope = "off";
+            return false;
+        }
+
+        socks = server;
+        log(`roteador local de pe na porta ${(server.address() as AddressInfo).port}`);
+    }
+
+    // Loopback e porta escolhida pelo sistema: nao ha colisao possivel, e nada de fora da
+    // maquina alcanca o roteador.
+    if (await installPac(true)) return true;
+
+    scope = "off";
+    return false;
+}
+
+async function stopRouter() {
+    scope = "off";
+
+    try {
+        await session.defaultSession.setProxy({ mode: "system" });
+        await session.defaultSession.closeAllConnections();
+    } catch {
+        // sessao ja fechando, nada a fazer
+    }
+
+    socks?.close();
+    socks = undefined;
+    log("roteador desligado, tudo volta a sair direto");
+}
+
+// ------------------------------------------------------------------ ciclo de vida
+
+// Chamado pelo boot e pelo renderer ao ativar o plugin; a trava faz as duas chamadas
+// dividirem uma unica subida em vez de duas.
+let enabling: Promise<{ success: boolean; }> | null = null;
+
+export function enable(_?: IpcMainInvokeEvent) {
+    enabling ??= enableOnce().finally(() => { enabling = null; });
+    return enabling;
+}
+
+async function enableOnce() {
+    migrateLegacyPool();
+    if (scope !== "off") return { success: true as const };
+
+    try {
+        // So da para embutir UMA regra fixa no PAC para o resto do trafego, mas um PAC ou
+        // auto-detect de verdade pode variar por host (proxy corporativo, DLP). Compara 3
+        // alvos bem diferentes: se baterem, a regra do sistema provavelmente e fixa e seguro
+        // reaplicar. Falha fechado se o resolveProxy nao responder nada confiavel -- melhor
+        // nao ligar o bypass do que arriscar ignorar a politica de proxy da empresa.
+        const probeUrls = [`https://${DISCORD_HOST}`, "https://cdn.discordapp.com", "https://www.google.com"];
+        let rules: (string | null)[];
+        try {
+            rules = await Promise.all(probeUrls.map(url => session.defaultSession.resolveProxy(url)));
+        } catch {
+            log("nao consegui ler a regra de proxy do sistema; nao vou arriscar ligar o roteador as cegas");
+            return { success: false as const };
+        }
+
+        const discordRule = rules[0];
+        if (typeof discordRule !== "string" || discordRule.trim() === "") {
+            log("o sistema nao devolveu uma regra de proxy usavel; nao vou arriscar ligar o roteador as cegas");
+            return { success: false as const };
+        }
+
+        const trimmed = discordRule.trim();
+        const varies = rules.slice(1).some(rule => typeof rule === "string" && rule.trim() !== "" && rule.trim() !== trimmed);
+        if (varies) {
+            log("a regra do sistema varia por host (proxy corporativo ou PAC de verdade); nao vou arriscar substituir por uma regra fixa");
+            return { success: false as const };
+        }
+
+        fallbackRule = trimmed;
+
+        // O roteador sobe em milissegundos, antes do gateway nascer; a saida e escolhida
+        // depois, com o gateway segurado pelo roteador em vez de a abertura inteira travada.
+        const started = await startRouter(routesLogin() ? "login" : "gateway");
+        if (!started) return { success: false as const };
+
+        chooseExit();
+        return { success: true as const };
+    } catch {
+        // Falhar aqui e abrir o Discord sem bypass. Deixar a excecao subir no boot era abrir
+        // o Discord sem processo principal, ou seja, nao abrir.
+        await stopRouter();
+        return { success: false as const };
+    }
+}
+
+// Versoes anteriores guardavam uma saida so, em verifiedProxy. Aproveitar ela como semente do
+// pote poupa uma busca inteira no primeiro boot depois da atualizacao.
+function migrateLegacyPool() {
+    const stored: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.verifiedProxy;
+    if (typeof stored !== "object" || stored === null) return;
+
+    const { proxy, at } = stored as { proxy?: unknown; at?: unknown; };
+    if (typeof proxy === "string" && parseProxy(proxy) !== null && typeof at === "number"
+        && Date.now() - at < POOL_MAX_AGE_MS && readPool().length === 0) {
+        writePool([{ proxy, country: "?", ms: 0, at }]);
+        log("saida guardada pela versao anterior aproveitada no pote");
+    }
+
+    try {
+        if (NativeSettings.store.plugins.GoLiveBypass)
+            delete NativeSettings.store.plugins.GoLiveBypass.verifiedProxy;
+    } catch {
+        // sobra inofensiva: a leitura acima e a unica que conhece a chave antiga
+    }
+}
+
+export async function sessionOpened(_: IpcMainInvokeEvent) {
+    // Escopo encolhe para o gateway apos o login; ele continua roteado de proposito, entao
+    // uma reconexao (rede oscilando) nasce pela mesma saida e a liberacao sobrevive.
+    if (scope === "login") await installPacWithScope("gateway");
+    return { exit, scope };
+}
+
+export async function sessionClosed(_: IpcMainInvokeEvent) {
+    if (routesLogin() && scope !== "off") await installPacWithScope("login");
+}
+
+// Escopo descreve o que esta instalado, nao o que foi pedido -- se a troca falhar, a rota
+// antiga continua valendo, e o diagnostico e o retryWithProxy precisam enxergar isso.
+async function installPacWithScope(next: Scope) {
+    const installed = scope;
+    scope = next;
+
+    if (await installPac(false)) return true;
+
+    if (scope === next) scope = installed;
+    return false;
+}
+
+export async function shutdown(_: IpcMainInvokeEvent) {
+    await stopRouter();
+    settleExit(null);
+    // Drenados os que esperavam, a proxima ativacao precisa segurar o gateway de novo ate
+    // existir saida -- sem esta linha ela sairia direta sem esperar nada.
+    exitSettled = false;
+    return { success: true as const };
 }
 
 export function getActiveProxy(_: IpcMainInvokeEvent) {
-    return appliedProxy;
+    return exit;
 }
 
 export function getLog(_: IpcMainInvokeEvent) {
@@ -737,70 +1090,90 @@ export function sessionWorked(_: IpcMainInvokeEvent) {
     retries = 0;
 }
 
-// Quando a sessao sobe sem passar pelo proxy, o servidor continua bloqueando video e nao ha
-// como consertar sem refazer o gateway. Recarregar com o proxy no ar resolve, mas so pode
+// Quando a sessao sobe sem passar pela saida, o servidor continua bloqueando video e nao ha
+// como consertar sem refazer o gateway. Recarregar com a saida no ar resolve, mas so pode
 // acontecer um numero fixo de vezes: sem teto isso vira a tela de carregamento infinita.
 export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountries: unknown) {
     if (retries >= MAX_RETRIES) {
         log(`o servidor continuou bloqueando apos ${retries} tentativas, desistindo`);
-        await clear();
         return { retried: false as const, reason: "tentativas esgotadas" };
     }
 
-    const stale = appliedProxy;
-
-    // Na primeira tentativa a causa provavel e a corrida: o gateway nasceu antes de o proxy
-    // ficar pronto, e recarregar por tras do mesmo endereco conserta. Se ele falhou de novo,
-    // insistir nao adianta: o Chromium lembra por alguns minutos de um proxy que falhou e
-    // passa a usar o direct:// da nossa lista, entao a sessao renasceria direta de qualquer
-    // jeito. A partir da segunda tentativa a saida precisa ser outra.
-    let proxy = retries === 0 ? stale : null;
-    if (proxy !== null && await probe(proxy) === null) {
-        log(`${safeProxy(proxy)} parou de responder no meio da sessao`);
-        proxy = null;
-    }
-    if (proxy === null && stale !== null) await clear();
-
-    // Sem proxy no ar, recarregar cairia no fallback direct:// e repetiria a mesma falha. Aqui
-    // nao ha corrida com o gateway para ganhar, entao vale a busca completa em vez dos prazos
-    // curtos do boot: gastar meio minuto e melhor que recarregar para nada.
-    if (proxy === null) {
-        const excluded = requestedCountries(excludedCountries);
-        const manual = manualProxy();
-
-        const found = (manual !== null && manual !== "" && await probe(manual) !== null ? manual : null)
-            ?? await detectTor(excluded)
-            ?? await sharedFreeProxy(excluded);
-
-        // Achar de novo o endereco que acabou de falhar nao ajuda: para o Chromium ele
-        // continua marcado, e a sessao nasceria direta outra vez.
-        proxy = found === stale ? null : found;
-
-        if (proxy === null || !await apply(proxy)) {
-            log(found === null ? "nenhum proxy respondeu, a sessao continua direta" : "so achei a mesma saida que ja falhou");
-            await clear();
-            return { retried: false as const, reason: found === null ? "nenhum proxy respondeu" : "sem saida nova" };
-        }
-    }
-
-    if (event.sender.isDestroyed()) return { retried: false as const, reason: "janela indisponivel" };
-
+    // Reserva a vaga antes de qualquer await: reconexoes em rajada disparam chamadas
+    // concorrentes que veriam o mesmo "retries" no intervalo entre awaits, furando o teto.
+    // Devolve a vaga se a tentativa nao for adiante -- nao e falha do servidor.
     retries++;
-    log(`o servidor bloqueou esta sessao, recarregando atras de ${safeProxy(proxy)} (tentativa ${retries} de ${MAX_RETRIES})`);
+    const attempt = retries;
+
+    if (scope === "off") {
+        retries--;
+        log("o roteador nao esta de pe, recarregar repetiria a mesma falha");
+        return { retried: false as const, reason: "roteador desligado" };
+    }
+
+    const requested = requestedCountries(excludedCountries);
+    const excluded = requested.size > 0 ? requested : undefined;
+
+    // Se a saida no ar ainda responde, foi corrida: o gateway nasceu antes dela e saiu direto.
+    // Recarregar conserta sem reinstalar a rota.
+    let through = exit;
+    if (through !== null && await measure(through, PROBE_TIMEOUT_MS) === null) {
+        log(`${safeProxy(through)} parou de responder no meio da sessao`);
+        dropExit(through, excluded);
+
+        // Le de volta em vez de assumir null: o trafego vivo pode ja ter achado outra saida.
+        through = exit;
+    }
+
+    // Sem saida no ar nao ha corrida a ganhar com o gateway -- vale esperar a busca inteira.
+    if (through === null) {
+        await chooseExit(excluded);
+        through = exit;
+    }
+
+    if (through === null) {
+        retries--;
+        log("nenhuma saida respondeu, a sessao continua direta");
+        return { retried: false as const, reason: "nenhuma saida respondeu" };
+    }
+
+    if (event.sender.isDestroyed()) {
+        retries--;
+        return { retried: false as const, reason: "janela indisponivel" };
+    }
+
+    log(`o servidor bloqueou esta sessao, recarregando atras de ${safeProxy(through)} (tentativa ${attempt} de ${MAX_RETRIES})`);
 
     // event.sender e a janela que roda o plugin. Guardar a primeira janela criada nao servia:
     // a primeira do Discord e a tela de abertura, e recarregar ela nao recarrega o cliente.
     event.sender.reload();
-    return { retried: true as const, attempt: retries };
+    return { retried: true as const, attempt };
 }
 
 export async function testProxy(_: IpcMainInvokeEvent, proxyRules: unknown) {
     if (typeof proxyRules !== "string" || parseProxy(proxyRules.trim()) === null)
         return { success: false as const, error: "Invalid proxy format. Use socks5://host:port." };
 
-    const result = await probe(proxyRules.trim());
+    const result = await measure(proxyRules.trim());
     if (result === null)
         return { success: false as const, error: "The proxy could not carry a real request to Discord." };
 
-    return { success: true as const, ms: result.ms, country: await exitCountry(proxyRules.trim()) };
+    return { success: true as const, ms: result.ms, country: result.country, ip: result.ip };
 }
+
+app.whenReady().then(async () => {
+    // Nao ha mais handler de "login" de proposito: com o roteador local, o Chromium so conversa
+    // com 127.0.0.1, que nao pede credencial. A autenticacao da saida acontece dentro do
+    // openTunnel, longe de qualquer site que pudesse recebe-la por engano.
+    log("=".repeat(60));
+    log(`abrindo | ${process.platform} ${process.arch} | electron ${process.versions.electron} | chrome ${process.versions.chrome}`);
+
+    const stored: Record<string, unknown> = RendererSettings.plain.plugins?.GoLiveBypass ?? {};
+    const show = (key: string, fallback: string) => (typeof stored[key] === "string" && stored[key] !== "" ? String(stored[key]) : fallback);
+    log(`configuracao | proxy ${show("proxy", "") === "" ? "automatico" : "definido por voce"} | roteamento ${show("sessionRouting", "gateway")} | regiao de call ${show("voiceRegion", "automatica")} | regiao de stream ${show("streamRegion", "automatica")} | paises fora ${show("excludedCountries", "BR")}`);
+
+    // O prazo de 2 minutos, a marca de boot pendente e o gancho did-fail-load sairam de
+    // proposito: so o gateway depende da saida agora, e o resto cai para direto sozinho
+    // dentro do roteador. Manter aquele prazo arrancaria uma sessao funcionando.
+    if (pluginEnabled()) await enable();
+}).catch(() => { });
