@@ -91,7 +91,7 @@ Ou seja, o fluxo do GoLiveBypass — **boot inteiro atrás da proxy → proxy re
 
 ## Avisos importantes
 
-- **Só funciona no Discord para computador** com Equicord ou Vencord injetado. Vesktop e Equibop não são suportados pelos instaladores: eles trazem o mod embutido e não carregam de um checkout. Não funciona na versão de navegador/extensão.
+- **Só funciona no Discord para computador** com Equicord ou Vencord injetado, incluindo o Discord instalado por Flatpak. Vesktop e Equibop não são suportados pelos instaladores: eles trazem o mod embutido e não carregam de um checkout. Snap também não: ali o app fica dentro de um squashfs somente leitura. Não funciona na versão de navegador/extensão.
 - **Proxies gratuitas são fracas para anonimato**: o operador da proxy vê seus metadados de conexão, muitas estão mortas ou lentas, e o Discord pode pedir captcha para IPs de proxies públicas. Para anonimato real, **use Tor**.
 - Usar clientes modificados viola os Termos de Serviço do Discord. Use por sua conta e risco.
 - A proxy cobre apenas a **criação da sessão**. Depois que a sessão abre (`CONNECTION_OPEN`), o tráfego volta a ser direto com seu IP real.
@@ -322,11 +322,15 @@ Isto mudou em maio de 2026, na versão 1.0.136 do Discord, e a maior parte dos t
 | `discord_arch_electron` (AUR) | `/usr/share/discord/resources/` |
 | `discord-electron-openasar` (AUR) | `/usr/lib/discord/resources/` — **já tem OpenAsar** |
 | `discord-ptb` / `discord-canary` (AUR) | `/opt/discord-ptb/resources/`, `/opt/discord-canary/resources/` |
-| Flatpak, Snap | somente leitura, **não dá para injetar** |
+| Flatpak do sistema | `/var/lib/flatpak/app/com.discordapp.Discord/current/active/files/discord/resources/` |
+| Flatpak do usuário | `~/.local/share/flatpak/app/com.discordapp.Discord/current/active/files/discord/resources/` |
+| Snap | dentro de um squashfs, somente leitura de verdade: **não dá para injetar** |
 
-Duas consequências práticas:
+Três consequências práticas:
 
-**Quase sempre não precisa de `sudo`.** Se o seu Discord veio pelo caminho normal, o `app.asar` está na sua pasta pessoal. Os instaladores só pedem root quando o alvo realmente pertence ao root — os pacotes do AUR que ainda embutem o app.
+**Quase sempre não precisa de `sudo`.** Se o seu Discord veio pelo caminho normal, o `app.asar` está na sua pasta pessoal. Os instaladores só pedem root quando o alvo realmente pertence ao root — os pacotes do AUR que ainda embutem o app, e o Flatpak instalado para o sistema todo.
+
+**Flatpak funciona, e um `flatpak update` desfaz.** O deploy do Flatpak parece intocável mas é um diretório comum: a injeção só renomeia o `app.asar` e cria uma pasta ao lado, sem reescrever arquivo nenhum, então os objetos do repositório ostree ficam intactos. O que muda é que cada atualização refaz o deploy inteiro e leva a injeção junto — rode o instalador de novo depois. Os instaladores também precisam liberar a pasta do bypass para o sandbox (`flatpak override --filesystem=`), senão o Discord abre reclamando de módulo não encontrado.
 
 **A atualização do Discord desfaz a injeção.** Ele baixa a versão nova numa pasta `app-<versão>` inteiramente nova, e o que você injetou fica na pasta velha. Não dá para impedir isso de fora: rode o instalador de novo depois de atualizar. O instalador avisa quando esse é o seu caso.
 
@@ -442,7 +446,7 @@ Se der erro de permissão no Windows, abra o PowerShell **como administrador** e
 
 O plugin **só funciona no app de computador** (ele usa recursos do Electron que o navegador não tem):
 
-- **Discord normal**: baixe em [discord.com/download](https://discord.com/download) (stable, PTB ou Canary servem); ou
+- **Discord normal**: baixe em [discord.com/download](https://discord.com/download) (stable, PTB ou Canary servem). O Flatpak (`com.discordapp.Discord`) também serve, do sistema ou do usuário; ou
 - **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido. Os instaladores daqui não mexem neles.
 - **Não funciona** no Discord aberto no navegador nem no celular.
 
@@ -546,7 +550,7 @@ Se o Discord reconectar o gateway sozinho no meio da sessão (queda de rede, sus
 
 ## Solução de problemas
 
-- **Discord carregando infinitamente**: normalmente ele se resolve sozinho, porque uma inicialização que não terminou deixa uma marca e a seguinte se recusa a aplicar proxy. Se persistir, com o Discord fechado abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`) e coloque `"GoLiveBypass": { "enabled": false }`. Em `native-settings.json` as chaves deste plugin são `verifiedProxy` (a proxy guardada) e `bootPending` (a marca); apagar as duas devolve tudo ao estado inicial. Se você usou uma versão anterior, apague também `lastKnownProxy`, que não é mais lida.
+- **Discord carregando infinitamente**: normalmente ele se resolve sozinho, porque uma inicialização que não terminou deixa uma marca e a seguinte se recusa a aplicar proxy. Se persistir, com o Discord fechado abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`; no Linux `~/.config/Equicord/settings/settings.json`, e com Discord por Flatpak `~/.var/app/com.discordapp.Discord/config/Equicord/settings/settings.json`) e coloque `"GoLiveBypass": { "enabled": false }`. Em `native-settings.json` as chaves deste plugin são `verifiedProxy` (a proxy guardada) e `bootPending` (a marca); apagar as duas devolve tudo ao estado inicial. Se você usou uma versão anterior, apague também `lastKnownProxy`, que não é mais lida.
 - **"GoLiveBypass is reconnecting behind the proxy"**: a proxy ficou pronta depois de o gateway já ter conectado, então a sessão nasceu desprotegida e o servidor manteve o bloqueio. O plugin procura uma proxy que responda e recarrega o cliente sozinho para a sessão renascer atrás dela. São no máximo duas tentativas: sem esse teto, um bloqueio que a proxy não resolve viraria recarregamento sem fim.
 - **Meu proxy pede usuário e senha**: coloque no próprio endereço, `socks5://usuario:senha@host:porta`. Funciona para SOCKS5 e para proxy HTTP. Se a senha tiver `@` ou `:`, codifique esses caracteres (`@` vira `%40`, `:` vira `%3A`) — sem isso não dá para saber onde a senha termina. A senha nunca aparece no registro.
 - **"No proxy could carry a real request to Discord"**: nenhuma candidata passou no teste TLS real naquele momento. Tente de novo, ou use Tor / uma proxy sua no campo Proxy.
@@ -565,6 +569,9 @@ Tudo o que o bypass faz vai para um arquivo, no plugin e no standalone, **no mes
 |---|---|
 | Windows | `%LOCALAPPDATA%\GoLiveBypass\golivebypass.log` |
 | Linux | `~/.local/share/GoLiveBypass/golivebypass.log` |
+| Linux, plugin com Discord por Flatpak | `~/.var/app/com.discordapp.Discord/data/GoLiveBypass/golivebypass.log` |
+
+A linha do Flatpak não é uma exceção do plugin: ele grava em `$XDG_DATA_HOME/GoLiveBypass`, e dentro do sandbox essa variável aponta para outro lugar. Pelo mesmo motivo as configurações do mod ficam em `~/.var/app/com.discordapp.Discord/config/Equicord/settings/settings.json` (ou `.../Vencord/...`), e não em `~/.config`. O standalone não muda de lugar: o `.js` mora fora do sandbox, e o registro fica ao lado dele.
 
 Ele é cortado sozinho quando passa de 256 KB, então não cresce sem fim.
 
@@ -652,7 +659,7 @@ exigia entender o que é um checkout, um gerenciador de pacotes e uma etapa de c
 
 It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). It works while the gateway WebSocket stays alive. If it reconnects over your real IP, Ctrl+R will not help: the proxy is only applied before the gateway is created, so you have to quit Discord from the tray and open it again. Bypassing the restriction may violate Discord's ToS.
 
-- Desktop Discord with Equicord or Vencord injected. Vesktop and Equibop are not supported by the installers, since they bundle the mod instead of loading it from a checkout. Not available on the browser extension.
+- Desktop Discord with Equicord or Vencord injected, Flatpak included. Vesktop and Equibop are not supported by the installers, since they bundle the mod instead of loading it from a checkout; neither is Snap, whose app lives in a read-only squashfs. Not available on the browser extension.
 - Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client. Tor is optional, not required: by default the plugin picks and validates a free proxy on its own.
 - **Your calls stay on the region you pick.** Creating the session abroad makes Discord rank foreign voice servers, so the plugin overrides the three `RTCRegionStore` getters that feed `preferred_region` / `preferred_regions` in the gateway `VOICE_STATE_UPDATE`. The override is evaluated at read time, so Discord's latency test cannot undo it, and it writes nothing into Discord's persisted state, so the region is not left pinned after you remove the plugin. Restored on `stop()`.
 - Proxy order: your manual proxy, then a local Tor (`127.0.0.1:9150` for Tor Browser, `9050` for the daemon), then a validated free proxy.

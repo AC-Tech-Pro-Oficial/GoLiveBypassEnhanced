@@ -5,6 +5,8 @@
 # Encontra sozinho o Equicord ou o Vencord que voce tem, instala o plugin, compila e injeta.
 # Se voce nao tiver nenhum dos dois, pergunta qual quer e instala junto.
 #
+# Funciona tambem com o Discord instalado por flatpak, do sistema ou do usuario.
+#
 # Uso:
 #   ./golivebypass-installer.sh
 #   ./golivebypass-installer.sh --source ~/Equicord
@@ -22,6 +24,7 @@ PLUGIN_FILES=("goLiveBypass/index.tsx" "goLiveBypass/native.ts")
 PLUGIN_DIR_NAME="goLiveBypass"
 EQUICORD_GIT="https://github.com/Equicord/Equicord"
 VENCORD_GIT="https://github.com/Vendicated/Vencord"
+FLATPAK_IDS=("com.discordapp.Discord" "com.discordapp.DiscordPTB" "com.discordapp.DiscordCanary")
 
 MODE="menu"
 MOD=""
@@ -63,6 +66,60 @@ confirm() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# O id do flatpak a que um caminho pertence, ou nada se o caminho nao for de flatpak. Serve
+# para os dois lugares onde o Discord de flatpak aparece: o deploy em .../flatpak/app/<id>/ e
+# o HOME do sandbox em ~/.var/app/<id>/.
+flatpak_app_id() {
+    local parte
+    while IFS= read -r parte; do
+        case "$parte" in com.discordapp.*) printf '%s\n' "$parte"; return 0 ;; esac
+    done < <(printf '%s\n' "${1:-}" | tr '/' '\n')
+    return 1
+}
+
+# Instalacao do usuario nao precisa de raiz para nada; a do sistema precisa para tudo. O
+# `flatpak override` obedece essa mesma divisao, e passar --user na do sistema falha.
+flatpak_is_user_install() {
+    have flatpak && flatpak info --user "$1" >/dev/null 2>&1
+}
+
+# A liberacao ja existente aparece no --show-permissions, que nao precisa de raiz. Conferir
+# antes evita pedir a senha do sudo toda vez que o instalador roda de novo.
+flatpak_has_access() {
+    local entrada
+    # Entrada por entrada, e comparando o texto inteiro: depois de um --nofilesystem a pasta
+    # continua aparecendo na lista, so que como !pasta. Procurar o pedaco solto acharia essa
+    # negacao e concluiria que o acesso existe, justamente quando ele nao existe mais.
+    while IFS= read -r entrada; do
+        case "$entrada" in
+            "$2"|"$2:rw"|"$2:ro"|"$2:create") return 0 ;;
+        esac
+    done < <(flatpak info --show-permissions "$1" 2>/dev/null | sed -n 's/^filesystems=//p' | tr ';' '\n')
+    return 1
+}
+
+# O flatpak so enxerga o proprio sandbox. Sem liberar a pasta de build do mod, o Discord abre
+# reclamando de modulo nao encontrado: o index.js injetado faz require de um caminho que de
+# dentro do sandbox nao existe. O instalador do mod ja faz isso sozinho, mas nao no caminho em
+# que a injecao ja estava pronta e nos so reiniciamos o Discord.
+grant_flatpak_access() {
+    local id="$1" dir="$2"
+    have flatpak || return 0
+    flatpak_has_access "$id" "$dir" && return 0
+
+    if flatpak_is_user_install "$id"; then
+        flatpak override --user "$id" --filesystem="$dir" >/dev/null 2>&1 && return 0
+    else
+        step "Liberando $dir para o $id (pode pedir sua senha do sudo)"
+        sudo flatpak override "$id" --filesystem="$dir" >/dev/null 2>&1 && return 0
+    fi
+
+    warn "Nao consegui liberar $dir para o $id. Se o Discord abrir com erro de modulo, rode:"
+    printf '  %s  flatpak override %s--filesystem=%s %s%s\n' \
+        "$C_DIM" "$(flatpak_is_user_install "$id" && printf -- '--user ')" "$dir" "$id" "$C_OFF" >&2
+    return 1
+}
+
 # O endereco da proxy pode carregar usuario e senha, e ele e mostrado na tela. A senha some.
 hide_proxy_secret() {
     printf '%s\n' "$1" | sed -E 's#^([a-z0-9]+)://([^:@/]+)(:[^@/]*)?@#\1://\2:***@#'
@@ -76,7 +133,7 @@ hide_proxy_secret() {
 have_pnpm() { have pnpm && pnpm --version >/dev/null 2>&1; }
 
 usage() {
-    sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -110,7 +167,7 @@ is_checkout() {
 # primeira execucao para dentro do HOME. Quem so olha /usr/share e /opt nao acha Discord nenhum
 # numa instalacao atual.
 discord_resources() {
-    local raiz sub base
+    local raiz sub base id
 
     base="${XDG_CONFIG_HOME:-$HOME/.config}"
     for sub in \
@@ -140,7 +197,69 @@ discord_resources() {
             fi
         done
     done
+
+    # Flatpak. O app fica no deploy do ostree, que e do root, mas e um diretorio comum num
+    # sistema de arquivos comum: a injecao troca o nome do app.asar e cria uma pasta ao lado,
+    # sem reescrever nenhum arquivo, entao os objetos do repositorio ficam intactos. E o que o
+    # instalador do Equicord e o do Vencord ja fazem ha tempos. O preco e que um
+    # `flatpak update` refaz o deploy e leva a injecao junto.
+    for raiz in /var/lib/flatpak/app "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app"; do
+        [ -d "$raiz" ] || continue
+        for id in "${FLATPAK_IDS[@]}"; do
+            for sub in "$raiz/$id"/current/active/files/*/resources; do
+                if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                    printf '%s\n' "$sub"
+                fi
+            done
+        done
+    done
+
+    # E o bootstrap de que fala o comentario aqui em cima, so que dentro do flatpak: o HOME do
+    # Discord vira ~/.var/app/<id>, e o app baixado cai la. Este e do proprio usuario, sem sudo.
+    for id in "${FLATPAK_IDS[@]}"; do
+        for sub in "$HOME/.var/app/$id"/config/discord*/app-*/resources; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                printf '%s\n' "$sub"
+            fi
+        done
+    done
+
     return 0
+}
+
+# O que passar em --location para o instalador do mod. Ele quer a pasta de cima, e no flatpak
+# quer o diretorio do app inteiro: e de la que ele descobre que aquilo e um flatpak e libera o
+# sandbox. Apontar direto para .../current/active/files/discord faz a liberacao nao acontecer,
+# e o Discord abre com erro de modulo.
+install_location() {
+    local resources="$1"
+    case "$resources" in
+        */current/active/*) printf '%s\n' "${resources%%/current/active/*}" ;;
+        */app-*/resources)  dirname "$(dirname "$resources")" ;;
+        */resources)        dirname "$resources" ;;
+        *)                  printf '%s\n' "$resources" ;;
+    esac
+}
+
+# O resources cujo app.asar aponta para este checkout, seja ele qual for. Base das tres
+# perguntas que o resto do script faz: se a injecao pegou, se ela caiu num flatpak, e em qual.
+injected_resources() {
+    local root="${1:-}" resources path
+    [ -n "$root" ] || return 1
+    while IFS= read -r resources; do
+        path="$(injected_path "$resources" || true)"
+        [ -n "$path" ] || continue
+        case "$path" in "$root"/*) printf '%s\n' "$resources"; return 0 ;; esac
+    done < <(discord_resources)
+    return 1
+}
+
+# O id do flatpak cuja injecao aponta para este checkout, se for o caso. Decide onde ficam as
+# configuracoes do mod e como reabrir o Discord.
+injected_flatpak_id() {
+    local resources
+    resources="$(injected_resources "${1:-}")" || return 1
+    flatpak_app_id "$resources"
 }
 
 # O instalador do Equicord e o do Vencord trocam o app.asar por um stub cujo index.js so faz
@@ -228,13 +347,7 @@ find_checkout() {
 }
 
 injected_from_checkout() {
-    local root="$1" resources path
-    while IFS= read -r resources; do
-        path="$(injected_path "$resources" || true)"
-        [ -n "$path" ] || continue
-        case "$path" in "$root"/*) return 0 ;; esac
-    done < <(discord_resources)
-    return 1
+    injected_resources "$1" >/dev/null
 }
 
 # ----------------------------------------------------------------------------- instalacao
@@ -435,16 +548,38 @@ repo_file() {
     fi
 }
 
+# O processo do flatpak tem o mesmo nome de sempre e o pgrep costuma achar, mas ele roda em
+# outro namespace de PID e um pkill pode nao alcancar. O `flatpak ps` responde pelo que o
+# pgrep nao ve, e o `flatpak kill` fecha o que o pkill nao fecha.
+discord_running() {
+    pgrep -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1 && return 0
+
+    # Um `flatpak ps` so, e nao um por id: isto roda em laco de dois em dois segundos enquanto
+    # o modo temporario espera o Discord fechar.
+    if have flatpak; then
+        local rodando
+        rodando="$(flatpak ps --columns=application 2>/dev/null || true)"
+        case "$rodando" in *com.discordapp.*) return 0 ;; esac
+    fi
+    return 1
+}
+
 stop_discord() {
-    pgrep -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1 || return 0
+    discord_running || return 0
 
     step "Fechando o Discord"
     pkill -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1 || true
+    if have flatpak; then
+        local id
+        for id in "${FLATPAK_IDS[@]}"; do
+            flatpak kill "$id" >/dev/null 2>&1 || true
+        done
+    fi
 
     local i
     for i in $(seq 1 30); do
         sleep 0.3
-        pgrep -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1 || return 0
+        discord_running || return 0
     done
 
     fail "O Discord nao fechou. Feche na mao e rode de novo."
@@ -485,15 +620,93 @@ build_mod() {
     (cd "$root" && pnpm build) || fail "pnpm build falhou"
 }
 
+# --location poupa a pergunta do instalador do mod quando so ha um Discord, e de quebra deixa
+# a escolha do sudo certa: da para saber de antemao onde a injecao vai cair. Com mais de um,
+# quem escolhe e o instalador do mod, que lista todos.
+run_inject() {
+    local root="$1" loc="${2:-}"
+
+    # Nem todo pnpm come o -- antes de repassar o resto, e o instalador do mod que recebe um --
+    # solto para de ler opcoes ali e ignora o --location. Nao da para impedir de fora; da para
+    # cair no caminho de sempre, que e o instalador do mod perguntando qual Discord usar.
+    if [ -n "$loc" ] && (cd "$root" && pnpm run inject -- --location "$loc"); then
+        return 0
+    fi
+
+    (cd "$root" && pnpm inject)
+}
+
+# O sudo limpa o ambiente, e sem PATH nem o pnpm nem o node sobrevivem. E o instalador do mod
+# que o pnpm baixa vai parar em dist/ como root: sem devolver o dono, o proximo build sem sudo
+# quebra com permissao negada numa pasta que era do usuario.
+run_inject_root() {
+    local root="$1" loc="${2:-}" rc=0
+    local -a cmd
+    if [ -n "$loc" ]; then
+        cmd=(pnpm run inject -- --location "$loc")
+    else
+        cmd=(pnpm inject)
+    fi
+
+    # Sem HOME de proposito: o instalador do mod ja descobre o HOME de verdade pelo SUDO_USER,
+    # e mandar o do usuario so faria o pnpm encher ~/.cache de arquivo do root.
+    sudo env PATH="$PATH" bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$root" "${cmd[@]}" || rc=$?
+
+    # Mesmo motivo do run_inject: se o --location nao chegou, tentar sem ele.
+    if [ "$rc" -ne 0 ] && [ -n "$loc" ]; then
+        rc=0
+        sudo env PATH="$PATH" bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$root" pnpm inject || rc=$?
+    fi
+
+    sudo chown -R "$(id -u):$(id -g)" "$root/dist" 2>/dev/null || true
+    return "$rc"
+}
+
 inject_mod() {
     local root="$1"
+    local -a alvos=()
+    local alvo="" loc="" id=""
+
+    mapfile -t alvos < <(discord_resources)
+    if [ "${#alvos[@]}" -eq 1 ]; then
+        alvo="${alvos[0]}"
+        loc="$(install_location "$alvo")"
+    fi
+
+    if [ -n "$alvo" ] && id="$(flatpak_app_id "$alvo")"; then
+        step "Discord instalado por flatpak ($id)"
+    fi
+
     stop_discord
-    step "Injetando no Discord (pode pedir sua senha do sudo)"
-    (cd "$root" && pnpm inject) || true
+
+    # Fora do HOME a injecao precisa de raiz, e o instalador do mod nao pede sozinho: ele so
+    # falha com permissao negada. Perguntar antes vale mais que falhar e mandar tentar de novo.
+    if [ -n "$alvo" ] && [ ! -w "$alvo" ]; then
+        printf '  %sO Discord esta em %s, fora do seu HOME.%s\n' "$C_DIM" "$alvo" "$C_OFF" >&2
+        confirm "A injecao ai precisa de sudo. Posso rodar com sudo?" \
+            || fail "Sem sudo nao da para injetar nesse Discord. Rode: cd $root && sudo pnpm inject"
+        step "Injetando no Discord"
+        run_inject_root "$root" "$loc" || true
+    else
+        step "Injetando no Discord (pode pedir sua senha do sudo)"
+        run_inject "$root" "$loc" || true
+
+        # O instalador do mod tambem cai aqui quando o Discord escolhido na lista dele estava
+        # fora do HOME, e ai o sudo so aparece como opcao depois.
+        if ! injected_from_checkout "$root" && confirm "Nao pegou. Tentar de novo com sudo?"; then
+            run_inject_root "$root" "$loc" || true
+        fi
+    fi
 
     # O pnpm inject sai com 0 mesmo quando o instalador do mod falha, entao o codigo de saida
     # nao serve de prova. Conferir se a injecao realmente passou a apontar para este checkout.
-    injected_from_checkout "$root" || fail "A injecao nao pegou. Se o Discord estiver em /usr/share ou /opt, rode: cd $root && sudo pnpm inject"
+    injected_from_checkout "$root" || fail "A injecao nao pegou. Se o Discord estiver em /usr/share, /opt ou num flatpak, rode: cd $root && sudo pnpm inject"
+
+    # De novo por conta propria, e nao so confiando no instalador do mod: ele so libera o
+    # sandbox quando descobre sozinho que aquilo e um flatpak, e o comando e idempotente.
+    if id="$(injected_flatpak_id "$root")"; then
+        grant_flatpak_access "$id" "$root/dist"
+    fi
 }
 
 checkout_mod() {
@@ -521,8 +734,16 @@ mod_settings_file() {
     # Mesma regra do proprio mod (src/main/utils/constants.ts):
     #   DATA_DIR = <MOD>_USER_DATA_DIR ?? ~/.config/<Mod>
     local root="$1"
-    local mod
+    local mod id
     mod="$(checkout_mod "$root")"
+
+    # Dentro do flatpak o HOME e outro: o ~/.config do mod cai em ~/.var/app/<id>/config. Um
+    # settings.json escrito no ~/.config de fora nao seria lido por ninguem, e o plugin abriria
+    # desligado depois de o instalador dizer que ativou.
+    if id="$(injected_flatpak_id "$root")"; then
+        printf '%s\n' "$HOME/.var/app/$id/config/$mod/settings/settings.json"
+        return 0
+    fi
 
     local override="${mod^^}_USER_DATA_DIR"
     if [ -n "${!override:-}" ]; then
@@ -574,13 +795,15 @@ set_plugin_settings() {
 
 show_status() {
     local root="${1:-}"
-    local count mod plugin
+    local count mod plugin extra=""
     count="$(discord_resources | wc -l)"
     mod="$(installed_mod || true)"
 
+    if discord_resources | grep -q '/com\.discordapp\.'; then extra=", flatpak"; fi
+
     printf '  %sDetectado:%s\n' "$C_BOLD" "$C_OFF"
     if [ "$count" -gt 0 ]; then
-        printf '  %s  Discord   instalado (%s)%s\n' "$C_DIM" "$count" "$C_OFF"
+        printf '  %s  Discord   instalado (%s%s)%s\n' "$C_DIM" "$count" "$extra" "$C_OFF"
     else
         printf '  %s  Discord   nao encontrado%s\n' "$C_YELLOW" "$C_OFF"
     fi
@@ -663,7 +886,15 @@ select_persistence() {
 }
 
 start_discord() {
-    local exe
+    local root="${1:-}" exe id
+
+    # Quem tem o flatpak e um Discord nativo pela metade acabaria com o nativo aberto, sem o
+    # mod, e concluiria que a instalacao falhou. Abrir o mesmo que foi injetado resolve.
+    if id="$(injected_flatpak_id "$root")" && have flatpak; then
+        nohup flatpak run "$id" >/dev/null 2>&1 &
+        return 0
+    fi
+
     for exe in discord Discord discord-canary; do
         if have "$exe"; then
             nohup "$exe" >/dev/null 2>&1 &
@@ -679,7 +910,7 @@ wait_discord_exit() {
     warn "Deixe este terminal aberto. Quando voce fechar o Discord, eu desfaco a injecao."
 
     sleep 5
-    while pgrep -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1; do sleep 2; done
+    while discord_running; do sleep 2; done
 
     printf '\n'
     step "Discord fechado, desfazendo a injecao"
@@ -702,18 +933,25 @@ do_install() {
     copy_plugin "$root"
     build_mod "$root"
 
+    local flatpak_id=""
     if injected_from_checkout "$root"; then
         step "O Discord ja carrega deste checkout, so reiniciando"
         stop_discord
+        # Por aqui o instalador do mod nao roda, e a liberacao do sandbox nao acontece
+        # sozinha. Se ela tiver caido num `flatpak update`, o Discord abriria com erro.
+        if flatpak_id="$(injected_flatpak_id "$root")"; then
+            grant_flatpak_access "$flatpak_id" "$root/dist"
+        fi
     else
         inject_mod "$root"
+        flatpak_id="$(injected_flatpak_id "$root" || true)"
     fi
 
     # Com o Discord fechado: aberto, ele regrava o settings.json a partir da memoria e
     # apaga o que escrevemos aqui.
     set_plugin_settings "$root" "$proxy"
 
-    start_discord
+    start_discord "$root"
 
     printf '\n'
     ok "Pronto. O plugin ja vem ativado, nao precisa mexer em nada."
@@ -725,6 +963,18 @@ do_install() {
         printf '  %sProxy: gratuita, escolhida e testada sozinha a cada abertura%s\n' "$C_DIM" "$C_OFF"
     fi
     printf '  %sEntre numa call e use Go Live ou a camera.%s\n' "$C_DIM" "$C_OFF"
+
+    # O deploy do flatpak e refeito do zero a cada atualizacao, e a injecao mora dentro dele.
+    # Nao da para impedir isso de fora, entao o que resta e avisar antes de acontecer.
+    if [ -n "$flatpak_id" ]; then
+        case "$(injected_resources "$root")" in
+            */flatpak/app/*)
+                printf '\n'
+                warn "Este Discord e flatpak: um 'flatpak update' desfaz a injecao."
+                printf '  %sQuando isso acontecer, rode este instalador de novo.%s\n' "$C_DIM" "$C_OFF"
+                ;;
+        esac
+    fi
 
     [ "$permanent" -eq 1 ] && wait_discord_exit "$root"
     return 0
@@ -744,7 +994,7 @@ do_uninstall() {
 
     build_mod "$root"
     stop_discord
-    start_discord
+    start_discord "$root"
 
     printf '\n'
     ok "Plugin removido. Seu Equicord/Vencord continua funcionando."
