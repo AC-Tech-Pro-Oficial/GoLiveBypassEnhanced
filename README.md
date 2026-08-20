@@ -723,6 +723,15 @@ GPL-3.0-or-later, mesma licença do Vencord/Equicord. Veja [LICENSE](LICENSE).
 
 ## Agradecimentos
 
+**Obrigado ao [mazxxy](https://github.com/mazxxy)** pela ideia que virou a espinha dorsal do projeto.
+
+Ele foi o primeiro a notar que o `session.setProxy` vale para a sessão inteira e a propor,
+na [PR #3](https://github.com/bezumiya/GoLiveBypass/pull/3), o desenho que usamos até hoje:
+um SOCKS5 local com um PAC embutido mandando **só o gateway** pela proxy. O standalone nasceu
+exatamente assim, e o plugin adotou o mesmo roteador depois. A PR ficou parada tempo demais
+por culpa minha; ela foi mesclada pela autoria, porque as linhas já tinham sido reescritas,
+mas a ideia é dele.
+
 **Obrigado ao [Vithor](https://github.com/Vith0r)** pelo instalador.
 
 Ele escreveu o primeiro instalador do GoLiveBypass por conta própria, e foi ele quem mostrou
@@ -773,5 +782,6 @@ It was written after Brazil's data protection authority (ANPD) [ordered Discord 
 - It cannot leave you unable to open Discord: the fallback decision lives inside the local router, not in the PAC (no `PROXY;DIRECT` for Chromium to silently prefer), a per-connection 12s stall budget fails open to direct, reserve exits take over mid-session, and a system proxy policy that varies per host (corporate PAC) makes the plugin refuse to enable rather than trample it.
 - Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings. On **Vesktop**, skip `pnpm inject` and point Vesktop's *Vencord Location* at your build's `dist` folder instead (see [Instalação no Vesktop](#instalação-no-vesktop)).
 - Made by **bezumiya** — [GitHub](https://github.com/bezumiya/GoLiveBypass), [Twitter](https://twitter.com/obezumiya), Discord `1366453661970071633`.
+- Thanks to **[mazxxy](https://github.com/mazxxy)** for the idea that became the project's backbone: a local SOCKS5 with an embedded PAC routing only the gateway through the proxy ([#3](https://github.com/bezumiya/GoLiveBypass/pull/3), merged for authorship — the lines were later rewritten, but the design is his).
 - Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[shubh2294](https://github.com/shubh2294)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override. Thanks to **[StellaThimoty](https://github.com/StellaThimoty)** for finding and testing the manual Vesktop path, and to **[pdl-clay](https://github.com/pdl-clay)** for turning it into the step-by-step guide in this README.
 - License: GPL-3.0-or-later.
