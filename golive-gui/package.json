@@ -6,8 +6,9 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && electron-builder --win --x64",
-    "preview": "vite preview"
+    "build": "node scripts/sync-bypass.mjs && tsc && vite build && electron-builder --win --x64",
+    "preview": "vite preview",
+    "sync-bypass": "node scripts/sync-bypass.mjs"
   },
   "build": {
     "appId": "com.golivebypass.gui",
