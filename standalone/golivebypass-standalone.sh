@@ -5,6 +5,8 @@
 # Instala direto no Discord, sem Equicord e sem Vencord. Nao precisa de Node, nem de pnpm,
 # nem de git: o bypass e um arquivo .js que o proprio Discord carrega.
 #
+# Funciona tambem com o Discord instalado por flatpak, do sistema ou do usuario.
+#
 # Uso:
 #   ./golivebypass-standalone.sh
 #   ./golivebypass-standalone.sh --proxy socks5://127.0.0.1:9050
@@ -16,6 +18,7 @@ set -euo pipefail
 PATCHER_NAME="golivebypass.js"
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass"
 STUB_PACKAGE='{"name":"discord","main":"index.js"}'
+FLATPAK_IDS=("com.discordapp.Discord" "com.discordapp.DiscordPTB" "com.discordapp.DiscordCanary")
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODE="install"
@@ -81,7 +84,7 @@ confirm() {
 # O app de verdade, com o app.asar, e baixado na primeira execucao para dentro do HOME. Quem
 # so olha /usr/share e /opt nao acha Discord nenhum numa instalacao atual.
 discord_dirs() {
-    local raiz sub base
+    local raiz sub base id
 
     base="${XDG_CONFIG_HOME:-$HOME/.config}"
     for sub in \
@@ -113,6 +116,92 @@ discord_dirs() {
         done
     done
 
+    # Flatpak. O deploy do ostree e do root, mas e um diretorio comum: a injecao troca o nome
+    # do app.asar e cria uma pasta ao lado, sem reescrever arquivo nenhum, entao os objetos do
+    # repositorio ficam intactos. O que muda em relacao ao resto e que um `flatpak update`
+    # refaz o deploy inteiro e leva a injecao junto.
+    for raiz in /var/lib/flatpak/app "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app"; do
+        [ -d "$raiz" ] || continue
+        for id in "${FLATPAK_IDS[@]}"; do
+            for sub in "$raiz/$id"/current/active/files/*/resources; do
+                if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                    printf '%s\n' "$sub"
+                fi
+            done
+        done
+    done
+
+    # O mesmo bootstrap de que fala o comentario la em cima, so que dentro do flatpak: o HOME
+    # do Discord vira ~/.var/app/<id>, e o app baixado cai la. Este e do proprio usuario.
+    for id in "${FLATPAK_IDS[@]}"; do
+        for sub in "$HOME/.var/app/$id"/config/discord*/app-*/resources; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                printf '%s\n' "$sub"
+            fi
+        done
+    done
+
+    return 0
+}
+
+# O id do flatpak a que um caminho pertence, ou nada se o caminho nao for de flatpak.
+flatpak_app_id() {
+    local parte
+    while IFS= read -r parte; do
+        case "$parte" in com.discordapp.*) printf '%s\n' "$parte"; return 0 ;; esac
+    done < <(printf '%s\n' "${1:-}" | tr '/' '\n')
+    return 1
+}
+
+flatpak_is_user_install() {
+    have flatpak && flatpak info --user "$1" >/dev/null 2>&1
+}
+
+# A liberacao ja existente aparece no --show-permissions, que nao precisa de raiz. Conferir
+# antes evita pedir a senha do sudo toda vez que o instalador roda de novo.
+flatpak_has_access() {
+    local entrada
+    # Entrada por entrada, e comparando o texto inteiro: depois de um --nofilesystem a pasta
+    # continua aparecendo na lista, so que como !pasta. Procurar o pedaco solto acharia essa
+    # negacao e concluiria que o acesso existe, justamente quando ele nao existe mais.
+    while IFS= read -r entrada; do
+        case "$entrada" in
+            "$2"|"$2:rw"|"$2:ro"|"$2:create") return 0 ;;
+        esac
+    done < <(flatpak info --show-permissions "$1" 2>/dev/null | sed -n 's/^filesystems=//p' | tr ';' '\n')
+    return 1
+}
+
+# O flatpak so enxerga o proprio sandbox, e o bypass mora fora dele. Sem esta liberacao o
+# index.js injetado faz require de um caminho que de dentro do sandbox nao existe, e o Discord
+# abre em tela branca. Precisa ser leitura e escrita: o registro tambem e gravado aqui.
+grant_flatpak_access() {
+    local id="$1" dir="$2"
+    have flatpak || return 0
+    flatpak_has_access "$id" "$dir" && return 0
+
+    if flatpak_is_user_install "$id"; then
+        flatpak override --user "$id" --filesystem="$dir" >/dev/null 2>&1 && return 0
+    else
+        step "Liberando $dir para o $id"
+        sudo flatpak override "$id" --filesystem="$dir" >/dev/null 2>&1 && return 0
+    fi
+
+    warn "Nao consegui liberar $dir para o $id. Se o Discord abrir em branco, rode:"
+    printf '      %sflatpak override %s--filesystem=%s %s%s\n' \
+        "$C_DIM" "$(flatpak_is_user_install "$id" && printf -- '--user ')" "$dir" "$id" "$C_OFF" >&2
+    return 1
+}
+
+revoke_flatpak_access() {
+    local id="$1" dir="$2"
+    have flatpak || return 0
+
+    if flatpak_is_user_install "$id"; then
+        flatpak override --user "$id" --nofilesystem="$dir" >/dev/null 2>&1 || true
+    else
+        sudo flatpak override "$id" --nofilesystem="$dir" >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -126,18 +215,14 @@ aviso_openasar() {
     return 0
 }
 
-# Flatpak e snap montam o app somente leitura, e a injecao nao tem como acontecer la dentro.
-# Detectar isso vale mais que falhar no meio com "permissao negada".
+# O snap monta o app dentro de um squashfs, que e somente leitura de verdade: nem o root
+# escreve la. Detectar isso vale mais que falhar no meio com "permissao negada". O flatpak nao
+# entra nesta lista: o deploy dele e um diretorio comum, e a injecao funciona.
 aviso_empacotado() {
-    if have flatpak && flatpak list --app 2>/dev/null | grep -qi "com.discordapp.Discord"; then
-        warn "Voce tem o Discord por Flatpak, e ali o sistema de arquivos e somente leitura."
-        printf '      %sA injecao nao acontece dentro de um Flatpak. Para usar o standalone,%s\n' "$C_DIM" "$C_OFF" >&2
-        printf '      %sinstale o Discord pelo site oficial ou pelo gerenciador da sua distro.%s\n' "$C_DIM" "$C_OFF" >&2
-    fi
-
     if have snap && snap list 2>/dev/null | grep -qi "^discord"; then
-        warn "Voce tem o Discord por snap, que tambem e somente leitura."
-        printf '      %sMesma coisa: instale pelo site oficial ou pela sua distro.%s\n' "$C_DIM" "$C_OFF" >&2
+        warn "Voce tem o Discord por snap, e ali o sistema de arquivos e somente leitura."
+        printf '      %sA injecao nao acontece dentro de um snap. Para usar o standalone,%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '      %sinstale o Discord por flatpak, pelo site oficial ou pela sua distro.%s\n' "$C_DIM" "$C_OFF" >&2
     fi
 
     return 0
@@ -168,16 +253,38 @@ as_root() {
     fi
 }
 
+# O Discord de flatpak roda em outro namespace de PID: o pgrep costuma ve-lo, mas o pkill pode
+# nao alcanca-lo. O `flatpak ps` e o `flatpak kill` respondem por essa parte.
+discord_running() {
+    pgrep -x Discord >/dev/null 2>&1 && return 0
+    pgrep -x DiscordPTB >/dev/null 2>&1 && return 0
+
+    # Um `flatpak ps` so, e nao um por id: isto roda em laco de dois em dois segundos enquanto
+    # o modo temporario espera o Discord fechar.
+    if have flatpak; then
+        local rodando
+        rodando="$(flatpak ps --columns=application 2>/dev/null || true)"
+        case "$rodando" in *com.discordapp.*) return 0 ;; esac
+    fi
+    return 1
+}
+
 stop_discord() {
-    pgrep -x Discord >/dev/null 2>&1 || pgrep -x DiscordPTB >/dev/null 2>&1 || return 0
+    discord_running || return 0
     step "Fechando o Discord"
     pkill -x Discord 2>/dev/null || true
     pkill -x DiscordPTB 2>/dev/null || true
+    if have flatpak; then
+        local id
+        for id in "${FLATPAK_IDS[@]}"; do
+            flatpak kill "$id" >/dev/null 2>&1 || true
+        done
+    fi
 
     local i
     for i in $(seq 1 40); do
         sleep 0.25
-        pgrep -x Discord >/dev/null 2>&1 || pgrep -x DiscordPTB >/dev/null 2>&1 || return 0
+        discord_running || return 0
     done
     fail "O Discord nao fechou. Feche na mao e rode de novo."
 }
@@ -273,6 +380,9 @@ if [ "$MODE" = "uninstall" ]; then
             continue
         fi
         remove_injection "$resources" && ok "$resources voltou ao normal."
+        if id="$(flatpak_app_id "$resources")"; then
+            revoke_flatpak_access "$id" "$INSTALL_DIR"
+        fi
     done
     exit 0
 fi
@@ -289,6 +399,13 @@ for resources in "${FOUND[@]}"; do
     fi
 
     install_patcher
+
+    # Antes do stop_discord de proposito: vale tanto para a injecao nova quanto para a que ja
+    # estava la, que sai por baixo daqui pelo continue.
+    if id="$(flatpak_app_id "$resources")"; then
+        grant_flatpak_access "$id" "$INSTALL_DIR"
+    fi
+
     stop_discord
 
     [ "$state" = "outromod" ] && remove_injection "$resources"
@@ -310,6 +427,15 @@ case " ${FOUND[*]} " in
     *"/app-"*)
         printf '  %sQuando o Discord se atualizar, ele cria uma pasta app-<versao> nova e a%s\n' "$C_DIM" "$C_OFF" >&2
         printf '  %sinjecao fica para tras. Rode este instalador de novo depois de atualizar.%s\n' "$C_DIM" "$C_OFF" >&2 ;;
+esac
+
+# O deploy do flatpak e refeito do zero a cada atualizacao, e a injecao mora dentro dele. Nao
+# da para impedir isso de fora, e nem o proprio bypass consegue se remendar depois: dentro do
+# sandbox a pasta do app e montada somente leitura. So resta avisar antes de acontecer.
+case " ${FOUND[*]} " in
+    *"/flatpak/app/"*)
+        printf '  %sEste Discord e flatpak: um "flatpak update" desfaz a injecao. Quando isso%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '  %sacontecer, rode este instalador de novo.%s\n' "$C_DIM" "$C_OFF" >&2 ;;
 esac
 printf '  %sRegistro em %s/golivebypass.log%s\n' "$C_DIM" "$INSTALL_DIR" "$C_OFF" >&2
 printf '  %sPara desfazer: ./golivebypass-standalone.sh --uninstall%s\n\n' "$C_DIM" "$C_OFF" >&2
