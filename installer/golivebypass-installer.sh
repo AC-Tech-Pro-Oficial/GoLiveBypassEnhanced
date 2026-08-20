@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # GoLiveBypass - instalador automatico (Linux)
 #
@@ -17,14 +17,42 @@
 # Obrigado ao Vithor (https://github.com/Vith0r), que escreveu o primeiro instalador do
 # GoLiveBypass e abriu o caminho para este aqui.
 
-set -euo pipefail
+# So construcoes POSIX: roda em dash, bash, zsh, ksh e busybox ash.
+# (sem pipefail de proposito: o status de pipeline e o do ultimo comando, como manda o POSIX)
+set -eu
+SCRIPT_PATH="${SCRIPT_PATH:-$0}"
+
+# ---------------------------------------------------------------------------
+# Portabilidade entre shells (POSIX + dash/ash/bash/zsh/ksh/mksh)
+#
+# zsh, por padrao, aborta com "no matches found" quando um glob nao casa
+# (nomatch). O comportamento POSIX - e o de todos os outros shells - e deixar
+# o glob literal, e os testes do script dependem disso (ex.: app-*/resources).
+if [ -n "${ZSH_VERSION:-}" ]; then
+    # so o zsh entende; nos outros shells isto e "command not found", engolido.
+    setopt NULL_GLOB 2>/dev/null || true
+fi
+
+# ksh93 nao tem o builtin `local` (usa `typeset`); dash, bash, zsh, mksh e
+# busybox ash tem. O probe roda `local` dentro de uma funcao: so e valido onde
+# o builtin existe. Onde nao existe, definimos um wrapper via eval — o conteudo
+# so e parseado nesse momento, entao o dash nunca ve a definicao.
+_local_probe() { local _probe_var=1; }
+if ! _local_probe 2>/dev/null; then
+    eval 'local() { typeset "$@"; }'
+fi
+unset -f _local_probe 2>/dev/null || true
+
+
+
+
 
 REPO_RAW="https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main"
-PLUGIN_FILES=("goLiveBypass/index.tsx" "goLiveBypass/native.ts")
+PLUGIN_FILES="goLiveBypass/index.tsx goLiveBypass/native.ts"
 PLUGIN_DIR_NAME="goLiveBypass"
 EQUICORD_GIT="https://github.com/Equicord/Equicord"
 VENCORD_GIT="https://github.com/Vendicated/Vencord"
-FLATPAK_IDS=("com.discordapp.Discord" "com.discordapp.DiscordPTB" "com.discordapp.DiscordCanary")
+FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary"
 
 MODE="menu"
 MOD=""
@@ -35,11 +63,12 @@ SOURCE=""
 PLUGIN_SOURCE=""
 ASSUME_YES=0
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 
 if [ -t 1 ]; then
-    C_DIM=$'\033[2m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
-    C_CYAN=$'\033[36m'; C_BOLD=$'\033[1m'; C_OFF=$'\033[0m'
+    # printf em vez do $'...' do bash: so POSIX, funciona em qualquer shell.
+    C_DIM=$(printf '\033[2m'); C_GREEN=$(printf '\033[32m'); C_YELLOW=$(printf '\033[33m'); C_RED=$(printf '\033[31m')
+    C_CYAN=$(printf '\033[36m'); C_BOLD=$(printf '\033[1m'); C_OFF=$(printf '\033[0m')
 else
     C_DIM=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_CYAN=""; C_BOLD=""; C_OFF=""
 fi
@@ -60,8 +89,12 @@ banner() {
 confirm() {
     [ "$ASSUME_YES" -eq 1 ] && return 0
     local answer
-    read -r -p "  $1 [s/N] " answer
-    [[ "$answer" =~ ^[sSyY] ]]
+    printf '  %s [s/N] ' "$1" >&2
+    read -r answer || return 1
+    case "$answer" in
+        [sSyY]*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -71,9 +104,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # o HOME do sandbox em ~/.var/app/<id>/.
 flatpak_app_id() {
     local parte
-    while IFS= read -r parte; do
+    for parte in $(printf '%s\n' "${1:-}" | tr '/' '\n'); do
         case "$parte" in com.discordapp.*) printf '%s\n' "$parte"; return 0 ;; esac
-    done < <(printf '%s\n' "${1:-}" | tr '/' '\n')
+    done
     return 1
 }
 
@@ -86,15 +119,19 @@ flatpak_is_user_install() {
 # A liberacao ja existente aparece no --show-permissions, que nao precisa de raiz. Conferir
 # antes evita pedir a senha do sudo toda vez que o instalador roda de novo.
 flatpak_has_access() {
-    local entrada
+    local entrada lista IFS
     # Entrada por entrada, e comparando o texto inteiro: depois de um --nofilesystem a pasta
     # continua aparecendo na lista, so que como !pasta. Procurar o pedaco solto acharia essa
     # negacao e concluiria que o acesso existe, justamente quando ele nao existe mais.
-    while IFS= read -r entrada; do
+    lista="$(flatpak info --show-permissions "$1" 2>/dev/null | sed -n 's/^filesystems=//p' | tr ';' '\n')"
+    [ -n "$lista" ] || return 1
+    IFS='
+'
+    for entrada in $lista; do
         case "$entrada" in
             "$2"|"$2:rw"|"$2:ro"|"$2:create") return 0 ;;
         esac
-    done < <(flatpak info --show-permissions "$1" 2>/dev/null | sed -n 's/^filesystems=//p' | tr ';' '\n')
+    done
     return 1
 }
 
@@ -136,7 +173,7 @@ hide_proxy_secret() {
 have_pnpm() { have pnpm && pnpm --version >/dev/null 2>&1 </dev/null; }
 
 usage() {
-    sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,18p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -208,7 +245,7 @@ discord_resources() {
     # `flatpak update` refaz o deploy e leva a injecao junto.
     for raiz in /var/lib/flatpak/app "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app"; do
         [ -d "$raiz" ] || continue
-        for id in "${FLATPAK_IDS[@]}"; do
+        for id in $FLATPAK_IDS; do
             for sub in "$raiz/$id"/current/active/files/*/resources; do
                 if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                     printf '%s\n' "$sub"
@@ -219,7 +256,7 @@ discord_resources() {
 
     # E o bootstrap de que fala o comentario aqui em cima, so que dentro do flatpak: o HOME do
     # Discord vira ~/.var/app/<id>, e o app baixado cai la. Este e do proprio usuario, sem sudo.
-    for id in "${FLATPAK_IDS[@]}"; do
+    for id in $FLATPAK_IDS; do
         for sub in "$HOME/.var/app/$id"/config/discord*/app-*/resources; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                 printf '%s\n' "$sub"
@@ -253,7 +290,9 @@ injected_resources() {
         path="$(injected_path "$resources" || true)"
         [ -n "$path" ] || continue
         case "$path" in "$root"/*) printf '%s\n' "$resources"; return 0 ;; esac
-    done < <(discord_resources)
+    done <<EOF
+    $(discord_resources)
+    EOF
     return 1
 }
 
@@ -269,13 +308,15 @@ injected_flatpak_id() {
 # require da pasta de build. Numa instalacao a partir do fonte esse require aponta direto para
 # <checkout>/dist/desktop, que e a forma mais confiavel de achar o checkout.
 injected_path() {
-    local resources="$1" file text
+    local resources="$1" file text match
     for file in "$resources/app/index.js" "$resources/app.asar"; do
         [ -f "$file" ] || continue
         [ "$(stat -c%s "$file" 2>/dev/null || echo 0)" -lt 65536 ] || continue
         text="$(tr -d '\0' < "$file" 2>/dev/null || true)"
-        if [[ "$text" =~ require\(\"([^\"]+)\"\) ]]; then
-            printf '%s\n' "${BASH_REMATCH[1]}"
+        # O mesmo casamento do =~ do bash, com sed: so POSIX.
+        match="$(printf '%s\n' "$text" | sed -n 's/.*require("\([^"]*\)").*/\1/p' | head -1)"
+        if [ -n "$match" ]; then
+            printf '%s\n' "$match"
             return 0
         fi
     done
@@ -287,13 +328,15 @@ installed_mod() {
     while IFS= read -r resources; do
         path="$(injected_path "$resources" || true)"
         [ -n "$path" ] || continue
-        case "${path,,}" in
+        case "$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')" in
             *equibop*) echo "Equibop"; return 0 ;;
             *equicord*) echo "Equicord"; return 0 ;;
             *vesktop*) echo "Vesktop"; return 0 ;;
             *vencord*) echo "Vencord"; return 0 ;;
         esac
-    done < <(discord_resources)
+    done <<EOF
+    $(discord_resources)
+    EOF
     return 1
 }
 
@@ -304,7 +347,9 @@ checkout_from_injection() {
         [ -n "$path" ] || continue
         root="$(dirname "$(dirname "$path")")"   # <checkout>/dist/desktop -> <checkout>
         if is_checkout "$root"; then printf '%s\n' "$root"; return 0; fi
-    done < <(discord_resources)
+    done <<EOF
+    $(discord_resources)
+    EOF
     return 1
 }
 
@@ -324,7 +369,9 @@ checkout_on_disk() {
     step "Procurando um pouco mais fundo em $HOME"
     while IFS= read -r candidate; do
         if is_checkout "$candidate"; then printf '%s\n' "$candidate"; return 0; fi
-    done < <(find "$HOME" -maxdepth 4 -type d \( -iname Equicord -o -iname Vencord \) 2>/dev/null | head -n 20)
+    done <<EOF
+$(find "$HOME" -maxdepth 4 -type d \( -iname Equicord -o -iname Vencord \) 2>/dev/null | head -n 20)
+EOF
 
     return 1
 }
@@ -357,7 +404,7 @@ injected_from_checkout() {
 
 choose_mod() {
     if [ -n "$MOD" ]; then
-        case "${MOD,,}" in
+        case "$(printf '%s' "$MOD" | tr '[:upper:]' '[:lower:]')" in
             equicord) echo "Equicord"; return 0 ;;
             vencord) echo "Vencord"; return 0 ;;
             *) fail "--mod aceita equicord ou vencord" ;;
@@ -382,7 +429,8 @@ choose_mod() {
     printf '    [0] Cancelar\n\n' >&2
 
     local choice
-    read -r -p "  Escolha: " choice
+    printf '%s' "  Escolha: " >&2
+    read -r choice
     case "$choice" in
         1) echo "Equicord" ;;
         2) echo "Vencord" ;;
@@ -448,19 +496,18 @@ node_velho_ajuda() {
 }
 
 ensure_toolchain() {
-    local need_git="$1" faltando=()
+    local need_git="$1" faltando="" cmd
 
-    [ "$need_git" -eq 1 ] && ! have git && faltando+=("git")
-    have node || faltando+=("nodejs")
-    have npm  || faltando+=("npm")
+    [ "$need_git" -eq 1 ] && ! have git && faltando="${faltando:+$faltando }git"
+    have node || faltando="${faltando:+$faltando }nodejs"
+    have npm  || faltando="${faltando:+$faltando }npm"
 
-    if [ ${#faltando[@]} -gt 0 ]; then
-        warn "Faltando: ${faltando[*]}"
+    if [ -n "$faltando" ]; then
+        warn "Faltando: $faltando"
 
-        local cmd
-        cmd="$(install_cmd "${faltando[@]}")"
+        cmd="$(install_cmd "$faltando")"
         if [ -z "$cmd" ]; then
-            printf '  %sNao reconheci o gerenciador de pacotes. Instale na mao: %s%s\n' "$C_DIM" "${faltando[*]}" "$C_OFF" >&2
+            printf '  %sNao reconheci o gerenciador de pacotes. Instale na mao: %s%s\n' "$C_DIM" "$faltando" "$C_OFF" >&2
             fail "Instale o que falta e rode de novo."
         fi
 
@@ -574,7 +621,7 @@ stop_discord() {
     pkill -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1 || true
     if have flatpak; then
         local id
-        for id in "${FLATPAK_IDS[@]}"; do
+        for id in $FLATPAK_IDS; do
             flatpak kill "$id" >/dev/null 2>&1 || true
         done
     fi
@@ -644,16 +691,14 @@ run_inject() {
 # quebra com permissao negada numa pasta que era do usuario.
 run_inject_root() {
     local root="$1" loc="${2:-}" rc=0
-    local -a cmd
-    if [ -n "$loc" ]; then
-        cmd=(pnpm run inject -- --location "$loc")
-    else
-        cmd=(pnpm inject)
-    fi
 
     # Sem HOME de proposito: o instalador do mod ja descobre o HOME de verdade pelo SUDO_USER,
     # e mandar o do usuario so faria o pnpm encher ~/.cache de arquivo do root.
-    sudo env PATH="$PATH" bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$root" "${cmd[@]}" || rc=$?
+    if [ -n "$loc" ]; then
+        sudo env PATH="$PATH" bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$root" pnpm run inject -- --location "$loc" || rc=$?
+    else
+        sudo env PATH="$PATH" bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$root" pnpm inject || rc=$?
+    fi
 
     # Mesmo motivo do run_inject: se o --location nao chegou, tentar sem ele.
     if [ "$rc" -ne 0 ] && [ -n "$loc" ]; then
@@ -667,12 +712,13 @@ run_inject_root() {
 
 inject_mod() {
     local root="$1"
-    local -a alvos=()
-    local alvo="" loc="" id=""
+    local alvo="" loc="" id="" n
 
-    mapfile -t alvos < <(discord_resources)
-    if [ "${#alvos[@]}" -eq 1 ]; then
-        alvo="${alvos[0]}"
+    # So o ultimo elemento importa (achar o unico Discord): contar com wc e pegar a ultima
+    # linha economiza o array, que nao existe no sh.
+    n="$(discord_resources | wc -l)"
+    if [ "$n" -eq 1 ]; then
+        alvo="$(discord_resources | tail -1)"
         loc="$(install_location "$alvo")"
     fi
 
@@ -721,7 +767,7 @@ checkout_mod() {
     if [ -f "$manifest" ]; then
         local name
         name="$(node -e 'try{process.stdout.write(String(require(process.argv[1]).name||""))}catch(e){}' "$manifest" 2>/dev/null || true)"
-        case "${name,,}" in
+        case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
             *equicord*) echo "Equicord"; return 0 ;;
             *vencord*) echo "Vencord"; return 0 ;;
         esac
@@ -748,9 +794,10 @@ mod_settings_file() {
         return 0
     fi
 
-    local override="${mod^^}_USER_DATA_DIR"
-    if [ -n "${!override:-}" ]; then
-        printf '%s\n' "${!override}/settings/settings.json"
+    local override
+    override="$(printf '%s' "$mod" | tr '[:lower:]' '[:upper:]')_USER_DATA_DIR"
+    if [ -n "$(eval "printf '%s' "\${$override:-}"")" ]; then
+        printf '%s\n' "$(eval "printf '%s' "\${$override}"")/settings/settings.json"
         return 0
     fi
 
@@ -841,7 +888,8 @@ select_target() {
     printf '    %s[2] Baixar e usar outro (Equicord ou Vencord)%s\n\n' "$C_CYAN" "$C_OFF" >&2
 
     local choice
-    read -r -p "  Escolha: " choice
+    printf '%s' "  Escolha: " >&2
+    read -r choice
     if [ "$choice" = "2" ]; then
         install_mod "$(choose_mod)"
     else
@@ -859,16 +907,24 @@ select_proxy() {
     printf '  %s      Voce informa o endereco, no formato socks5://host:porta.%s\n\n' "$C_DIM" "$C_OFF" >&2
 
     local choice manual
-    read -r -p "  Escolha: " choice
+    printf '%s' "  Escolha: " >&2
+    read -r choice
     case "$choice" in
         2) printf 'socks5://127.0.0.1:9050\n' ;;
         3)
             printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
             printf '  %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A)%s\n' "$C_DIM" "$C_OFF" >&2
-            read -r -p "  Endereco da proxy: " manual
+            printf '%s' "  Endereco da proxy: " >&2
+            read -r manual
             # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
             # : codificados. Recusar aqui deixaria o suporte a login existindo so no plugin.
-            [[ "$manual" =~ ^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}$ ]] || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+            # O mesmo casamento do =~ do bash, com case. O trecho antes do @ e opcional.
+            case "$manual" in
+                socks5://*|https://*|http://*)
+                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+                    ;;
+                *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
+            esac
             printf '%s\n' "$manual"
             ;;
         *) printf '\n' ;;
@@ -883,7 +939,8 @@ select_persistence() {
     printf '  %s      Vale so nesta sessao. Ao fechar o Discord a injecao e desfeita.%s\n\n' "$C_DIM" "$C_OFF" >&2
 
     local choice
-    read -r -p "  Escolha: " choice
+    printf '%s' "  Escolha: " >&2
+    read -r choice
     [ "$choice" = "2" ] && return 1
     return 0
 }
@@ -1032,7 +1089,8 @@ main_menu() {
     printf '    [0] Sair\n\n'
 
     local choice
-    read -r -p "  Escolha: " choice
+    printf '%s' "  Escolha: " >&2
+    read -r choice
     case "$choice" in
         1) do_install "$root" ;;
         2) do_uninstall ;;

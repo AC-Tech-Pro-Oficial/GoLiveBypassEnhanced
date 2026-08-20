@@ -79,8 +79,8 @@ Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e 
 
 **Linux**, no terminal:
 
-```bash
-bash <(curl -fsSL https://bezu.dev/golive.sh)
+```sh
+curl -fsSL https://bezu.dev/golive.sh -o golive.sh && sh golive.sh
 ```
 
 Os dois abrem o mesmo menu da instalação normal.
@@ -91,17 +91,13 @@ Se quiser passar opções, elas vão no fim:
 & ([scriptblock]::Create((irm https://bezu.dev/golive.ps1))) -Proxy "socks5://usuario:senha@host:1080"
 ```
 
-```bash
-bash <(curl -fsSL https://bezu.dev/golive.sh) --proxy socks5://usuario:senha@host:1080
+```sh
+curl -fsSL https://bezu.dev/golive.sh -o golive.sh && sh golive.sh --proxy socks5://usuario:senha@host:1080
 ```
 
 > **Por que não `irm ... | iex` e `curl ... | bash`?** As duas formas curtas funcionam, mas em silêncio pela metade. No Windows, `iex` **ignora as opções** — um `-Proxy` no fim simplesmente não chega. No Linux é pior: o `bash` passa a ler o script pela entrada padrão, então o menu tenta ler a sua resposta e acaba consumindo a próxima linha do próprio script. A pergunta nunca aparece.
 
-Se o seu shell não tiver `<(...)`, como `sh` ou `dash`, baixe antes:
-
-```bash
-curl -fsSL https://bezu.dev/golive.sh -o golive.sh && bash golive.sh
-```
+**Roda em qualquer shell** — bash, zsh, sh, dash, ksh, fish, ou o que você tiver. O comando acima baixa o script e roda com `sh` (o instalador é POSIX, não depende de bash). A forma antiga `bash <(curl -fsSL ...)` só funciona em bash/zsh (usa process substitution) e, pior, o `bash` lendo o script pela entrada padrão consome a sua resposta do menu — por isso a pergunta nunca aparecia.
 
 ### Baixando o arquivo
 
@@ -704,6 +700,10 @@ golive-gui/                        # app Electron de um clique (Windows): injeta
                                    #   mora na bandeja e reverte ao sair pelo ícone de lá;
                                    #   scripts/sync-bypass.mjs mantém
                                    #   a cópia embutida idêntica ao standalone
+
+tests/
+└── test-posix.sh                  # suíte de portabilidade: roda os instaladores em containers
+                                   #   (podman/docker) com sh, dash, ash, bash, zsh, ksh e mksh
 
 assets/
 └── instalacao.gif                 # o vídeo do começo deste README
