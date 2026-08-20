@@ -51,6 +51,7 @@ O Windows pode mostrar um aviso do SmartScreen na primeira vez, porque o program
 - [Avisos importantes](#avisos-importantes) — o que o plugin faz com a sua conexão, e os riscos
 - [Como funciona](#como-funciona) — as duas travas e como cada uma é desarmada
 - [Instalação manual, passo a passo](#instalação-passo-a-passo-completo) — cada etapa à mão
+- [Instalação no Vesktop](#instalação-no-vesktop) — passo a passo para quem usa o Vesktop no lugar do Discord normal
 - [Dependências](#dependências-o-que-baixar-e-como-instalar) — só para o caminho manual
 
 **Projeto**
@@ -430,7 +431,7 @@ Ou seja, o fluxo do GoLiveBypass — **o gateway nasce atrás da proxy e fica ne
 
 ## Avisos importantes
 
-- **Só funciona no Discord para computador** com Equicord ou Vencord injetado, incluindo o Discord instalado por Flatpak. Vesktop e Equibop não são suportados pelos instaladores: eles trazem o mod embutido e não carregam de um checkout. Snap também não: ali o app fica dentro de um squashfs somente leitura. Não funciona na versão de navegador/extensão.
+- **Só funciona no Discord para computador** com Equicord ou Vencord injetado, incluindo o Discord instalado por Flatpak. **Vesktop** tem suporte manual — veja [Instalação no Vesktop](#instalação-no-vesktop). Equibop e Snap não: o Equibop traz o mod embutido e não carrega de um checkout, e o Snap fica dentro de um squashfs somente leitura. Não funciona na versão de navegador/extensão.
 - **Proxies gratuitas são fracas para anonimato**: o operador da proxy vê seus metadados de conexão, muitas estão mortas ou lentas, e o Discord pode pedir captcha para IPs de proxies públicas. Para anonimato real, **use Tor**.
 - Usar clientes modificados viola os Termos de Serviço do Discord. Use por sua conta e risco.
 - A proxy carrega **só o gateway** (e também o login, se você ativar isso na configuração). Todo o resto — API, CDN, anexos, atualizações e a mídia das calls — sai direto com seu IP real o tempo todo.
@@ -530,7 +531,7 @@ Se der erro de permissão no Windows, abra o PowerShell **como administrador** e
 O plugin **só funciona no app de computador** (ele usa recursos do Electron que o navegador não tem):
 
 - **Discord normal**: baixe em [discord.com/download](https://discord.com/download) (stable, PTB ou Canary servem). O Flatpak (`com.discordapp.Discord`) também serve, do sistema ou do usuário; ou
-- **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido. Os instaladores daqui não mexem neles.
+- **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido. Os instaladores daqui não mexem neles, mas o **Vesktop tem suporte manual** — veja [Instalação no Vesktop](#instalação-no-vesktop).
 - **Não funciona** no Discord aberto no navegador nem no celular.
 
 ### Opcional: Tor — só se você quiser mais estabilidade
@@ -607,6 +608,73 @@ O instalador abre uma janelinha perguntando **qual Discord** você usa (Stable, 
 3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso abaixo antes de mudar)
 4. Reinicie o Discord por completo (bandeja, Quit). O roteador local sobe antes do gateway conectar, e só ele passa pela proxy
 5. Entre num canal de voz: **Go Live e câmera liberados**. Quem escolhe o servidor de voz é o Discord, e pode não ser o brasileiro. Não force `brazil` em **Voice region** sem ler o aviso na seção Configuração
+
+## Instalação no Vesktop
+
+O **Vesktop** é um cliente alternativo que já traz o Vencord embutido, então o fluxo muda em dois pontos: **não use `pnpm inject`** (não há Discord para injetar) e, no fim, aponte o próprio Vesktop para o build que você compilou.
+
+O processo abaixo é o mesmo do [passo a passo completo](#instalação-passo-a-passo-completo), com as diferenças marcadas:
+
+### Passo 1 — Baixe o código do Vencord
+
+No terminal, vá para a pasta onde quer guardar o projeto e clone:
+
+```bash
+cd Documents
+git clone https://github.com/Vendicated/Vencord
+cd Vencord
+```
+
+### Passo 2 — Instale as bibliotecas do build
+
+```bash
+pnpm install
+```
+
+### Passo 3 — Baixe o plugin e coloque na pasta certa
+
+1. Clone este repositório: `git clone https://github.com/bezumiya/GoLiveBypass`
+2. Copie a pasta **`goLiveBypass`** (a que contém `index.tsx` e `native.ts`) para dentro de:
+
+```
+Vencord/src/userplugins/goLiveBypass
+```
+
+**Atenção aos detalhes que mais quebram:**
+
+- A pasta `userplugins` **não existe por padrão** — crie ela dentro de `src/`
+- Ela fica em `src/userplugins`, **ao lado** de `src/plugins` — **nunca dentro** de `src/plugins`
+- No final, o caminho dos arquivos deve ser exatamente `src/userplugins/goLiveBypass/index.tsx` e `src/userplugins/goLiveBypass/native.ts`
+
+### Passo 4 — Compile
+
+```bash
+pnpm build
+```
+
+Isso gera a pasta `dist/` com o Vencord modificado já incluindo o plugin.
+
+### Passo 5 — Aponte o Vesktop para o seu build
+
+1. Abra o **Vesktop**
+2. Vá em **Vesktop Settings** (Configurações do Vesktop)
+3. Role até a seção **Vencord Location**
+4. Clique em **Change** (Mudar) e selecione a pasta **`dist`** dentro do seu clone do Vencord (ex.: `Documents/Vencord/dist`)
+5. Feche e reabra o Vesktop por completo
+
+> **Se o Vesktop for Flatpak**, o caminho pode virar `/run/1000/...` — um caminho temporário do sandbox que quebra no próximo reinício. Para resolver, dê ao sandbox acesso à pasta do build:
+>
+> ```bash
+> flatpak override dev.vencord.Vesktop --filesystem="$HOME/Documents/Vencord"
+> ```
+
+### Passo 6 — Ative o plugin e use
+
+1. Abra o Vesktop
+2. Vá em **Configurações → Vencord → Plugins** e ative **GoLiveBypass**
+3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso abaixo antes de mudar)
+4. Reinicie o Vesktop por completo (bandeja, Quit)
+5. Entre num canal de voz: **Go Live e câmera liberados**
 
 ## Estrutura
 
@@ -687,14 +755,14 @@ o instalador de novo depois de atualizar.
 
 It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). Because the gateway stays routed for the whole session, reconnects are born behind the same exit and the unlock survives network hiccups; if the exit dies, the router fails over to a tested reserve or fails open to a direct connection — never leaving you unable to open Discord. If the server still reports the session blocked, the plugin reloads the client behind the exit, at most twice. Bypassing the restriction may violate Discord's ToS.
 
-- Desktop Discord with Equicord or Vencord injected, Flatpak included. Vesktop and Equibop are not supported by the installers, since they bundle the mod instead of loading it from a checkout; neither is Snap, whose app lives in a read-only squashfs. Not available on the browser extension.
+- Desktop Discord with Equicord or Vencord injected, Flatpak included. **Vesktop is supported manually** — see [Instalação no Vesktop](#instalação-no-vesktop). Equibop and Snap are not: Equibop bundles the mod instead of loading it from a checkout, and Snap lives in a read-only squashfs. Not available on the browser extension.
 - Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client. Tor is optional, not required: by default the plugin picks and validates a free proxy on its own.
 - **Your calls stay on the region you pick.** Creating the session abroad makes Discord rank foreign voice servers, so the plugin overrides the three `RTCRegionStore` getters that feed `preferred_region` / `preferred_regions` in the gateway `VOICE_STATE_UPDATE`. The override is evaluated at read time, so Discord's latency test cannot undo it, and it writes nothing into Discord's persisted state, so the region is not left pinned after you remove the plugin. Restored on `stop()`.
 - Proxy order: your manual proxy, then the exits saved from last boots (revalidated), then a local Tor (`127.0.0.1:9150` for Tor Browser, `9050` for the daemon), then a validated free proxy.
 - Free proxies are weak for anonymity — prefer Tor.
 - Free proxies are ranked by the `alive` / `uptime` / `timeout` metadata the list already returns, port 4145 is dropped (measured 14/14 TLS interception), candidates race in batches of 12 and the first good one wins, and the test is a real TLS handshake through the tunnel against Cloudflare's trace (proving tunnel, valid certificate, real exit country and exit IP in one connection) followed by a reachability check against `gateway.discord.gg`. Up to 5 verified exits are kept for 24h in a pool. Measured: random pick with a handshake-only test works 12% of the time, ranked with a real TLS test works 60%.
 - It cannot leave you unable to open Discord: the fallback decision lives inside the local router, not in the PAC (no `PROXY;DIRECT` for Chromium to silently prefer), a per-connection 12s stall budget fails open to direct, reserve exits take over mid-session, and a system proxy policy that varies per host (corporate PAC) makes the plugin refuse to enable rather than trample it.
-- Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings.
+- Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings. On **Vesktop**, skip `pnpm inject` and point Vesktop's *Vencord Location* at your build's `dist` folder instead (see [Instalação no Vesktop](#instalação-no-vesktop)).
 - Made by **bezumiya** — [GitHub](https://github.com/bezumiya/GoLiveBypass), [Twitter](https://twitter.com/obezumiya), Discord `1366453661970071633`.
 - Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[shubh2294](https://github.com/shubh2294)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override.
 - License: GPL-3.0-or-later.
