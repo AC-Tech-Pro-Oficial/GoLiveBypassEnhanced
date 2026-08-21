@@ -115,7 +115,11 @@ function Test-Pnpm {
     # A saida e capturada inteira antes de olhar o codigo. Filtrar com Select-Object no meio do
     # cano interrompe o comando por cima, e o codigo de saida deixa de valer: um pnpm que
     # funciona era reprovado.
-    $found = & pnpm --version 2>$null
+    # O atalho do corepack pode nao so falhar como EXPLODIR: a pergunta "Corepack is about to
+    # download" sem resposta vira erro terminante por causa do ErrorActionPreference=Stop daqui.
+    # Sem o try/catch a excecao escapava do probe e derrubava o instalador inteiro, em vez de
+    # cair no npm install -g. Relato real: o instalador morria apontando a linha 16 do shim.
+    try { $found = & pnpm --version 2>$null } catch { return $false }
     if ($LASTEXITCODE -ne 0) { return $false }
 
     $script:PnpmVersion = ($found | Select-Object -First 1)

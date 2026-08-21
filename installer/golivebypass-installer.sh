@@ -130,7 +130,10 @@ hide_proxy_secret() {
 # busca essa versao no registro do npm e confere a assinatura com chaves embutidas nele; as
 # chaves do corepack que vem no Node 22 estao velhas, entao o atalho existe e mesmo assim
 # quebra com "Cannot find matching keyid". So testar se o comando existe nao prova nada.
-have_pnpm() { have pnpm && pnpm --version >/dev/null 2>&1; }
+# O </dev/null cobre o segundo modo de falha: um corepack virgem pergunta "Corepack is about
+# to download..." e fica esperando resposta pelo stdin, pendurando o instalador para sempre.
+# Com o stdin fechado ele aborta na hora e cai no npm install -g, como devia.
+have_pnpm() { have pnpm && pnpm --version >/dev/null 2>&1 </dev/null; }
 
 usage() {
     sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'

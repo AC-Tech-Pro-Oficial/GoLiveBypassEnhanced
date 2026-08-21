@@ -12,13 +12,7 @@ import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { homedir } from "os";
 import fs from "fs";
-import {
-  exec,
-  execFile,
-  execFileSync,
-  execSync,
-  spawnSync,
-} from "child_process";
+import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { bypassCode } from "./bypass";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -540,10 +534,16 @@ async function safeRemove(targetPath: string) {
 
 function startDiscord(install: DiscordInstall) {
   try {
+    // exec() deixava o stdout do Discord preso num pipe nosso: quando a GUI morria (ou o
+    // buffer do exec enchia), o pipe quebrava, e qualquer log de excecao do processo
+    // principal do Discord virava EPIPE fatal ("A JavaScript error occurred in the main
+    // process", relato real). O Discord precisa nascer sem pipe nenhum para nos: stdio
+    // ignorado e sem referencia. Sem detached de proposito: no Windows ele faz o filho
+    // sair na hora em alguns ambientes, e aqui ele nao falta.
     if (isMac && install.bundlePath) {
-      execFile("open", [install.bundlePath]);
+      spawn("open", [install.bundlePath], { stdio: "ignore" }).unref();
     } else if (install.exePath) {
-      exec(`"${install.exePath}"`);
+      spawn(install.exePath, [], { stdio: "ignore" }).unref();
     }
   } catch {}
 }
