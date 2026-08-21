@@ -22,6 +22,16 @@ const __dirname = dirname(__filename);
 const isMac = process.platform === "darwin";
 const IS_LINUX = process.platform === "linux";
 
+// No Linux com Wayland, o Chromium tenta inicializar Vulkan e o processo GPU cai com
+// "'--ozone-platform=wayland' is not compatible with Vulkan" (wayland_surface_factory.cc).
+// A janela abre, mas o renderer fica preso em "Verificando..." para sempre (o getStatus
+// via IPC nunca responde). Desligar a aceleracao de hardware (SwiftShader no lugar) resolve
+// — e este app e uma janela fixa de 480px, nao precisa de GPU. Vale para X11 tambem.
+if (IS_LINUX) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu");
+}
+
 // O fs do Electron trata *.asar como pasta. original-fs e o disco de verdade, o mesmo
 // que o instalador do Vencord usa para renomear o app.asar.
 const diskFs: typeof fs = (() => {
