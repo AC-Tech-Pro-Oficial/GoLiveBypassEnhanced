@@ -11,4 +11,5 @@ import { ipcRenderer } from 'electron';
   onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
   onRefreshStatus: (callback: () => void) => ipcRenderer.on('refresh-status', callback),
   resizeWindow: (height: number) => ipcRenderer.send('resize-window', height),
+  setTheme: (theme: string) => ipcRenderer.send('set-theme', theme),
 };

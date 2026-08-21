@@ -22,6 +22,20 @@ const __dirname = dirname(__filename);
 const isMac = process.platform === "darwin";
 const IS_LINUX = process.platform === "linux";
 
+// Cores da barra de titulo (Windows, titleBarOverlay) — casam com os tokens
+// --canvas e --ink do renderer em cada tema.
+const TITLEBAR = {
+  light: { color: "#F7F6F3", symbolColor: "#2F3437" },
+  dark: { color: "#0F0F12", symbolColor: "#E6E6EA" },
+};
+// Tema padrao: dark (o renderer tambem usa dark como fallback).
+let theme: "light" | "dark" = "dark";
+
+function applyTitlebarTheme() {
+  if (!mainWindow || mainWindow.isDestroyed() || isMac) return;
+  mainWindow.setTitleBarOverlay(TITLEBAR[theme]);
+}
+
 // No Linux com Wayland, o Chromium tenta inicializar Vulkan e o processo GPU cai com
 // "'--ozone-platform=wayland' is not compatible with Vulkan" (wayland_surface_factory.cc).
 // A janela abre, mas o renderer fica preso em "Verificando..." para sempre (o getStatus
@@ -219,10 +233,7 @@ function createWindow() {
           useContentSize: true,
         }
       : {
-          titleBarOverlay: {
-            color: "#1e1f22",
-            symbolColor: "#ffffff",
-          },
+          titleBarOverlay: TITLEBAR[theme],
         }),
   });
 
@@ -363,6 +374,41 @@ function createTray() {
   refreshTray().catch(() => {});
 }
 
+// No KDE Plasma (e outros com StatusNotifier), o Tray do Electron so aparece se o
+// org.kde.StatusNotifierWatcher ja estiver no session bus na hora da criacao. No login via
+// autostart o app sobe antes do Plasma terminar de subir, o watcher ainda nao existe, e o
+// Electron cai para o GtkStatusIcon — que o Plasma 6 nao mostra na bandeja. Esperar o watcher
+// (com timeout) resolve; sem watcher (ambientes sem SNI) cria mesmo assim, no fallback antigo.
+function waitForStatusNotifier(timeoutMs = 10000): Promise<void> {
+  if (!IS_LINUX) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      try {
+        execFileSync("dbus-send", [
+          "--session",
+          "--dest=org.freedesktop.DBus",
+          "--type=method_call",
+          "--print-reply",
+          "/org/freedesktop/DBus",
+          "org.freedesktop.DBus.NameHasOwner",
+          "string:org.kde.StatusNotifierWatcher",
+        ], { stdio: "ignore" });
+        resolve();
+        return;
+      } catch {
+        // watcher ainda nao subiu; tenta de novo ate o prazo
+      }
+      if (Date.now() - started > timeoutMs) {
+        resolve();
+        return;
+      }
+      setTimeout(check, 1000);
+    };
+    const started = Date.now();
+    check();
+  });
+}
+
 // Com o app morando na bandeja, rodar o exe de novo nao pode empilhar uma segunda copia:
 // ela morre aqui e a janela da primeira aparece.
 const gotLock = app.requestSingleInstanceLock();
@@ -374,7 +420,9 @@ if (!gotLock) {
   app.whenReady().then(() => {
     // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
     if (!launchedHidden()) createWindow();
-    createTray();
+    // No KDE o watcher da bandeja (StatusNotifier) pode demorar a subir no login; esperar
+    // evita o Tray cair para o GtkStatusIcon, que o Plasma 6 nao exibe.
+    waitForStatusNotifier().then(createTray);
     app.on("activate", showWindow);
   });
 }
@@ -859,4 +907,12 @@ ipcMain.on('resize-window', (_event, height: unknown) => {
   const [, currentH] = mainWindow.getSize();
   if (Math.abs(currentH - Math.round(h)) < 2) return;
   mainWindow.setSize(480, Math.round(h));
+});
+
+// O renderer avisa quando o tema muda para o overlay da barra de titulo
+// (Windows) acompanhar; no Mac e Linux nao ha overlay a ajustar.
+ipcMain.on('set-theme', (_event, value: unknown) => {
+  if (value !== 'light' && value !== 'dark') return;
+  theme = value;
+  applyTitlebarTheme();
 });
