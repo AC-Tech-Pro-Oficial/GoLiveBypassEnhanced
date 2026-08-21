@@ -291,6 +291,7 @@ p {
 .startup-row input {
   accent-color: var(--primary);
   cursor: pointer;
+}
 
 /* Caixa de log do script (Linux): mostra o progresso em tempo real. */
 .log-box {
