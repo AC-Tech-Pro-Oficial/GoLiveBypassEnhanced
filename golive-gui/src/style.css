@@ -292,3 +292,21 @@ p {
   accent-color: var(--primary);
   cursor: pointer;
 }
+
+/* Caixa de log do script (Linux): mostra o progresso em tempo real. */
+.log-box {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  color: #a8b3c0;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 12px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  width: 100%;
+}

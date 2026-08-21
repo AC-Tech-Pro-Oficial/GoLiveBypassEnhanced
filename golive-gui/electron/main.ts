@@ -4,11 +4,13 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 import { bypassCode } from './bypass';
+import { findStandaloneScript, runScript } from './linux-helper';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const FLAVOURS = ['Discord', 'DiscordPTB', 'DiscordCanary'];
+const IS_LINUX = process.platform === 'linux';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -119,8 +121,14 @@ function refreshTray() {
 
 async function toggleFromTray() {
   try {
-    if (getStatus() === 'ACTIVE') await deactivateAll();
-    else await activateBypass(null, '');
+    if (IS_LINUX) {
+      const status = await linuxStatus();
+      if (status === 'ACTIVE') await linuxDeactivate(() => {});
+      else await linuxActivate('', () => {});
+    } else {
+      if (getStatus() === 'ACTIVE') await deactivateAll();
+      else await activateBypass(null, '');
+    }
   } finally {
     refreshTray();
   }
@@ -154,9 +162,14 @@ if (!gotLock) {
 }
 
 app.on('window-all-closed', () => {
-  deactivateAll().finally(() => {
-    app.quit();
-  });
+  // Modo portatil: ao fechar a janela, reverte a injecao (igual ao Windows).
+  if (IS_LINUX) {
+    linuxDeactivate(() => {}).finally(() => app.quit());
+  } else {
+    deactivateAll().finally(() => {
+      app.quit();
+    });
+  }
 });
 
 function withNoAsar<T>(fn: () => T): T {
@@ -356,15 +369,68 @@ function getStatus(): string {
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
 // tambem remontam o menu ao terminar.
-ipcMain.handle('activate', async (event, proxyAddress: string) => {
-  await activateBypass(event, proxyAddress);
+// ---------------------------------------------------------------------------
+// Linux: delega para o script standalone (POSIX). A GUI e uma casca: quem decide
+// tudo (deteccao, flatpak, sudo, injecao) e o script, e a GUI mostra o progresso.
+// ---------------------------------------------------------------------------
+
+function linuxStatus(): Promise<string> {
+  return runScript(['--status', '--json']).then(({ code, stdout }) => {
+    if (code !== 0) return 'NOT_FOUND';
+    try {
+      const data = JSON.parse(stdout);
+      const discords = data.discords ?? [];
+      if (discords.length === 0) return 'NOT_FOUND';
+      // Precisamos saber se ALGUM ja tem o nosso bypass
+      const anyOurs = discords.some((d: any) => d.state === 'nosso');
+      const anyMod = discords.some((d: any) => d.state === 'outromod');
+      if (anyOurs) return 'ACTIVE';
+      if (anyMod) return 'OTHER_MOD';
+      return 'INACTIVE';
+    } catch {
+      return 'NOT_FOUND';
+    }
+  }).catch(() => 'NOT_FOUND');
+}
+
+async function linuxActivate(proxyAddress: string, onChunk: (c: string) => void) {
+  const args = ['--yes'];
+  if (proxyAddress.trim() !== '') args.push('--proxy', proxyAddress.trim());
+  const { code, stderr } = await runScript(args, onChunk);
+  if (code !== 0) {
+    throw new Error(stderr.split('\n').filter(Boolean).slice(-3).join('\n') || 'Falha ao ativar');
+  }
+}
+
+async function linuxDeactivate(onChunk: (c: string) => void) {
+  const { code, stderr } = await runScript(['--uninstall'], onChunk);
+  if (code !== 0) {
+    throw new Error(stderr.split('\n').filter(Boolean).slice(-3).join('\n') || 'Falha ao desativar');
+  }
+}
+
+ipcMain.handle('activate', async (event, proxyAddress: string = '') => {
+  if (IS_LINUX) {
+    await linuxActivate(proxyAddress, (c) => event.sender.send('bypass-log', c));
+  } else {
+    await activateBypass(event, proxyAddress);
+  }
   refreshTray();
 });
-ipcMain.handle('deactivate', async () => {
-  await deactivateAll();
+ipcMain.handle('deactivate', async (event) => {
+  if (IS_LINUX) {
+    await linuxDeactivate((c) => event.sender.send('bypass-log', c));
+  } else {
+    await deactivateAll();
+  }
   refreshTray();
 });
-ipcMain.handle('get-status', () => getStatus());
+ipcMain.handle('get-status', async () => {
+  if (IS_LINUX) {
+    return linuxStatus();
+  }
+  return getStatus();
+});
 ipcMain.handle('get-startup', () => getStartup());
 ipcMain.handle('set-startup', (_event, enabled: unknown) => {
   setStartup(enabled === true);
