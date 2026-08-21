@@ -1,0 +1,75 @@
+name: build-gui
+
+# Manual de proposito: roda quando a gente dispara para uma tag de release, constroi os
+# tres artefatos da GUI (exe Windows, AppImage Linux, dmg/zip macOS) e anexa na release.
+# Mac e Linux nao compilam no Windows, entao eles nascem aqui.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release que recebe os artefatos (ex.: v1.1.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: golive-gui
+      - run: npm run build:win
+        working-directory: golive-gui
+      - name: Publica o exe na release
+        working-directory: golive-gui
+        run: gh release upload ${{ inputs.tag }} dist-app/GoLiveBypass.exe --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: golive-gui
+      - run: npm run build:linux
+        working-directory: golive-gui
+      - name: Publica a AppImage na release
+        working-directory: golive-gui
+        run: gh release upload ${{ inputs.tag }} dist-app/*.AppImage --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: golive-gui
+      - run: npm run build:mac
+        working-directory: golive-gui
+      - name: Publica dmg e zip na release
+        working-directory: golive-gui
+        run: |
+          gh release upload ${{ inputs.tag }} dist-app/GoLiveBypass.dmg --clobber
+          gh release upload ${{ inputs.tag }} dist-app/GoLiveBypass.zip --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
