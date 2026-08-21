@@ -3,6 +3,7 @@ import './style.css'
 declare global {
   interface Window {
     api: {
+      platform: string;
       activate: (proxy?: string) => Promise<void>;
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
@@ -16,6 +17,31 @@ declare global {
   }
 }
 
+const platform = window.api.platform;
+const isMac = platform === 'darwin';
+const isLinux = platform === 'linux';
+const reloadShortcut = isMac ? 'Cmd + R' : 'Ctrl + R';
+
+function applyPlatformCopy() {
+  document.body.classList.toggle('darwin', isMac);
+
+  const startupLabel = document.getElementById('startupLabel');
+  if (startupLabel) {
+    // Linux: autostart XDG; Windows/Mac: login item. O rotulo acompanha o SO.
+    startupLabel.textContent = isMac ? 'Iniciar com o Mac' : isLinux ? 'Iniciar com o sistema' : 'Iniciar com o Windows';
+  }
+
+  const closeHint = document.getElementById('closeHint');
+  if (closeHint) {
+    closeHint.textContent = isMac
+      ? 'Fechar a janela esconde o app na barra de menus, junto do relógio — para reverter tudo, saia pelo ícone de lá.'
+      : 'Fechar a janela esconde o app na bandeja, junto do relógio — para reverter tudo, saia pelo ícone de lá.';
+  }
+
+  const reloadKeys = document.getElementById('reloadKeys');
+  if (reloadKeys) reloadKeys.textContent = reloadShortcut;
+}
+
 const statusIndicator = document.getElementById('statusIndicator')!;
 const statusText = document.getElementById('statusText')!;
 const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
@@ -23,7 +49,6 @@ const btnText = document.getElementById('btnText')!;
 const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
-const startupLabel = document.getElementById('startupLabel') as HTMLLabelElement;
 
 
 
@@ -92,7 +117,7 @@ toggleBtn.addEventListener('click', async () => {
       await window.api.activate(proxy);
 
       // Popup de aviso
-      alert("GoLiveBypass Ativado!\n\nAVISO IMPORTANTE: Se a transmissão ficar preta ou não carregar, aperte Ctrl + R dentro do Discord.");
+      alert(`GoLiveBypass Ativado!\n\nAVISO IMPORTANTE: Se a transmissão ficar preta ou não carregar, aperte ${reloadShortcut} dentro do Discord.`);
     }
   } catch (err) {
     alert('Erro: ' + err);
@@ -102,20 +127,10 @@ toggleBtn.addEventListener('click', async () => {
 });
 
 // Inicialização
+applyPlatformCopy();
 updateStatus();
 refreshStartup();
-updateStartupLabel();
 fitWindowToContent();
-
-async function updateStartupLabel() {
-  try {
-    const platform = await window.api.getPlatform();
-    // O texto depende do SO: no Linux o autostart e um .desktop XDG, no Windows um login item.
-    startupLabel.textContent = platform === 'linux' ? 'Iniciar com o sistema' : 'Iniciar com o Windows';
-  } catch (err) {
-    console.error(err);
-  }
-}
 
 async function refreshStartup() {
   try {
