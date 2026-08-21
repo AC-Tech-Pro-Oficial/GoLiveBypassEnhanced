@@ -3,6 +3,7 @@ import './style.css'
 declare global {
   interface Window {
     api: {
+      platform: string;
       activate: (proxy?: string) => Promise<void>;
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
@@ -13,6 +14,26 @@ declare global {
       onLog: (cb: (chunk: string) => void) => () => void;
     }
   }
+}
+
+const isMac = window.api.platform === 'darwin';
+const reloadShortcut = isMac ? 'Cmd + R' : 'Ctrl + R';
+
+function applyPlatformCopy() {
+  document.body.classList.toggle('darwin', isMac);
+
+  const startupLabel = document.getElementById('startupLabel');
+  if (startupLabel) startupLabel.textContent = isMac ? 'Iniciar com o Mac' : 'Iniciar com o Windows';
+
+  const closeHint = document.getElementById('closeHint');
+  if (closeHint) {
+    closeHint.textContent = isMac
+      ? 'Fechar a janela esconde o app na barra de menus, junto do relógio — para reverter tudo, saia pelo ícone de lá.'
+      : 'Fechar a janela esconde o app na bandeja, junto do relógio — para reverter tudo, saia pelo ícone de lá.';
+  }
+
+  const reloadKeys = document.getElementById('reloadKeys');
+  if (reloadKeys) reloadKeys.textContent = reloadShortcut;
 }
 
 const statusIndicator = document.getElementById('statusIndicator')!;
@@ -84,7 +105,7 @@ toggleBtn.addEventListener('click', async () => {
       await window.api.activate(proxy);
 
       // Popup de aviso
-      alert("GoLiveBypass Ativado!\n\nAVISO IMPORTANTE: Se a transmissão ficar preta ou não carregar, aperte Ctrl + R dentro do Discord.");
+      alert(`GoLiveBypass Ativado!\n\nAVISO IMPORTANTE: Se a transmissão ficar preta ou não carregar, aperte ${reloadShortcut} dentro do Discord.`);
     }
   } catch (err) {
     alert('Erro: ' + err);
@@ -95,6 +116,7 @@ toggleBtn.addEventListener('click', async () => {
 });
 
 // Inicialização
+applyPlatformCopy();
 updateStatus();
 refreshStartup();
 

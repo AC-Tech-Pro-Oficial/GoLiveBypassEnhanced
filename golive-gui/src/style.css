@@ -50,6 +50,15 @@ body {
   gap: 32px;
 }
 
+/* Classe colocada pelo renderer a partir do flag de plataforma do preload. */
+.darwin .drag-region {
+  height: 52px;
+}
+
+.darwin .container {
+  padding-top: 64px;
+}
+
 .header {
   text-align: center;
   display: flex;

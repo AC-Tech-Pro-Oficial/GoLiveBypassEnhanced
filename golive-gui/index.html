@@ -32,7 +32,7 @@
 
         <label class="startup-row">
           <input type="checkbox" id="startupToggle" />
-          <span>Iniciar com o Windows</span>
+          <span id="startupLabel">Iniciar com o Windows</span>
         </label>
 
         <div class="advanced-section">
@@ -48,12 +48,12 @@
         <pre id="logBox" class="log-box" style="display: none;"></pre>
 
         <p class="disclaimer">
-          O Discord reiniciará automaticamente. Fechar a janela esconde o app na bandeja, junto do relógio — para reverter tudo, saia pelo ícone de lá.<br>
+          O Discord reiniciará automaticamente. <span id="closeHint">Fechar a janela esconde o app na bandeja, junto do relógio — para reverter tudo, saia pelo ícone de lá.</span><br>
           <span class="credits">Projeto Open Source criado por bezumiya, cleo-dev e Vith0r.</span>
         </p>
 
         <div id="warningAlert" class="warning-alert" style="display: none;">
-          <strong>Aviso:</strong> Se a transmissão ficar preta ou não carregar, aperte <strong>Ctrl + R</strong> no Discord.
+          <strong>Aviso:</strong> Se a transmissão ficar preta ou não carregar, aperte <strong id="reloadKeys">Ctrl + R</strong> no Discord.
         </div>
       </div>
     </div>
