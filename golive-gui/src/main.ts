@@ -50,8 +50,6 @@ const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 
-
-
 let currentState = 'INACTIVE';
 
 // O warning do bypass ativo faz o conteudo crescer; a janela e fixa, entao reportamos a altura
@@ -63,8 +61,6 @@ function fitWindowToContent() {
   const height = Math.ceil(container.getBoundingClientRect().height + 1);
   window.api.resizeWindow(height);
 }
-
-
 
 async function updateStatus() {
   try {

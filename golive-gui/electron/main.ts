@@ -204,7 +204,10 @@ function createWindow() {
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
     ...(isMac
-      ? { trafficLightPosition: { x: 8, y: 8 } }
+      ? {
+          trafficLightPosition: { x: 8, y: 8 },
+          useContentSize: true,
+        }
       : {
           titleBarOverlay: {
             color: "#1e1f22",
