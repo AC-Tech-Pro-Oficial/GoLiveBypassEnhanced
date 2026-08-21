@@ -650,7 +650,11 @@ copy_plugin() {
     # versoes antigas usavam index.ts; deixar os dois quebra o build
     rm -f "$target/index.ts"
 
-    for file in "${PLUGIN_FILES[@]}"; do
+    # PLUGIN_FILES virou uma string com espacos na conversao POSIX (nao ha arrays no sh).
+    # Sem aspas de proposito: divide nos espacos, uma palavra por arquivo. Com aspas, o
+    # "${PLUGIN_FILES[@]}" restante colava os dois caminhos num so e o curl recusava a URL
+    # malformada — o plugin nunca baixava (relato real: "URL rejected: Malformed input").
+    for file in $PLUGIN_FILES; do
         if [ -n "$PLUGIN_SOURCE" ]; then
             [ -f "$PLUGIN_SOURCE/$(basename "$file")" ] || fail "Nao achei $(basename "$file") em $PLUGIN_SOURCE."
             cp "$PLUGIN_SOURCE/$(basename "$file")" "$target/$(basename "$file")"
