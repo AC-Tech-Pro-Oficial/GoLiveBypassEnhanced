@@ -64,7 +64,7 @@ curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer <API_TOKEN>'
   -d '{"title":""}'
 
 # com token fake → 502 (chega no GitHub e falha na auth) — confirma o fluxo
-API_TOKEN=dev GITHUB_TOKEN=fake GITHUB_REPO=pdl-clay/GoLiveBypass go run ./cmd/api
+API_TOKEN=dev GITHUB_TOKEN=fake GITHUB_REPO=bezumiya/GoLiveBypass go run ./cmd/api
 curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer dev' \
   -d '{"title":"Teste","log":"linha do log","meta":{"app":"cli","os":"linux"}}'
 ```
@@ -75,7 +75,7 @@ curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer dev' \
 docker build -t golive-api api
 docker run --rm -p 8080:8080 \
   -e API_TOKEN=... -e GITHUB_TOKEN=... \
-  -e GITHUB_REPO=pdl-clay/GoLiveBypass \
+  -e GITHUB_REPO=bezumiya/GoLiveBypass \
   golive-api
 ```
 

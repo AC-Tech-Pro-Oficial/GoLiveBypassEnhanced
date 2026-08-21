@@ -12,8 +12,8 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"github.com/pdl-clay/GoLiveBypass/api/internal/config"
-	"github.com/pdl-clay/GoLiveBypass/api/internal/gh"
+	"github.com/bezumiya/GoLiveBypass/api/internal/config"
+	"github.com/bezumiya/GoLiveBypass/api/internal/gh"
 )
 
 type fakeIssues struct {

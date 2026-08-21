@@ -7,7 +7,7 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 
-	"github.com/pdl-clay/GoLiveBypass/api/internal/config"
+	"github.com/bezumiya/GoLiveBypass/api/internal/config"
 )
 
 func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Echo {

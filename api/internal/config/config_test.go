@@ -61,7 +61,7 @@ func TestLoadInvalidRepo(t *testing.T) {
 func TestLoadOverrides(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
-	t.Setenv("GITHUB_REPO", "pdl-clay/GoLiveBypass")
+	t.Setenv("GITHUB_REPO", "bezumiya/GoLiveBypass")
 	t.Setenv("ISSUE_LABELS", "bug, triage , ")
 	t.Setenv("RATE_LIMIT", "120")
 	t.Setenv("PORT", "9090")
@@ -71,7 +71,7 @@ func TestLoadOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.GitHubRepo != "pdl-clay/GoLiveBypass" {
+	if cfg.GitHubRepo != "bezumiya/GoLiveBypass" {
 		t.Errorf("GitHubRepo = %q", cfg.GitHubRepo)
 	}
 	if !reflect.DeepEqual(cfg.Labels, []string{"bug", "triage"}) {

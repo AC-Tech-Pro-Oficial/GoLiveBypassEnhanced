@@ -1,4 +1,4 @@
-module github.com/pdl-clay/GoLiveBypass/api
+module github.com/bezumiya/GoLiveBypass/api
 
 go 1.26.5
 
