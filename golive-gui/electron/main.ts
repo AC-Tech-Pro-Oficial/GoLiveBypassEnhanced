@@ -22,8 +22,18 @@ let quitting = false;
 
 // Os icones moram em assets/ e seguem no pacote pelo "files" do electron-builder. O icone do
 // exe vem de build/icon.ico, por convencao do builder.
-function assetPath(name: string) {
-  return path.join(__dirname, '..', 'assets', name);
+//
+// Importante: no Linux (AppImage) os assets ficam DENTRO do app.asar, e o nativeImage
+// createFromPath nao le de dentro do asar (API nativa, nao passa pelo patch do fs). Ler o
+// arquivo com fs (que entende asar) e criar a imagem do buffer resolve a bandeja com icone
+// vazio/invalido.
+function loadAsset(name: string) {
+  const file = path.join(__dirname, '..', 'assets', name);
+  try {
+    return nativeImage.createFromBuffer(fs.readFileSync(file));
+  } catch {
+    return nativeImage.createFromPath(file);
+  }
 }
 
 // Iniciar com o sistema: no Windows e via login item do Electron (com --hidden, abre so na
@@ -70,25 +80,24 @@ function createWindow() {
     // Sem o log do script na tela, 560 ja sobra; antes eram 600 por causa do terminal.
     height: IS_LINUX ? 560 : 600,
     resizable: false,
-    icon: assetPath('icon.png'),
+    icon: loadAsset('icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: true,
       contextIsolation: false,
     },
     autoHideMenuBar: true,
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#1e1f22',
-      symbolColor: '#ffffff',
-    }
+    // titleBarStyle hidden + overlay so existe no Windows; no Linux deixa a janela sem
+    // botoes de janela. Usar o frame nativo no Linux (com os botoes do GNOME/KDE).
+    ...(IS_LINUX
+      ? {}
+      : { titleBarStyle: 'hidden' as const, titleBarOverlay: { color: '#1e1f22', symbolColor: '#ffffff' } }),
   });
 
   mainWindow.on('close', (event) => {
     if (quitting) return;
-    // No Windows o X esconde na bandeja (o app continua vivo); no Linux fechar encerra de vez
-    // e reverte a injecao, que e o comportamento que quem testa o AppImage espera.
-    if (IS_LINUX) return;
+    // Fechar a janela esconde na bandeja e o app continua vivo em segundo plano, nos dois SOs.
+    // Quem quer encerrar de verdade usa o "Sair" do menu da bandeja (que reverte o bypass).
     event.preventDefault();
     mainWindow?.hide();
   });
@@ -109,7 +118,14 @@ function showWindow() {
   } else {
     createWindow();
   }
-  refreshTray();
+  refreshTray().catch(() => {});
+}
+
+// "Fechar" pelo menu da bandeja: esconde a janela, mas o app continua vivo na bandeja.
+function hideWindow() {
+  if (mainWindow) {
+    mainWindow.hide();
+  }
 }
 
 function statusLabel(status: string) {
@@ -119,12 +135,16 @@ function statusLabel(status: string) {
   return 'inativo';
 }
 
-// O menu e remontado a cada mudanca: e o jeito simples de o rotulo de status e o item
-// Ativar/Desativar refletirem o estado atual sem logica de diff.
-function refreshTray() {
+// O status no Linux vem do script (async); no Windows e sincrono. Guardamos o ultimo valor
+// para o menu montar sem travar e para o botao Ativar/Desativar ficar sempre clicavel.
+let cachedStatus: string | null = null;
+
+async function refreshTray() {
   if (!tray) return;
   try {
-    const status = getStatus();
+    // Linux: status real via script; Windows: leitura sincrona das instalacoes.
+    const status = IS_LINUX ? await linuxStatus() : getStatus();
+    cachedStatus = status;
     const label = statusLabel(status);
     tray.setToolTip(`GoLiveBypass — ${label}`);
     tray.setContextMenu(Menu.buildFromTemplate([
@@ -133,9 +153,11 @@ function refreshTray() {
       { label: 'Abrir', click: showWindow },
       {
         label: status === 'ACTIVE' ? 'Desativar o bypass' : 'Ativar o bypass',
-        enabled: status !== 'NOT_FOUND',
-        click: toggleFromTray,
+        // Sempre clicavel: mesmo com Discord "nao encontrado" a pessoa pode tentar de novo.
+        click: () => { toggleFromTray().catch(() => refreshTray()); },
       },
+      { type: 'separator' },
+      { label: 'Fechar janela', click: hideWindow },
       {
         label: IS_LINUX ? 'Iniciar com o sistema' : 'Iniciar com o Windows',
         type: 'checkbox',
@@ -143,7 +165,7 @@ function refreshTray() {
         click: (item) => setStartup(item.checked),
       },
       { type: 'separator' },
-      // Sair pela bandeja reverte so o que e nosso, como o fechar da janela sempre fez.
+      // Sair de verdade reverte o bypass e encerra o app.
       { label: status === 'ACTIVE' ? 'Sair (desfaz o bypass)' : 'Sair', click: quitApp },
     ]));
   } catch {
@@ -153,28 +175,50 @@ function refreshTray() {
 
 async function toggleFromTray() {
   try {
+    // Atualiza o menu com "trabalhando" para dar feedback imediato do clique.
+    if (tray) {
+      tray.setToolTip('GoLiveBypass — trabalhando...');
+      tray.setContextMenu(Menu.buildFromTemplate([
+        { label: 'GoLiveBypass — trabalhando...', enabled: false },
+      ]));
+    }
+
     if (IS_LINUX) {
-      const status = await linuxStatus();
+      const status = cachedStatus ?? await linuxStatus();
       if (status === 'ACTIVE') await linuxDeactivate(() => {});
       else await linuxActivate('', () => {});
     } else {
-      if (getStatus() === 'ACTIVE') await deactivateAll();
+      const status = cachedStatus ?? getStatus();
+      if (status === 'ACTIVE') await deactivateAll();
       else await activateBypass(null, '');
     }
+  } catch (error) {
+    console.error('toggle falhou:', error);
   } finally {
-    refreshTray();
+    await refreshTray().catch(() => {});
   }
 }
 
-function quitApp() {
+async function quitApp() {
   quitting = true;
+  try {
+    // Sair de verdade desfaz o que for nosso, para o Discord nao ficar com a injecao
+    // pendurada depois que o app morre.
+    if (IS_LINUX) {
+      await linuxDeactivate(() => {});
+    } else {
+      await deactivateAll();
+    }
+  } catch {
+    // se a reversao falhar, sai mesmo assim
+  }
   app.quit();
 }
 
 function createTray() {
-  tray = new Tray(nativeImage.createFromPath(assetPath('tray.png')));
+  tray = new Tray(loadAsset('tray.png'));
   tray.on('click', showWindow);
-  refreshTray();
+  refreshTray().catch(() => {});
 }
 
 // Com o app morando na bandeja, rodar o exe de novo nao pode empilhar uma segunda copia:
@@ -193,15 +237,11 @@ if (!gotLock) {
   });
 }
 
+// A bandeja e o "dono" do app: fechar a janela so esconde, e o processo continua em segundo
+// plano. Sem isto, no Linux o window-all-closed derrubaria o app inteiro ao fechar a janela.
+// Quem quer encerrar de verdade usa o "Sair" do menu da bandeja (quitApp).
 app.on('window-all-closed', () => {
-  // Modo portatil: ao fechar a janela, reverte a injecao (igual ao Windows).
-  if (IS_LINUX) {
-    linuxDeactivate(() => {}).finally(() => app.quit());
-  } else {
-    deactivateAll().finally(() => {
-      app.quit();
-    });
-  }
+  // manter vivo — a bandeja cuida do resto
 });
 
 function withNoAsar<T>(fn: () => T): T {
@@ -441,7 +481,7 @@ ipcMain.handle('activate', async (event, proxyAddress: string = '') => {
   } else {
     await activateBypass(event, proxyAddress);
   }
-  refreshTray();
+  refreshTray().catch(() => {});
 });
 ipcMain.handle('deactivate', async (event) => {
   if (IS_LINUX) {
@@ -449,7 +489,7 @@ ipcMain.handle('deactivate', async (event) => {
   } else {
     await deactivateAll();
   }
-  refreshTray();
+  refreshTray().catch(() => {});
 });
 ipcMain.handle('get-platform', () => (IS_LINUX ? 'linux' : 'windows'));
 ipcMain.handle('get-status', async () => {
@@ -461,5 +501,5 @@ ipcMain.handle('get-status', async () => {
 ipcMain.handle('get-startup', () => getStartup());
 ipcMain.handle('set-startup', (_event, enabled: unknown) => {
   setStartup(enabled === true);
-  refreshTray();
+  refreshTray().catch(() => {});
 });
