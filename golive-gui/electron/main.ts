@@ -489,9 +489,10 @@ function assertDiscordSignature(bundlePath: string | undefined) {
   );
 }
 
-// O Vencord só troca o app.asar e não reassina. Reassinar com codesign --deep --sign -
-// apaga as entitlements (JIT, library validation) e o Team ID: o Keychain pede senha e
-// o Chromium crasha. Com Administração de Apps, o asar novo basta; o xattr só tira quarentena.
+/**
+ *  Reassinar com codesign --deep --sign apaga as entitlements (JIT, library validation) e o Team ID: o Keychain pede senha e
+ * o Chromium crasha.
+ */
 function clearBundleQuarantine(bundlePath: string | undefined) {
   if (!isMac || !bundlePath) return;
   try {
@@ -694,8 +695,12 @@ function linuxStatus(): Promise<string> {
         const data = JSON.parse(stdout);
         const discords = data.discords ?? [];
         if (discords.length === 0) return "NOT_FOUND";
-        const anyOurs = discords.some((d: { state: string }) => d.state === "nosso");
-        const anyMod = discords.some((d: { state: string }) => d.state === "outromod");
+        const anyOurs = discords.some(
+          (d: { state: string }) => d.state === "nosso",
+        );
+        const anyMod = discords.some(
+          (d: { state: string }) => d.state === "outromod",
+        );
         if (anyOurs) return "ACTIVE";
         if (anyMod) return "OTHER_MOD";
         return "INACTIVE";
@@ -706,13 +711,17 @@ function linuxStatus(): Promise<string> {
     .catch(() => "NOT_FOUND");
 }
 
-async function linuxActivate(proxyAddress: string, onChunk: (c: string) => void) {
+async function linuxActivate(
+  proxyAddress: string,
+  onChunk: (c: string) => void,
+) {
   const args = ["--yes"];
   if (proxyAddress.trim() !== "") args.push("--proxy", proxyAddress.trim());
   const { code, stderr } = await runScript(args, onChunk);
   if (code !== 0) {
     throw new Error(
-      stderr.split("\n").filter(Boolean).slice(-3).join("\n") || "Falha ao ativar",
+      stderr.split("\n").filter(Boolean).slice(-3).join("\n") ||
+        "Falha ao ativar",
     );
   }
 }
@@ -721,7 +730,8 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
   const { code, stderr } = await runScript(["--uninstall"], onChunk);
   if (code !== 0) {
     throw new Error(
-      stderr.split("\n").filter(Boolean).slice(-3).join("\n") || "Falha ao desativar",
+      stderr.split("\n").filter(Boolean).slice(-3).join("\n") ||
+        "Falha ao desativar",
     );
   }
 }
@@ -730,7 +740,9 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
 // tambem remontam o menu ao terminar.
 ipcMain.handle("activate", async (event, proxyAddress: string = "") => {
   if (IS_LINUX) {
-    await linuxActivate(proxyAddress, (c) => event.sender.send("bypass-log", c));
+    await linuxActivate(proxyAddress, (c) =>
+      event.sender.send("bypass-log", c),
+    );
   } else {
     await activateBypass(event, proxyAddress);
   }
