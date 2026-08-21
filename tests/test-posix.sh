@@ -176,6 +176,37 @@ else
     ok "proxy invalido rejeitado (RC!=0)"
 fi
 
+# elevate: sem sudo NOPASSWD, o pkexec (polkit) assume — o caso do Fedora KDE/GNOME
+# onde o sudo falha sem TTY. Simula com um pkexec fake que registra a chamada.
+ELEVATE_HOME="$(mktemp -d)"
+mkdir -p "$ELEVATE_HOME/bin"
+cat > "$ELEVATE_HOME/bin/pkexec" <<'PKEXEC_EOF'
+#!/bin/sh
+echo "PKEXEC:$*" >> /tmp/elevate-used
+exec "$@"
+PKEXEC_EOF
+chmod +x "$ELEVATE_HOME/bin/pkexec"
+# extrai so as funcoes have/elevate do script (ate o banner final) para nao rodar o fluxo
+ELEVATE_HARNESS="$(mktemp)"
+awk '/^aviso_empacotado$/{exit} {print}' "$REPO/standalone/golivebypass-standalone.sh" > "$ELEVATE_HARNESS"
+cat >> "$ELEVATE_HARNESS" <<'H_EOF'
+elevate sh -c "echo elevado > /tmp/fakehome/ok"
+[ -f /tmp/fakehome/ok ] && grep -q "PKEXEC:sh" /tmp/elevate-used
+H_EOF
+if "$RUNTIME" run --rm -u 1000:1000 \
+    -v "$ELEVATE_HARNESS:/t.sh:ro" \
+    -v "$ELEVATE_HOME/bin:/tmp/fakebin:ro" \
+    -v "$ELEVATE_HOME:/tmp/fakehome" \
+    fedora:latest sh -c '
+    export PATH=/tmp/fakebin:$PATH
+    sh /t.sh
+' >/dev/null 2>&1; then
+    ok "elevate cai para pkexec sem sudo NOPASSWD (fedora)"
+else
+    bad "elevate nao usou pkexec sem sudo NOPASSWD"
+fi
+rm -rf "$ELEVATE_HOME" "$ELEVATE_HARNESS"
+
 rm -f "$HARNESS"
 
 # --------------------------------------------------------------------------- shells extras (zsh/ksh/mksh)
