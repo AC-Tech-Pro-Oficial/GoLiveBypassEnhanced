@@ -157,7 +157,6 @@ async function refreshTray() {
         click: () => { toggleFromTray().catch(() => refreshTray()); },
       },
       { type: 'separator' },
-      { label: 'Fechar janela', click: hideWindow },
       {
         label: IS_LINUX ? 'Iniciar com o sistema' : 'Iniciar com o Windows',
         type: 'checkbox',
@@ -492,6 +491,7 @@ ipcMain.handle('deactivate', async (event) => {
   refreshTray().catch(() => {});
 });
 ipcMain.handle('get-platform', () => (IS_LINUX ? 'linux' : 'windows'));
+ipcMain.handle('hide-window', () => { hideWindow(); });
 ipcMain.handle('get-status', async () => {
   if (IS_LINUX) {
     return linuxStatus();

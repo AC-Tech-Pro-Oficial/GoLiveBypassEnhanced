@@ -7,6 +7,7 @@ declare global {
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
       getPlatform: () => Promise<string>;
+      hideWindow: () => Promise<void>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
       onRefreshStartup: (callback: () => void) => void;
@@ -22,6 +23,7 @@ const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const startupLabel = document.getElementById('startupLabel') as HTMLLabelElement;
+const closeBtn = document.getElementById('closeBtn') as HTMLButtonElement;
 
 
 
@@ -112,6 +114,11 @@ async function refreshStartup() {
 
 startupToggle.addEventListener('change', async () => {
   await window.api.setStartup(startupToggle.checked);
+});
+
+// Fechar a janela (esconde na bandeja, o app continua em segundo plano).
+closeBtn.addEventListener('click', () => {
+  window.api.hideWindow();
 });
 
 // A bandeja tambem tem esse controle; sem o aviso, os dois ficariam dessincronizados.

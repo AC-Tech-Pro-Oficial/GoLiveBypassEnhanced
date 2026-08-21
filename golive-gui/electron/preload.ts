@@ -5,6 +5,7 @@ import { ipcRenderer } from 'electron';
   deactivate: () => ipcRenderer.invoke('deactivate'),
   getStatus: () => ipcRenderer.invoke('get-status'),
   getPlatform: () => ipcRenderer.invoke('get-platform'),
+  hideWindow: () => ipcRenderer.invoke('hide-window'),
   getStartup: () => ipcRenderer.invoke('get-startup'),
   setStartup: (enabled: boolean) => ipcRenderer.invoke('set-startup', enabled),
   onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
