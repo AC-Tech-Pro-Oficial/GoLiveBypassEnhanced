@@ -375,10 +375,12 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   quitting = true;
   cleaningUp = true;
+  // Reversao em background: o runScript roda detached/unref, entao o filho sobrevive ao
+  // app.quit() e o Discord nao fica com a injecao pendurada. Sem esperar: o "Sair" sai na
+  // hora mesmo se o script demorar (fechar o Discord, flatpak, sudo...).
   const restore = IS_LINUX ? linuxDeactivate(() => {}) : deactivateAll();
-  restore.finally(() => {
-    app.quit();
-  });
+  restore.catch(() => {});
+  app.quit();
 });
 
 // A bandeja e a "dona" do app: fechar a janela so esconde (em qualquer SO), e o processo
