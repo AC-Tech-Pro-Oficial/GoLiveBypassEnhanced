@@ -24,20 +24,17 @@ body {
   color: var(--text);
   overflow: hidden;
   user-select: none;
-  display: flex;
-  justify-content: center;
-  align-items: center;
   height: 100vh;
 }
 
-.drag-region {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 32px;
-  -webkit-app-region: drag;
-  z-index: 100;
+#app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  overflow-x: hidden;
+  overflow-y: auto;
+  position: relative;
 }
 
 .container {
@@ -48,6 +45,8 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 24px;
+  margin: auto 0;
+  flex-shrink: 0;
 }
 
 /* Classe colocada pelo renderer a partir do flag de plataforma do preload. */
@@ -57,6 +56,28 @@ body {
 
 .darwin .container {
   padding-top: 64px;
+}
+
+@media (max-height: 680px) {
+  .container {
+    gap: 24px;
+    padding-top: 32px;
+    padding-bottom: 24px;
+  }
+
+  .darwin .container {
+    padding-top: 56px;
+  }
+}
+
+.drag-region {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  -webkit-app-region: drag;
+  z-index: 100;
 }
 
 .header {
