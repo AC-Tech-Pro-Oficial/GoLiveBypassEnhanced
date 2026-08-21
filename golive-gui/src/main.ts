@@ -7,23 +7,29 @@ declare global {
       activate: (proxy?: string) => Promise<void>;
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
+      getPlatform: () => Promise<string>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
       onRefreshStartup: (callback: () => void) => void;
-
-      onLog: (cb: (chunk: string) => void) => () => void;
+      onRefreshStatus: (callback: () => void) => void;
+      resizeWindow: (height: number) => void;
     }
   }
 }
 
-const isMac = window.api.platform === 'darwin';
+const platform = window.api.platform;
+const isMac = platform === 'darwin';
+const isLinux = platform === 'linux';
 const reloadShortcut = isMac ? 'Cmd + R' : 'Ctrl + R';
 
 function applyPlatformCopy() {
   document.body.classList.toggle('darwin', isMac);
 
   const startupLabel = document.getElementById('startupLabel');
-  if (startupLabel) startupLabel.textContent = isMac ? 'Iniciar com o Mac' : 'Iniciar com o Windows';
+  if (startupLabel) {
+    // Linux: autostart XDG; Windows/Mac: login item. O rotulo acompanha o SO.
+    startupLabel.textContent = isMac ? 'Iniciar com o Mac' : isLinux ? 'Iniciar com o sistema' : 'Iniciar com o Windows';
+  }
 
   const closeHint = document.getElementById('closeHint');
   if (closeHint) {
@@ -44,16 +50,21 @@ const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 
-const logBox = document.getElementById('logBox') as HTMLPreElement;
+
 
 let currentState = 'INACTIVE';
 
-// Progresso do script (Linux): mostra a saida em tempo real.
-window.api.onLog((chunk) => {
-  if (!logBox) return;
-  logBox.textContent += chunk;
-  logBox.scrollTop = logBox.scrollHeight;
-});
+// O warning do bypass ativo faz o conteudo crescer; a janela e fixa, entao reportamos a altura
+// necessaria para o main process redimensionar e nada ficar cortado.
+function fitWindowToContent() {
+  const container = document.querySelector('.container');
+  if (!container) return;
+  // +1 px de folga: sem isto a ultima linha as vezes ficava cortada por causa do arredondamento.
+  const height = Math.ceil(container.getBoundingClientRect().height + 1);
+  window.api.resizeWindow(height);
+}
+
+
 
 async function updateStatus() {
   try {
@@ -90,6 +101,8 @@ async function updateStatus() {
     console.error(err);
     statusText.innerText = 'Erro ao buscar status';
   }
+  // Depois de mostrar/esconder o warning, ajusta a janela ao novo tamanho do conteudo.
+  fitWindowToContent();
 }
 
 toggleBtn.addEventListener('click', async () => {
@@ -97,7 +110,6 @@ toggleBtn.addEventListener('click', async () => {
   toggleBtn.classList.add('loading');
 
   try {
-    if (logBox) logBox.style.display = 'block';
     if (currentState === 'ACTIVE') {
       await window.api.deactivate();
     } else {
@@ -112,13 +124,13 @@ toggleBtn.addEventListener('click', async () => {
   }
 
   await updateStatus();
-  if (logBox) logBox.textContent = '';
 });
 
 // Inicialização
 applyPlatformCopy();
 updateStatus();
 refreshStartup();
+fitWindowToContent();
 
 async function refreshStartup() {
   try {
@@ -132,5 +144,6 @@ startupToggle.addEventListener('change', async () => {
   await window.api.setStartup(startupToggle.checked);
 });
 
-// A bandeja tambem tem esse controle; sem o aviso, os dois ficariam dessincronizados.
+// A bandeja tambem tem esses controles; sem os avisos, os dois ficariam dessincronizados.
 window.api.onRefreshStartup(refreshStartup);
+window.api.onRefreshStatus(updateStatus);

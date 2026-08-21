@@ -66,8 +66,22 @@ let cleaningUp = false;
 
 // Os icones moram em assets/ e seguem no pacote pelo "files" do electron-builder. O icone do
 // exe vem de build/icon.ico; no Mac o .icns e gerado a partir do mesmo desenho.
+//
+// Importante: no Linux (AppImage) os assets ficam DENTRO do app.asar, e o nativeImage
+// createFromPath nao le de dentro do asar (API nativa, nao passa pelo patch do fs). Ler o
+// arquivo com fs (que entende asar) e criar a imagem do buffer resolve a bandeja com icone
+// vazio/invalido.
 function assetPath(name: string) {
   return path.join(__dirname, "..", "assets", name);
+}
+
+function loadAsset(name: string) {
+  const file = assetPath(name);
+  try {
+    return nativeImage.createFromBuffer(fs.readFileSync(file));
+  } catch {
+    return nativeImage.createFromPath(file);
+  }
 }
 
 function startupLabel() {
@@ -130,10 +144,36 @@ function isPermissionError(e: any) {
  * Nos dois casos sobe so o icone, sem jogar janela na cara do usuario a cada login.
  */
 function getStartup() {
+  if (IS_LINUX) {
+    const file = path.join(app.getPath('home'), '.config', 'autostart', 'golivebypass.desktop');
+    return fs.existsSync(file);
+  }
   return app.getLoginItemSettings().openAtLogin;
 }
 
 function setStartup(enabled: boolean) {
+  if (IS_LINUX) {
+    const dir = path.join(app.getPath('home'), '.config', 'autostart');
+    const file = path.join(dir, 'golivebypass.desktop');
+    try {
+      if (enabled) {
+        fs.mkdirSync(dir, { recursive: true });
+        // Exec com --hidden: abre so na bandeja/notificacao no login, sem jogar janela na tela.
+        fs.writeFileSync(file, `[Desktop Entry]
+Type=Application
+Name=GoLiveBypass
+Comment=Devolve o Go Live e a camera no Discord
+Exec=${process.execPath} --hidden
+X-GNOME-Autostart-enabled=true
+`);
+      } else if (fs.existsSync(file)) {
+        fs.unlinkSync(file);
+      }
+    } catch (error) {
+      console.error('Falha ao alterar autostart:', error);
+    }
+    return;
+  }
   app.setLoginItemSettings({
     openAtLogin: enabled,
     args: ["--hidden"],
@@ -150,9 +190,12 @@ function launchedHidden() {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 480,
-    height: isMac ? 640 : 600,
+    // A altura e ajustada pelo proprio conteudo: a pagina avisa via IPC 'resize-window'
+    // quando o warning do bypass ativo aparece/some, e a janela cresce/encolhe para nao
+    // cortar nada (antes o aviso ficava cortado com a altura fixa de 560).
+    height: 560,
     resizable: false,
-    icon: assetPath("icon.png"),
+    icon: loadAsset('icon.png'),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: true,
@@ -171,9 +214,9 @@ function createWindow() {
   });
 
   mainWindow.on("close", (event) => {
-    // No Linux a janela fecha de verdade e reverte (AppImage portatil). No Windows e no Mac
-    // o X so esconde na bandeja / barra de menus.
-    if (quitting || IS_LINUX) return;
+    if (quitting) return;
+    // Fechar a janela esconde na bandeja / barra de menus e o app continua vivo em segundo
+    // plano, nos tres SOs. Quem quer encerrar de verdade usa o "Sair" (que reverte o bypass).
     event.preventDefault();
     mainWindow?.hide();
   });
@@ -185,16 +228,25 @@ function createWindow() {
   }
 }
 
+// A janela precisa refletir o que a bandeja fez; sem isto, ativar/desativar pelo icone deixava
+// a interface com o estado antigo (botao "Ativar" com o bypass ja ativo, por exemplo).
+function refreshWindowStatus() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('refresh-status');
+  }
+}
+
 function showWindow() {
   if (mainWindow) {
     mainWindow.show();
     mainWindow.focus();
-    // A bandeja pode ter mudado o startup com a janela escondida; ao reaparecer, sincroniza.
+    // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
     mainWindow.webContents.send("refresh-startup");
+    refreshWindowStatus();
   } else {
     createWindow();
   }
-  refreshTray();
+  refreshTray().catch(() => {});
 }
 
 function statusLabel(status: string) {
@@ -204,12 +256,17 @@ function statusLabel(status: string) {
   return "inativo";
 }
 
+// O status no Linux vem do script (async); no Windows e sincrono. Guardamos o ultimo valor
+// para o menu montar sem travar e para o botao Ativar/Desativar ficar sempre clicavel.
+let cachedStatus: string | null = null;
+
 // O menu e remontado a cada mudanca: e o jeito simples de o rotulo de status e o item
 // Ativar/Desativar refletirem o estado atual sem logica de diff.
 async function refreshTray() {
   if (!tray) return;
   try {
     const status = IS_LINUX ? await linuxStatus() : getStatus();
+    cachedStatus = status;
     const label = statusLabel(status);
     tray.setToolTip(`GoLiveBypass — ${label}`);
     tray.setContextMenu(
@@ -219,8 +276,8 @@ async function refreshTray() {
         { label: "Abrir", click: showWindow },
         {
           label: status === "ACTIVE" ? "Desativar o bypass" : "Ativar o bypass",
-          enabled: status !== "NOT_FOUND",
-          click: toggleFromTray,
+          // Sempre clicavel: mesmo com Discord "nao encontrado" a pessoa pode tentar de novo.
+          click: () => { toggleFromTray().catch(() => refreshTray()); },
         },
         {
           label: startupLabel(),
@@ -243,6 +300,14 @@ async function refreshTray() {
 
 async function toggleFromTray() {
   try {
+    // Atualiza o menu com "trabalhando" para dar feedback imediato do clique.
+    if (tray) {
+      tray.setToolTip('GoLiveBypass — trabalhando...');
+      tray.setContextMenu(Menu.buildFromTemplate([
+        { label: 'GoLiveBypass — trabalhando...', enabled: false },
+      ]));
+    }
+
     if (IS_LINUX) {
       const status = await linuxStatus();
       if (status === "ACTIVE") await linuxDeactivate(() => {});
@@ -252,18 +317,25 @@ async function toggleFromTray() {
     } else {
       await activateBypass(null, "");
     }
+  } catch (error) {
+    console.error('toggle falhou:', error);
   } finally {
-    refreshTray();
+    await refreshTray().catch(() => {});
+    refreshWindowStatus();
   }
 }
 
-function quitApp() {
+async function quitApp() {
+  // O restore (reverter o bypass) vive no before-quit, que cobre Sair da bandeja, Cmd+Q no
+  // Mac e o quit do app; aqui so disparamos a saida. A reversao corre sem travar o quit.
   quitting = true;
   app.quit();
 }
 
 function trayIcon() {
-  const source = nativeImage.createFromPath(assetPath("tray.png"));
+  // loadAsset le do buffer (fs entende o app.asar); no Linux/AppImage o createFromPath
+  // nao enxerga dentro do asar e a bandeja ficaria com icone vazio.
+  const source = loadAsset("tray.png");
   if (!isMac) return source;
 
   // tray.png e 32x32. Sem scaleFactor o macOS desenha 32pt, o dobro dos outros icones da barra.
@@ -275,7 +347,7 @@ function trayIcon() {
 function createTray() {
   tray = new Tray(trayIcon());
   tray.on("click", showWindow);
-  refreshTray();
+  refreshTray().catch(() => {});
 }
 
 // Com o app morando na bandeja, rodar o exe de novo nao pode empilhar uma segunda copia:
@@ -295,7 +367,7 @@ if (!gotLock) {
 }
 
 // Cmd+Q no Mac nao passa por window-all-closed da mesma forma que o Sair da bandeja no Windows:
-// o restore vive aqui para os dois caminhos. No Linux, fechar a janela tambem cai aqui.
+// o restore vive aqui para os dois caminhos.
 app.on("before-quit", (event) => {
   // A segunda instancia so acorda a primeira e morre: sem esta guarda ela restauraria o
   // Discord na saida, desfazendo o bypass que a instancia principal acabou de aplicar.
@@ -303,20 +375,19 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   quitting = true;
   cleaningUp = true;
+  // Reversao em background: o runScript roda detached/unref, entao o filho sobrevive ao
+  // app.quit() e o Discord nao fica com a injecao pendurada. Sem esperar: o "Sair" sai na
+  // hora mesmo se o script demorar (fechar o Discord, flatpak, sudo...).
   const restore = IS_LINUX ? linuxDeactivate(() => {}) : deactivateAll();
-  restore.finally(() => {
-    app.quit();
-  });
+  restore.catch(() => {});
+  app.quit();
 });
 
+// A bandeja e a "dona" do app: fechar a janela so esconde (em qualquer SO), e o processo
+// continua vivo em segundo plano. Sem isto, no Linux o window-all-closed derrubaria o app
+// inteiro ao fechar a janela. Quem quer encerrar de verdade usa o "Sair" (quitApp -> before-quit).
 app.on("window-all-closed", () => {
-  // No Mac o app fica na barra de menus com a janela fechada; no Windows o X ja esconde, entao
-  // isto so dispara de verdade na hora de sair, e o restore ja foi pelo before-quit.
-  // No Linux a janela fecha de verdade (portatil) e o restore tambem vai pelo before-quit.
-  if (!isMac) {
-    quitting = true;
-    app.quit();
-  }
+  // manter vivo — a bandeja cuida do resto
 });
 
 function withNoAsar<T>(fn: () => T): T {
@@ -746,7 +817,7 @@ ipcMain.handle("activate", async (event, proxyAddress: string = "") => {
   } else {
     await activateBypass(event, proxyAddress);
   }
-  refreshTray();
+  refreshTray().catch(() => {});
 });
 ipcMain.handle("deactivate", async (event) => {
   if (IS_LINUX) {
@@ -754,8 +825,9 @@ ipcMain.handle("deactivate", async (event) => {
   } else {
     await deactivateAll();
   }
-  refreshTray();
+  refreshTray().catch(() => {});
 });
+ipcMain.handle("get-platform", () => (IS_LINUX ? "linux" : isMac ? "mac" : "windows"));
 ipcMain.handle("get-status", async () => {
   if (IS_LINUX) return linuxStatus();
   return getStatus();
@@ -763,5 +835,15 @@ ipcMain.handle("get-status", async () => {
 ipcMain.handle("get-startup", () => getStartup());
 ipcMain.handle("set-startup", (_event, enabled: unknown) => {
   setStartup(enabled === true);
-  refreshTray();
+  refreshTray().catch(() => {});
+});
+
+// A pagina reporta a altura de que precisa (o warning do bypass ativo faz o conteudo crescer).
+// A janela e fixa (resizable: false), entao o proprio app ajusta para caber tudo sem cortar.
+ipcMain.on('resize-window', (_event, height: unknown) => {
+  const h = Number(height);
+  if (!mainWindow || mainWindow.isDestroyed() || !Number.isFinite(h) || h <= 0) return;
+  const [, currentH] = mainWindow.getSize();
+  if (Math.abs(currentH - Math.round(h)) < 2) return;
+  mainWindow.setSize(480, Math.round(h));
 });

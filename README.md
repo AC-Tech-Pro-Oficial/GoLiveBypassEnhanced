@@ -49,7 +49,7 @@ Dois avisos do sistema, e nenhum dos dois é o GoLiveBypass “quebrado”.
 
 A mesma interface gráfica do Windows, **agora para Linux**, empacotada como **AppImage** (roda em qualquer distro: Debian, Ubuntu, Fedora, Arch e derivadas).
 
-Assim como a versão Windows, ela é **portátil**: ativa o GoLiveBypass ao clicar e **reverte tudo ao fechar a janela**. Por baixo, ela chama o [modo standalone](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) (POSIX, funciona em qualquer shell), então toda a lógica de detecção — Discord nativo, flatpak, bootstrap novo, snap — é a mesma dos scripts, com o progresso aparecendo na tela.
+Assim como a versão Windows, ela é **portátil**: ativa o GoLiveBypass ao clicar e fica na **bandeja** do sistema — fechar a janela só a esconde, e o **Sair** pelo ícone da bandeja é o que reverte tudo ao normal. Por baixo, ela chama o [modo standalone](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) (POSIX, funciona em qualquer shell), então toda a lógica de detecção — Discord nativo, flatpak, bootstrap novo, snap — é a mesma dos scripts, com o progresso aparecendo na tela.
 
 ### Como Baixar e Instalar
 1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)**.
@@ -69,7 +69,7 @@ chmod +x GoLiveBypass-*.AppImage
 ### Como Usar
 1. O aplicativo detecta o seu Discord automaticamente (nativo ou flatpak).
 2. Clique em **"Ativar GoLiveBypass"** — o Discord fecha, o bypass entra e ele reabre.
-3. Ao fechar esta janela, o Discord volta ao normal (como no Windows).
+3. Fechar a janela só a esconde na bandeja (o app continua vivo); para reverter o bypass de verdade, use o **Sair** no menu do ícone da bandeja.
 
 > **Nota:** se o seu Discord é flatpak do sistema, a primeira ativação pode pedir sua senha (via `pkexec`) para liberar a pasta do bypass para o sandbox.
 

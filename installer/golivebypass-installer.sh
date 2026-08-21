@@ -602,7 +602,7 @@ repo_file() {
 # outro namespace de PID e um pkill pode nao alcancar. O `flatpak ps` responde pelo que o
 # pgrep nao ve, e o `flatpak kill` fecha o que o pkill nao fecha.
 discord_running() {
-    pgrep -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1 && return 0
+    pgrep -x -i 'Discord|DiscordCanary|DiscordPTB|discord|discord-canary|discordptb' >/dev/null 2>&1 && return 0
 
     # Um `flatpak ps` so, e nao um por id: isto roda em laco de dois em dois segundos enquanto
     # o modo temporario espera o Discord fechar.
@@ -618,7 +618,7 @@ stop_discord() {
     discord_running || return 0
 
     step "Fechando o Discord"
-    pkill -x -i 'Discord|DiscordCanary|DiscordPTB' >/dev/null 2>&1 || true
+    pkill -x -i 'Discord|DiscordCanary|DiscordPTB|discord|discord-canary|discordptb' >/dev/null 2>&1 || true
     if have flatpak; then
         local id
         for id in $FLATPAK_IDS; do
@@ -632,7 +632,14 @@ stop_discord() {
         discord_running || return 0
     done
 
-    fail "O Discord nao fechou. Feche na mao e rode de novo."
+    # SIGTERM nao resolveu; SIGKILL e o ultimo recurso antes de desistir.
+    step "O Discord nao respondeu, forçando o fechamento"
+    pkill -9 -x -i 'Discord|DiscordCanary|DiscordPTB|discord|discord-canary|discordptb' >/dev/null 2>&1 || true
+    for i in $(seq 1 20); do
+        sleep 0.3
+        discord_running || return 0
+    done
+    fail "O Discord nao fechou nem com SIGKILL. Feche na mao e rode de novo."
 }
 
 copy_plugin() {

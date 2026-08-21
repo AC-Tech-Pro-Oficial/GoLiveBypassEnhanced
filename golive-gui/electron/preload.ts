@@ -5,12 +5,10 @@ import { ipcRenderer } from 'electron';
   activate: (proxy?: string) => ipcRenderer.invoke('activate', proxy),
   deactivate: () => ipcRenderer.invoke('deactivate'),
   getStatus: () => ipcRenderer.invoke('get-status'),
+  getPlatform: () => ipcRenderer.invoke('get-platform'),
   getStartup: () => ipcRenderer.invoke('get-startup'),
   setStartup: (enabled: boolean) => ipcRenderer.invoke('set-startup', enabled),
   onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
-  onLog: (cb: (chunk: string) => void) => {
-    const listener = (_e: any, chunk: string) => cb(chunk);
-    ipcRenderer.on('bypass-log', listener);
-    return () => ipcRenderer.removeListener('bypass-log', listener);
-  },
+  onRefreshStatus: (callback: () => void) => ipcRenderer.on('refresh-status', callback),
+  resizeWindow: (height: number) => ipcRenderer.send('resize-window', height),
 };

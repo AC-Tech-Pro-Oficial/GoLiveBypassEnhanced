@@ -34,7 +34,11 @@ export function runScript(args: string[], onChunk?: (chunk: string) => void): Pr
     try {
       child = spawn('sh', [findStandaloneScript(), ...args], {
         env: { ...process.env },
+        // A reversao do bypass roda em background depois do app.quit(); sem detached o filho
+        // morreria junto com o processo pai e o Discord ficaria com a injecao pendurada.
+        detached: true,
       });
+      child.unref();
     } catch (err) {
       reject(err);
       return;
