@@ -26,13 +26,41 @@ function assetPath(name: string) {
   return path.join(__dirname, '..', 'assets', name);
 }
 
-// O app mora na bandeja, entao "iniciar com o Windows" faz sentido de verdade: com --hidden
-// ele ja abre escondido, sem jogar janela na cara a cada login.
+// Iniciar com o sistema: no Windows e via login item do Electron (com --hidden, abre so na
+// bandeja); no Linux e um arquivo .desktop em ~/.config/autostart, o padrao XDG que o GNOME,
+// KDE e os demais respeitam. Sem isto o toggle mostraria "Iniciar com o Windows" no Linux sem
+// fazer nada, que e pior do que nao ter o controle.
 function getStartup() {
+  if (IS_LINUX) {
+    const file = path.join(app.getPath('home'), '.config', 'autostart', 'golivebypass.desktop');
+    return fs.existsSync(file);
+  }
   return app.getLoginItemSettings().openAtLogin;
 }
 
 function setStartup(enabled: boolean) {
+  if (IS_LINUX) {
+    const dir = path.join(app.getPath('home'), '.config', 'autostart');
+    const file = path.join(dir, 'golivebypass.desktop');
+    try {
+      if (enabled) {
+        fs.mkdirSync(dir, { recursive: true });
+        // Exec com --hidden: abre so na bandeja/notificacao no login, sem jogar janela na tela.
+        fs.writeFileSync(file, `[Desktop Entry]
+Type=Application
+Name=GoLiveBypass
+Comment=Devolve o Go Live e a camera no Discord
+Exec=${process.execPath} --hidden
+X-GNOME-Autostart-enabled=true
+`);
+      } else if (fs.existsSync(file)) {
+        fs.unlinkSync(file);
+      }
+    } catch (error) {
+      console.error('Falha ao alterar autostart:', error);
+    }
+    return;
+  }
   app.setLoginItemSettings({ openAtLogin: enabled, args: ['--hidden'] });
 }
 
@@ -57,6 +85,9 @@ function createWindow() {
 
   mainWindow.on('close', (event) => {
     if (quitting) return;
+    // No Windows o X esconde na bandeja (o app continua vivo); no Linux fechar encerra de vez
+    // e reverte a injecao, que e o comportamento que quem testa o AppImage espera.
+    if (IS_LINUX) return;
     event.preventDefault();
     mainWindow?.hide();
   });
@@ -105,7 +136,7 @@ function refreshTray() {
         click: toggleFromTray,
       },
       {
-        label: 'Iniciar com o Windows',
+        label: IS_LINUX ? 'Iniciar com o sistema' : 'Iniciar com o Windows',
         type: 'checkbox',
         checked: getStartup(),
         click: (item) => setStartup(item.checked),
@@ -419,6 +450,7 @@ ipcMain.handle('deactivate', async (event) => {
   }
   refreshTray();
 });
+ipcMain.handle('get-platform', () => (IS_LINUX ? 'linux' : 'windows'));
 ipcMain.handle('get-status', async () => {
   if (IS_LINUX) {
     return linuxStatus();

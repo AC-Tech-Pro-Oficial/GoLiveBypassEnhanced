@@ -6,6 +6,7 @@ declare global {
       activate: (proxy?: string) => Promise<void>;
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
+      getPlatform: () => Promise<string>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
       onRefreshStartup: (callback: () => void) => void;
@@ -22,6 +23,7 @@ const btnText = document.getElementById('btnText')!;
 const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
+const startupLabel = document.getElementById('startupLabel') as HTMLLabelElement;
 
 const logBox = document.getElementById('logBox') as HTMLPreElement;
 
@@ -97,6 +99,17 @@ toggleBtn.addEventListener('click', async () => {
 // Inicialização
 updateStatus();
 refreshStartup();
+updateStartupLabel();
+
+async function updateStartupLabel() {
+  try {
+    const platform = await window.api.getPlatform();
+    // O texto depende do SO: no Linux o autostart e um .desktop XDG, no Windows um login item.
+    startupLabel.textContent = platform === 'linux' ? 'Iniciar com o sistema' : 'Iniciar com o Windows';
+  } catch (err) {
+    console.error(err);
+  }
+}
 
 async function refreshStartup() {
   try {
