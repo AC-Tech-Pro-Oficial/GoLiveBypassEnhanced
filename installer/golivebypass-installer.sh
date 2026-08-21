@@ -291,8 +291,8 @@ injected_resources() {
         [ -n "$path" ] || continue
         case "$path" in "$root"/*) printf '%s\n' "$resources"; return 0 ;; esac
     done <<EOF
-    $(discord_resources)
-    EOF
+$(discord_resources)
+EOF
     return 1
 }
 
@@ -335,8 +335,8 @@ installed_mod() {
             *vencord*) echo "Vencord"; return 0 ;;
         esac
     done <<EOF
-    $(discord_resources)
-    EOF
+$(discord_resources)
+EOF
     return 1
 }
 
@@ -348,8 +348,8 @@ checkout_from_injection() {
         root="$(dirname "$(dirname "$path")")"   # <checkout>/dist/desktop -> <checkout>
         if is_checkout "$root"; then printf '%s\n' "$root"; return 0; fi
     done <<EOF
-    $(discord_resources)
-    EOF
+$(discord_resources)
+EOF
     return 1
 }
 

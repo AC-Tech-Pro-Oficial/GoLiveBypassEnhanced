@@ -310,6 +310,58 @@ fi
 "$RUNTIME" run --rm -u root -v "$home:/h" debian:stable-slim rm -rf /h >/dev/null 2>&1 || true
 rm -rf "$home" 2>/dev/null || true
 
+# --------------------------------------------------------------------------- instalador: descoberta de checkout
+echo
+echo "== 8. instalador: descoberta de checkout (bug dos here-docs) =="
+# Simula um Discord injetado apontando para um checkout do Equicord e confere se o
+# instalador encontra sozinho. Este caso pegava o bug dos here-docs indentados, que
+# engolia injected_path/installed_mod/checkout_from_injection/checkout_on_disk.
+for spec in \
+    "debian:stable-slim sh" \
+    "alpine:latest ash" \
+    "fedora:latest bash" \
+    "ubuntu:latest dash"
+do
+    set -- $spec
+    img="$1"; shell="$2"
+    home="$(mktemp -d)"
+    # checkout fake do Equicord
+    mkdir -p "$home/Equicord/src/utils" "$home/Equicord/dist/desktop"
+    printf '{"name":"Equicord","version":"1.0.0"}' > "$home/Equicord/package.json"
+    printf 'export type x = 1;' > "$home/Equicord/src/utils/types.ts"
+    # Discord injetado apontando para o checkout
+    mkdir -p "$home/.config/discord/app-9.9.9/resources/app"
+    printf 'require("/home/testuser/Equicord/dist/desktop");' > "$home/.config/discord/app-9.9.9/resources/app/index.js"
+    printf 'original' > "$home/.config/discord/app-9.9.9/resources/_app.asar"
+
+    HARNESS="$(mktemp)"
+    # extrair as funcoes do instalador (ate o banner final) e rodar a descoberta
+    awk '/^banner$/{exit} {print}' "$REPO/installer/golivebypass-installer.sh" > "$HARNESS"
+    cat >> "$HARNESS" <<'H_EOF'
+p="$(injected_path /home/testuser/.config/discord/app-9.9.9/resources || echo NAO)"
+[ "$p" = "/home/testuser/Equicord/dist/desktop" ] || exit 1
+root="$(checkout_from_injection || true)"
+[ "$root" = "/home/testuser/Equicord" ] || exit 1
+mod="$(installed_mod || true)"
+[ "$mod" = "Equicord" ] || exit 1
+echo DESCOBERTA_OK
+H_EOF
+
+    if "$RUNTIME" run --rm \
+            -v "$HARNESS:/t.sh:ro" \
+            -v "$home:/home/testuser" \
+            -e HOME=/home/testuser \
+            -e XDG_DATA_HOME=/home/testuser/.local/share \
+            "$img" "$shell" /t.sh 2>/dev/null | grep -q DESCOBERTA_OK; then
+        ok "descoberta de checkout $shell ($img)"
+    else
+        bad "descoberta de checkout $shell ($img)"
+    fi
+    rm -f "$HARNESS"
+    "$RUNTIME" run --rm -u root -v "$home:/h" debian:stable-slim rm -rf /h >/dev/null 2>&1 || true
+    rm -rf "$home" 2>/dev/null || true
+done
+
 echo
 echo "== Resultado: $PASS ok, $FAIL falhas =="
 [ "$FAIL" -eq 0 ] || exit 1
