@@ -52,6 +52,7 @@ MODE="install"
 PROXY=""
 EXCLUDED="BR"
 ASSUME_YES=0
+JSON=0
 
 C_OFF=$(printf '\033[0m'); C_CYAN=$(printf '\033[36m'); C_GREEN=$(printf '\033[32m'); C_YELLOW=$(printf '\033[33m'); C_RED=$(printf '\033[31m'); C_DIM=$(printf '\033[2m')
 
@@ -69,6 +70,7 @@ while [ $# -gt 0 ]; do
         --excluded-countries) EXCLUDED="${2:-BR}"; shift ;;
         --uninstall) MODE="uninstall" ;;
         --status) MODE="status" ;;
+        --json) JSON=1 ;;
         -y|--yes) ASSUME_YES=1 ;;
         -h|--help) sed -n '3,14p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "Opcao desconhecida: $1" ;;
@@ -385,6 +387,25 @@ remove_injection() {
     return 0
 }
 
+
+# Reabre o Discord depois de injetar ou de desfazer. Quem tem o flatpak e um Discord nativo
+# pela metade acabaria com o errado aberto: abre o mesmo que foi mexido.
+start_discord() {
+    local resources="${1:-}" id exe
+
+    if [ -n "$resources" ] && id="$(flatpak_app_id "$resources")" && have flatpak; then
+        nohup flatpak run "$id" >/dev/null 2>&1 &
+        return 0
+    fi
+
+    for exe in discord Discord discord-canary; do
+        if have "$exe"; then
+            nohup "$exe" >/dev/null 2>&1 &
+            return 0
+        fi
+    done
+}
+
 printf '\n  %sGoLiveBypass standalone%s\n' "$C_CYAN" "$C_OFF" >&2
 printf '  %sGo Live e camera de volta, direto no Discord%s\n' "$C_DIM" "$C_OFF" >&2
 
@@ -397,6 +418,20 @@ FOUND="$(discord_dirs)"
 [ -n "$FOUND" ] || fail "Nao achei nenhum Discord instalado."
 
 if [ "$MODE" = "status" ]; then
+    if [ "$JSON" -eq 1 ]; then
+        # Saida maquina para a GUI: um JSON com o estado de cada Discord encontrado.
+        # A ordem e estavel e o caminho e a chave, entao a GUI nao precisa de parser.
+        printf '{"discords":['
+        first=1
+        printf '%s\n' "$FOUND" | while IFS= read -r resources; do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"path":"%s","state":"%s"}' "$resources" "$(injection_state "$resources")"
+        done
+        printf ']}'
+        printf '\n'
+        exit 0
+    fi
     printf '%s\n' "$FOUND" | while IFS= read -r resources; do
         case "$(injection_state "$resources")" in
             vanilla)  printf '  %s: sem nada instalado\n' "$resources" >&2 ;;
@@ -420,6 +455,9 @@ if [ "$MODE" = "uninstall" ]; then
             revoke_flatpak_access "$id" "$INSTALL_DIR"
         fi
     done
+
+    # Modo portatil: ao desfazer, reabre o Discord limpo (mesmo comportamento do app do Windows).
+    start_discord "$(printf '%s\n' "$FOUND" | head -1)"
     exit 0
 fi
 
@@ -454,7 +492,10 @@ printf '%s\n' "$FOUND" | while IFS= read -r resources; do
     ok "$resources pronto."
 done
 
-printf '\n  %sAbra o Discord. O Go Live deve voltar sozinho.%s\n' "$C_GREEN" "$C_OFF" >&2
+# Modo portatil: reabre o Discord ja com o bypass ativo (mesmo comportamento do app do Windows).
+# head -1 em vez de pipe para o while: nohup num subshell morreria junto com ele.
+start_discord "$(printf '%s\n' "$FOUND" | head -1)"
+printf '\n  %sDiscord aberto com o GoLiveBypass.%s\n' "$C_GREEN" "$C_OFF" >&2
 
 # O updater do Discord baixa a versao nova numa pasta app-<versao> inteiramente nova, entao a
 # injecao fica na pasta velha e simplesmente para de valer. Nao ha como impedir isso do lado de

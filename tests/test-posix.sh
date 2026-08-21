@@ -273,6 +273,43 @@ fi
 "$RUNTIME" run --rm -u root -v "$fp_root:/h" debian:stable-slim rm -rf /h >/dev/null 2>&1 || true
 rm -rf "$fp_root" "$home" 2>/dev/null || true
 
+# 7c. --status --json (saida maquina para a GUI)
+home="$(mktemp -d)"
+mkdir -p "$home/.config/discord/app-9.9.9/resources"
+printf 'fake' > "$home/.config/discord/app-9.9.9/resources/app.asar"
+out="$(run_container_home "debian:stable-slim" "$home" sh /repo/standalone/golivebypass-standalone.sh --status --json 2>/dev/null)"
+if printf '%s' "$out" | grep -q '"state":"vanilla"'; then
+    ok "status --json (debian sh)"
+else
+    bad "status --json (debian sh): $out"
+fi
+"$RUNTIME" run --rm -u root -v "$home:/h" debian:stable-slim rm -rf /h >/dev/null 2>&1 || true
+rm -rf "$home" 2>/dev/null || true
+
+# 7d. modo portatil: install reabre o Discord, uninstall reabre limpo
+home="$(mktemp -d)"
+mkdir -p "$home/.config/discord/app-9.9.9/resources" "$home/bin"
+printf 'fake' > "$home/.config/discord/app-9.9.9/resources/app.asar"
+printf '#!/bin/sh\necho DISCORD_ABERTO >> /tmp/calls\n' > "$home/bin/discord"
+chmod +x "$home/bin/discord"
+out="$("$RUNTIME" run --rm -u root \
+    -v "$REPO:/repo:ro" \
+    -v "$home:/home/testuser" \
+    -v "$home/bin:/usr/local/bin" \
+    -e HOME=/home/testuser \
+    -e XDG_DATA_HOME=/home/testuser/.local/share \
+    -e PATH=/usr/local/bin:/usr/bin:/bin \
+    debian:stable-slim sh -c 'sh /repo/standalone/golivebypass-standalone.sh --yes >/dev/null 2>&1; sleep 1; echo "I=$(cat /tmp/calls 2>/dev/null | wc -l)"; sh /repo/standalone/golivebypass-standalone.sh --uninstall >/dev/null 2>&1; sleep 1; echo "U=$(cat /tmp/calls 2>/dev/null | wc -l)"' 2>&1)"
+i="$(printf '%s' "$out" | sed -n 's/^I=//p')"
+u="$(printf '%s' "$out" | sed -n 's/^U=//p')"
+if [ "${i:-0}" -ge 1 ] && [ "${u:-0}" -ge 2 ]; then
+    ok "modo portatil reabre Discord (install + uninstall)"
+else
+    bad "modo portatil reabre Discord (install=$i uninstall=$u)"
+fi
+"$RUNTIME" run --rm -u root -v "$home:/h" debian:stable-slim rm -rf /h >/dev/null 2>&1 || true
+rm -rf "$home" 2>/dev/null || true
+
 echo
 echo "== Resultado: $PASS ok, $FAIL falhas =="
 [ "$FAIL" -eq 0 ] || exit 1
