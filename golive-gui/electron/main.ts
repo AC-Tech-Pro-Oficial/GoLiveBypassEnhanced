@@ -119,6 +119,21 @@ function refreshTray() {
   }
 }
 
+async function toggleFromTray() {
+  try {
+    if (IS_LINUX) {
+      const status = await linuxStatus();
+      if (status === 'ACTIVE') await linuxDeactivate(() => {});
+      else await linuxActivate('', () => {});
+    } else {
+      if (getStatus() === 'ACTIVE') await deactivateAll();
+      else await activateBypass(null, '');
+    }
+  } finally {
+    refreshTray();
+  }
+}
+
 function quitApp() {
   quitting = true;
   app.quit();
@@ -325,6 +340,29 @@ async function deactivateAll() {
   }
 }
 
+function getStatus(): string {
+  const installs = getDiscordInstalls();
+  if (installs.length === 0) return 'NOT_FOUND';
+  return withNoAsar(() => {
+    for (const install of installs) {
+      const asar = path.join(install.resources, 'app.asar');
+      const originalAsar = path.join(install.resources, '_app.asar');
+      if (fs.existsSync(originalAsar)) {
+         // Checa se é o nosso bypass
+         const indexJs = path.join(asar, 'index.js');
+         if (fs.existsSync(indexJs)) {
+           const content = fs.readFileSync(indexJs, 'utf8');
+           if (content.includes('golivebypass.js')) return 'ACTIVE';
+         }
+         return 'OTHER_MOD';
+      }
+    }
+    return 'INACTIVE';
+  });
+}
+
+// A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
+// tambem remontam o menu ao terminar.
 // ---------------------------------------------------------------------------
 // Linux: delega para o script standalone (POSIX). A GUI e uma casca: quem decide
 // tudo (deteccao, flatpak, sudo, injecao) e o script, e a GUI mostra o progresso.
@@ -337,6 +375,7 @@ function linuxStatus(): Promise<string> {
       const data = JSON.parse(stdout);
       const discords = data.discords ?? [];
       if (discords.length === 0) return 'NOT_FOUND';
+      // Precisamos saber se ALGUM ja tem o nosso bypass
       const anyOurs = discords.some((d: any) => d.state === 'nosso');
       const anyMod = discords.some((d: any) => d.state === 'outromod');
       if (anyOurs) return 'ACTIVE';
@@ -364,29 +403,6 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
   }
 }
 
-function getStatus(): string {
-  const installs = getDiscordInstalls();
-  if (installs.length === 0) return 'NOT_FOUND';
-  return withNoAsar(() => {
-    for (const install of installs) {
-      const asar = path.join(install.resources, 'app.asar');
-      const originalAsar = path.join(install.resources, '_app.asar');
-      if (fs.existsSync(originalAsar)) {
-         // Checa se é o nosso bypass
-         const indexJs = path.join(asar, 'index.js');
-         if (fs.existsSync(indexJs)) {
-           const content = fs.readFileSync(indexJs, 'utf8');
-           if (content.includes('golivebypass.js')) return 'ACTIVE';
-         }
-         return 'OTHER_MOD';
-      }
-    }
-    return 'INACTIVE';
-  });
-}
-
-// A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
-// tambem remontam o menu ao terminar.
 ipcMain.handle('activate', async (event, proxyAddress: string = '') => {
   if (IS_LINUX) {
     await linuxActivate(proxyAddress, (c) => event.sender.send('bypass-log', c));
@@ -409,60 +425,6 @@ ipcMain.handle('get-status', async () => {
   }
   return getStatus();
 });
-ipcMain.handle('get-startup', () => getStartup());
-ipcMain.handle('set-startup', (_event, enabled: unknown) => {
-  setStartup(enabled === true);
-  refreshTray();
-});
-
-// A bandeja usa o status sincrono no Windows; no Linux o status vem do script, entao o menu
-// e remontado depois que o handler get-status responde. O toggle da bandeja ramifica igual.
-function toggleFromTray() {
-  if (IS_LINUX) {
-    linuxStatus().then((status) => {
-      const action = status === 'ACTIVE' ? linuxDeactivate(() => {}) : linuxActivate('', () => {});
-      return action.finally(() => refreshTray());
-    }).catch(() => refreshTray());
-  } else {
-    try {
-      if (getStatus() === 'ACTIVE') deactivateAll().finally(() => refreshTray());
-      else activateBypass(null, '').finally(() => refreshTray());
-    } finally {
-      refreshTray();
-    }
-  }
-}
-  const installs = getDiscordInstalls();
-  if (installs.length === 0) return 'NOT_FOUND';
-  return withNoAsar(() => {
-    for (const install of installs) {
-      const asar = path.join(install.resources, 'app.asar');
-      const originalAsar = path.join(install.resources, '_app.asar');
-      if (fs.existsSync(originalAsar)) {
-         // Checa se é o nosso bypass
-         const indexJs = path.join(asar, 'index.js');
-         if (fs.existsSync(indexJs)) {
-           const content = fs.readFileSync(indexJs, 'utf8');
-           if (content.includes('golivebypass.js')) return 'ACTIVE';
-         }
-         return 'OTHER_MOD';
-      }
-    }
-    return 'INACTIVE';
-  });
-}
-
-// A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
-// tambem remontam o menu ao terminar.
-ipcMain.handle('activate', async (event, proxyAddress: string) => {
-  await activateBypass(event, proxyAddress);
-  refreshTray();
-});
-ipcMain.handle('deactivate', async () => {
-  await deactivateAll();
-  refreshTray();
-});
-ipcMain.handle('get-status', () => getStatus());
 ipcMain.handle('get-startup', () => getStartup());
 ipcMain.handle('set-startup', (_event, enabled: unknown) => {
   setStartup(enabled === true);
