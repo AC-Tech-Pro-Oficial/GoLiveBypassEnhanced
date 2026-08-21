@@ -1,10 +1,24 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, Tray, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Tray,
+  shell,
+} from "electron";
 import path, { dirname } from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { homedir } from "os";
 import fs from "fs";
-import { exec, execFile, execFileSync, execSync, spawnSync } from "child_process";
+import {
+  exec,
+  execFile,
+  execFileSync,
+  execSync,
+  spawnSync,
+} from "child_process";
 import { bypassCode } from "./bypass";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -151,7 +165,7 @@ function createWindow() {
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
     ...(isMac
-      ? { trafficLightPosition: { x: 16, y: 16 } }
+      ? { trafficLightPosition: { x: 8, y: 8 } }
       : {
           titleBarOverlay: {
             color: "#1e1f22",
@@ -243,10 +257,18 @@ function quitApp() {
   app.quit();
 }
 
+function trayIcon() {
+  const source = nativeImage.createFromPath(assetPath("tray.png"));
+  if (!isMac) return source;
+
+  // tray.png e 32x32. Sem scaleFactor o macOS desenha 32pt, o dobro dos outros icones da barra.
+  const icon = nativeImage.createFromBuffer(source.toPNG(), { scaleFactor: 2 });
+  icon.setTemplateImage(true);
+  return icon;
+}
+
 function createTray() {
-  const icon = nativeImage.createFromPath(assetPath("tray.png"));
-  if (isMac) icon.setTemplateImage(true);
-  tray = new Tray(icon);
+  tray = new Tray(trayIcon());
   tray.on("click", showWindow);
   refreshTray();
 }
@@ -316,7 +338,9 @@ function getWinDiscordInstalls(): DiscordInstall[] {
     const rootPath = path.join(localAppData, flavour);
     if (!diskFs.existsSync(rootPath)) continue;
 
-    const dirs = diskFs.readdirSync(rootPath).filter((d) => d.startsWith("app-"));
+    const dirs = diskFs
+      .readdirSync(rootPath)
+      .filter((d) => d.startsWith("app-"));
     if (dirs.length === 0) continue;
 
     dirs.sort();
@@ -394,11 +418,9 @@ async function waitUntilDiscordGone(tries = 40, delayMs = 250) {
 function killMacProcesses(names: readonly string[], signal?: "-9") {
   for (const name of names) {
     try {
-      execFileSync(
-        "killall",
-        signal ? [signal, name] : [name],
-        { stdio: "ignore" },
-      );
+      execFileSync("killall", signal ? [signal, name] : [name], {
+        stdio: "ignore",
+      });
     } catch {}
   }
 }
