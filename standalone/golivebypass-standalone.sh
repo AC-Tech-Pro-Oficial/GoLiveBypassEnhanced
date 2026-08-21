@@ -80,6 +80,26 @@ done
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Roda um comando como root. O sudo e o padrao, mas em desktops com polkit (Fedora KDE/GNOME,
+# Ubuntu com sudo desativado) ele falha sem TTY ou sem senha configurada — e o pkexec mostra o
+# dialogo grafico do sistema. Tentar os dois cobre os dois mundos; quem falhar, avisa.
+elevate() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif have sudo && sudo -n true 2>/dev/null; then
+        # NOPASSWD: sudo direto, sem dialogo.
+        sudo "$@"
+    elif have pkexec; then
+        # Sem sudo sem senha, o dialogo do polkit (KDE/GNOME) resolve.
+        pkexec "$@"
+    elif have sudo; then
+        # Ultimo caso: sudo interativo (terminal). Sem TTY ele falha e o chamador avisa.
+        sudo "$@"
+    else
+        return 127
+    fi
+}
+
 # Ler campo a campo em vez de dar source: /etc/os-release e shell valido, e um arquivo torto
 # executaria comando neste script, que logo depois chama sudo.
 os_field() {
@@ -218,11 +238,16 @@ grant_flatpak_access() {
     have flatpak || return 0
     flatpak_has_access "$id" "$dir" && return 0
 
-    if flatpak_is_user_install "$id"; then
-        flatpak override --user "$id" --filesystem="$dir" >/dev/null 2>&1 && return 0
-    else
+    # O override --user vale para app do sistema tambem (o override do usuario tem prioridade
+    # sobre o do sistema) e nao precisa de root. So cai para o sistema quando o --user falha:
+    # no Fedora KDE o sudo/pkexec costuma falhar sem TTY, e este caminho resolve sem dialogo.
+    if flatpak override --user "$id" --filesystem="$dir" >/dev/null 2>&1; then
+        flatpak_has_access "$id" "$dir" && return 0
+    fi
+
+    if ! flatpak_is_user_install "$id"; then
         step "Liberando $dir para o $id"
-        sudo flatpak override "$id" --filesystem="$dir" >/dev/null 2>&1 && return 0
+        elevate flatpak override "$id" --filesystem="$dir" >/dev/null 2>&1 && return 0
     fi
 
     warn "Nao consegui liberar $dir para o $id. Se o Discord abrir em branco, rode:"
@@ -235,10 +260,10 @@ revoke_flatpak_access() {
     local id="$1" dir="$2"
     have flatpak || return 0
 
-    if flatpak_is_user_install "$id"; then
-        flatpak override --user "$id" --nofilesystem="$dir" >/dev/null 2>&1 || true
-    else
-        sudo flatpak override "$id" --nofilesystem="$dir" >/dev/null 2>&1 || true
+    # Mesma logica do grant: o --user vale para app do sistema e nao precisa de root.
+    flatpak override --user "$id" --nofilesystem="$dir" >/dev/null 2>&1 || true
+    if ! flatpak_is_user_install "$id"; then
+        elevate flatpak override "$id" --nofilesystem="$dir" >/dev/null 2>&1 || true
     fi
     return 0
 }
@@ -286,8 +311,8 @@ as_root() {
         "$@"
     else
         local dir="$1"; shift
-        step "Preciso do sudo para escrever em $dir"
-        sudo "$@"
+        step "Preciso de privilegios para escrever em $dir"
+        elevate "$@"
     fi
 }
 
