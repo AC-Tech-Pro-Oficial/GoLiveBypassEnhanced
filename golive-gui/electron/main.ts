@@ -77,8 +77,10 @@ X-GNOME-Autostart-enabled=true
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 480,
-    // Sem o log do script na tela, 560 ja sobra; antes eram 600 por causa do terminal.
-    height: IS_LINUX ? 560 : 600,
+    // A altura e ajustada pelo proprio conteudo: a pagina avisa via IPC 'resize-window'
+    // quando o warning do bypass ativo aparece/some, e a janela cresce/encolhe para nao
+    // cortar nada (antes o aviso ficava cortado com a altura fixa de 560).
+    height: 560,
     resizable: false,
     icon: loadAsset('icon.png'),
     webPreferences: {
@@ -109,23 +111,25 @@ function createWindow() {
   }
 }
 
+// A janela precisa refletir o que a bandeja fez; sem isto, ativar/desativar pelo icone deixava
+// a interface com o estado antigo (botao "Ativar" com o bypass ja ativo, por exemplo).
+function refreshWindowStatus() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('refresh-status');
+  }
+}
+
 function showWindow() {
   if (mainWindow) {
     mainWindow.show();
     mainWindow.focus();
-    // A bandeja pode ter mudado o startup com a janela escondida; ao reaparecer, sincroniza.
+    // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
     mainWindow.webContents.send('refresh-startup');
+    refreshWindowStatus();
   } else {
     createWindow();
   }
   refreshTray().catch(() => {});
-}
-
-// "Fechar" pelo menu da bandeja: esconde a janela, mas o app continua vivo na bandeja.
-function hideWindow() {
-  if (mainWindow) {
-    mainWindow.hide();
-  }
 }
 
 function statusLabel(status: string) {
@@ -195,23 +199,35 @@ async function toggleFromTray() {
     console.error('toggle falhou:', error);
   } finally {
     await refreshTray().catch(() => {});
+    refreshWindowStatus();
   }
 }
 
 async function quitApp() {
   quitting = true;
+  // Sai na hora; a reversao do bypass continua em background (com timeout de seguranca).
+  // Antes o app so fechava depois do script --uninstall terminar — que pode demorar (fechar
+  // o Discord, flatpak, sudo...) ou falhar, e o "Sair" parecia morto.
+  app.quit();
   try {
-    // Sair de verdade desfaz o que for nosso, para o Discord nao ficar com a injecao
-    // pendurada depois que o app morre.
     if (IS_LINUX) {
-      await linuxDeactivate(() => {});
+      await withTimeout(linuxDeactivate(() => {}), 15000);
     } else {
-      await deactivateAll();
+      await withTimeout(deactivateAll(), 15000);
     }
   } catch {
-    // se a reversao falhar, sai mesmo assim
+    // se a reversao falhar ou estourar o tempo, o app ja saiu mesmo assim
   }
-  app.quit();
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout apos ${ms}ms`)), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
 }
 
 function createTray() {
@@ -491,7 +507,6 @@ ipcMain.handle('deactivate', async (event) => {
   refreshTray().catch(() => {});
 });
 ipcMain.handle('get-platform', () => (IS_LINUX ? 'linux' : 'windows'));
-ipcMain.handle('hide-window', () => { hideWindow(); });
 ipcMain.handle('get-status', async () => {
   if (IS_LINUX) {
     return linuxStatus();
@@ -502,4 +517,14 @@ ipcMain.handle('get-startup', () => getStartup());
 ipcMain.handle('set-startup', (_event, enabled: unknown) => {
   setStartup(enabled === true);
   refreshTray().catch(() => {});
+});
+
+// A pagina reporta a altura de que precisa (o warning do bypass ativo faz o conteudo crescer).
+// A janela e fixa (resizable: false), entao o proprio app ajusta para caber tudo sem cortar.
+ipcMain.on('resize-window', (_event, height: unknown) => {
+  const h = Number(height);
+  if (!mainWindow || mainWindow.isDestroyed() || !Number.isFinite(h) || h <= 0) return;
+  const [, currentH] = mainWindow.getSize();
+  if (Math.abs(currentH - Math.round(h)) < 2) return;
+  mainWindow.setSize(480, Math.round(h));
 });

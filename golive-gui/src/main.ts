@@ -7,10 +7,11 @@ declare global {
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
       getPlatform: () => Promise<string>;
-      hideWindow: () => Promise<void>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
       onRefreshStartup: (callback: () => void) => void;
+      onRefreshStatus: (callback: () => void) => void;
+      resizeWindow: (height: number) => void;
     }
   }
 }
@@ -23,11 +24,20 @@ const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const startupLabel = document.getElementById('startupLabel') as HTMLLabelElement;
-const closeBtn = document.getElementById('closeBtn') as HTMLButtonElement;
 
 
 
 let currentState = 'INACTIVE';
+
+// O warning do bypass ativo faz o conteudo crescer; a janela e fixa, entao reportamos a altura
+// necessaria para o main process redimensionar e nada ficar cortado.
+function fitWindowToContent() {
+  const container = document.querySelector('.container');
+  if (!container) return;
+  // +1 px de folga: sem isto a ultima linha as vezes ficava cortada por causa do arredondamento.
+  const height = Math.ceil(container.getBoundingClientRect().height + 1);
+  window.api.resizeWindow(height);
+}
 
 
 
@@ -66,6 +76,8 @@ async function updateStatus() {
     console.error(err);
     statusText.innerText = 'Erro ao buscar status';
   }
+  // Depois de mostrar/esconder o warning, ajusta a janela ao novo tamanho do conteudo.
+  fitWindowToContent();
 }
 
 toggleBtn.addEventListener('click', async () => {
@@ -93,6 +105,7 @@ toggleBtn.addEventListener('click', async () => {
 updateStatus();
 refreshStartup();
 updateStartupLabel();
+fitWindowToContent();
 
 async function updateStartupLabel() {
   try {
@@ -116,10 +129,6 @@ startupToggle.addEventListener('change', async () => {
   await window.api.setStartup(startupToggle.checked);
 });
 
-// Fechar a janela (esconde na bandeja, o app continua em segundo plano).
-closeBtn.addEventListener('click', () => {
-  window.api.hideWindow();
-});
-
-// A bandeja tambem tem esse controle; sem o aviso, os dois ficariam dessincronizados.
+// A bandeja tambem tem esses controles; sem os avisos, os dois ficariam dessincronizados.
 window.api.onRefreshStartup(refreshStartup);
+window.api.onRefreshStatus(updateStatus);
