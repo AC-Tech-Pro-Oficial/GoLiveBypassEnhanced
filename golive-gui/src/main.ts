@@ -10,8 +10,6 @@ declare global {
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
       onRefreshStartup: (callback: () => void) => void;
-
-      onLog: (cb: (chunk: string) => void) => () => void;
     }
   }
 }
@@ -25,16 +23,11 @@ const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const startupLabel = document.getElementById('startupLabel') as HTMLLabelElement;
 
-const logBox = document.getElementById('logBox') as HTMLPreElement;
+
 
 let currentState = 'INACTIVE';
 
-// Progresso do script (Linux): mostra a saida em tempo real.
-window.api.onLog((chunk) => {
-  if (!logBox) return;
-  logBox.textContent += chunk;
-  logBox.scrollTop = logBox.scrollHeight;
-});
+
 
 async function updateStatus() {
   try {
@@ -78,7 +71,6 @@ toggleBtn.addEventListener('click', async () => {
   toggleBtn.classList.add('loading');
 
   try {
-    if (logBox) logBox.style.display = 'block';
     if (currentState === 'ACTIVE') {
       await window.api.deactivate();
     } else {
@@ -93,7 +85,6 @@ toggleBtn.addEventListener('click', async () => {
   }
 
   await updateStatus();
-  if (logBox) logBox.textContent = '';
 });
 
 // Inicialização

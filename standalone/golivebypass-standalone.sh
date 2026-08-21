@@ -294,8 +294,13 @@ as_root() {
 # O Discord de flatpak roda em outro namespace de PID: o pgrep costuma ve-lo, mas o pkill pode
 # nao alcanca-lo. O `flatpak ps` e o `flatpak kill` respondem por essa parte.
 discord_running() {
+    # -x casa o nome exato do processo; no Linux o Discord pode ser "Discord", "discord",
+    # "discord-canary", "discordptb"... e tambem o binario do Electron em qualquer desses nomes.
     pgrep -x Discord >/dev/null 2>&1 && return 0
     pgrep -x DiscordPTB >/dev/null 2>&1 && return 0
+    pgrep -x discord >/dev/null 2>&1 && return 0
+    pgrep -x discord-canary >/dev/null 2>&1 && return 0
+    pgrep -x discordptb >/dev/null 2>&1 && return 0
 
     # Um `flatpak ps` so, e nao um por id: isto roda em laco de dois em dois segundos enquanto
     # o modo temporario espera o Discord fechar.
@@ -310,8 +315,14 @@ discord_running() {
 stop_discord() {
     discord_running || return 0
     step "Fechando o Discord"
+    # Os nomes possiveis do processo do Discord em Linux: maiusculo (Windows), minusculo
+    # (tar.gz/.deb/Flatpak) e os sufixos -canary/-ptb. pkill sem -x pegaria "discord" dentro
+    # de outro comando (ex.: "discordctl"), entao vamos de nome exato, um por um.
     pkill -x Discord 2>/dev/null || true
     pkill -x DiscordPTB 2>/dev/null || true
+    pkill -x discord 2>/dev/null || true
+    pkill -x discord-canary 2>/dev/null || true
+    pkill -x discordptb 2>/dev/null || true
     if have flatpak; then
         local id
         for id in $FLATPAK_IDS; do
@@ -324,7 +335,20 @@ stop_discord() {
         sleep 0.25
         discord_running || return 0
     done
-    fail "O Discord nao fechou. Feche na mao e rode de novo."
+
+    # SIGTERM nao resolveu em 10s (Discord as vezes segura o fechamento). SIGKILL e o ultimo
+    # recurso: fechar a forca vale mais que travar a injecao com um processo teimoso.
+    step "O Discord nao respondeu, forçando o fechamento"
+    pkill -9 -x Discord 2>/dev/null || true
+    pkill -9 -x DiscordPTB 2>/dev/null || true
+    pkill -9 -x discord 2>/dev/null || true
+    pkill -9 -x discord-canary 2>/dev/null || true
+    pkill -9 -x discordptb 2>/dev/null || true
+    for i in $(seq 1 20); do
+        sleep 0.25
+        discord_running || return 0
+    done
+    fail "O Discord nao fechou nem com SIGKILL. Feche na mao e rode de novo."
 }
 
 install_patcher() {

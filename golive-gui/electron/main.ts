@@ -67,7 +67,8 @@ X-GNOME-Autostart-enabled=true
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 480,
-    height: 600,
+    // Sem o log do script na tela, 560 ja sobra; antes eram 600 por causa do terminal.
+    height: IS_LINUX ? 560 : 600,
     resizable: false,
     icon: assetPath('icon.png'),
     webPreferences: {
