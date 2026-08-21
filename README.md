@@ -1,12 +1,12 @@
 # GoLiveBypass — Bypass do Go Live no Discord (Brasil)
 
-Feito por um desenvolvedor brasileiro, **devolve o Go Live e a câmera para usuários brasileiros** no Discord para computador. Você não precisa entender de tecnologia para usar: o jeito mais fácil é o [aplicativo de um clique](#-novo-interface-gráfica-plug-and-play-apenas-windows) logo abaixo.
+Feito por um desenvolvedor brasileiro, **devolve o Go Live e a câmera para usuários brasileiros** no Discord para computador. Você não precisa entender de tecnologia para usar: o jeito mais fácil é o [aplicativo de um clique](#-novo-interface-gráfica-plug-and-play-windows-e-macos) logo abaixo.
 
 Por dentro, só o WebSocket de gateway do Discord passa por uma proxy fora do Brasil — todo o resto sai direto, na sua velocidade normal. Os detalhes técnicos ficam [mais abaixo](#como-funciona).
 
 > **English summary below / Resumo em inglês no final.**
 
-## 🌟 NOVO: Interface Gráfica Plug and Play (Apenas Windows)
+## 🌟 NOVO: Interface Gráfica Plug and Play (Windows e macOS)
 
 Criamos um aplicativo completo que faz todo o trabalho de forma **100% automática**, sem precisar abrir terminais, usar scripts ou instalar modificações complexas como o Equicord.
 
@@ -16,26 +16,40 @@ Criamos um aplicativo completo que faz todo o trabalho de forma **100% automáti
 
 ### Como Baixar e Instalar
 1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)** aqui no GitHub.
-2. Baixe o **`GoLiveBypass.exe`**, na lista de arquivos no fim da página.
-3. Abra o arquivo que você acabou de baixar (ele é portátil, roda direto sem sujar seu PC).
+2. Baixe o arquivo da sua plataforma, na lista no fim da página:
+   - **Windows:** `GoLiveBypass.exe` (portátil, roda direto sem instalar)
+   - **macOS (Apple Silicon):** `GoLiveBypass.dmg`, ou o `GoLiveBypass.zip` se preferir
+3. Abra o arquivo que você acabou de baixar.
 
-O Windows pode mostrar um aviso do SmartScreen na primeira vez, porque o programa não é assinado. Se quiser abrir mesmo assim, é em **Mais informações → Executar assim mesmo**. Se preferir não correr esse risco, use a [instalação por comando](#um-comando-só), que é o mesmo bypass sem executável.
+O programa **não é assinado**. O sistema avisa na primeira vez. Se preferir não correr esse risco, use a [instalação por comando](#um-comando-só), que é o mesmo bypass sem executável.
+
+**Windows (SmartScreen):** **Mais informações → Executar assim mesmo**.
+
+#### macOS
+
+Dois avisos do sistema, e nenhum dos dois é o GoLiveBypass “quebrado”.
+
+**1. Abrir o app (Gatekeeper).** Clique com o **botão direito** no GoLiveBypass → **Abrir** → **Abrir**. Se o macOS só mostrar que não é possível abrir, vá em **Ajustes do Sistema → Privacidade e Segurança** e clique em **Abrir mesmo assim**.
+
+**2. Deixar o app mexer no Discord (Administração de Apps).** Se você já usou o Vencord, sabe qual é essa tela: o macOS não deixa um programa alterar o `Discord.app` até você autorizar. É **a mesma permissão**. Na primeira vez que você clicar em Ativar, o sistema bloqueia a escrita; o GoLiveBypass tenta abrir **Ajustes do Sistema → Privacidade e Segurança → Administração de Apps**. Ative o GoLiveBypass (ou arraste o app para a lista) e clique em Ativar de novo.
+
+**Depois de uma atualização do Discord.** No Mac o instalador troca o `.app` inteiro e a injeção some. Abra o GoLiveBypass e ative de novo. (No Windows o standalone tenta adiantar isso sozinho; na GUI do Mac isso não existe.)
 
 ### Como Usar
-1. O aplicativo vai detectar o seu Discord automaticamente.
+1. O aplicativo vai detectar o seu Discord automaticamente (no Mac, em `/Applications` ou `~/Applications`, inclusive PTB e Canary).
 2. Clique no botão azul **"Ativar GoLiveBypass"**.
 3. O Discord vai reiniciar automaticamente com o Go Live desbloqueado!
-4. Pode fechar a janela sem medo: o app fica na **bandeja**, junto do relógio do Windows. Clique no ícone de lá para reabrir, ativar/desativar ou **Sair** — sair pela bandeja é o que reverte tudo ao normal.
-5. Se quiser que ele já abra com o PC (direto na bandeja, sem janela pulando na tela), marque **"Iniciar com o Windows"** na janela ou no menu da bandeja.
+4. Pode fechar a janela sem medo: o app fica na **bandeja** do Windows (junto do relógio) ou na **barra de menus** do Mac. Clique no ícone de lá para reabrir, ativar/desativar ou **Sair** — sair por esse ícone é o que reverte tudo ao normal.
+5. Se quiser que ele já abra com o PC (direto escondido, sem janela pulando na tela), marque **"Iniciar com o Windows"** ou **"Iniciar com o Mac"** na janela ou no menu do ícone.
 
-> **Dica Importante:** Se a sua transmissão ficar com a tela preta ou não carregar de primeira, basta apertar **Ctrl + R** dentro do Discord para recarregar a tela, e ela voltará a funcionar!
+> **Dica Importante:** Se a sua transmissão ficar com a tela preta ou não carregar de primeira, recarregue o Discord: **Ctrl + R** no Windows, **Cmd + R** no Mac.
 
 ---
 
 ## Índice
 
 **Quero instalar agora**
-- [**Interface Gráfica (Windows)**](#-novo-interface-gráfica-plug-and-play-apenas-windows) — 1 clique para ativar/desativar, sem terminal
+- [**Interface Gráfica (Windows e macOS)**](#-novo-interface-gráfica-plug-and-play-windows-e-macos) — 1 clique para ativar/desativar, sem terminal
 - [**Um comando só**](#um-comando-só) — uma linha no PowerShell ou no terminal, sem baixar nada
 - [Instalação automática](#instalação-automática-recomendado) — o instalador completo, com menu, para usar via plugin Equicord/Vencord
 - [Modo Standalone (Scripts)](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — direto no Discord, sem mod e sem compilar nada
@@ -700,10 +714,10 @@ standalone/
 ├── GoLiveBypass-Standalone.ps1    # Windows: instala direto no Discord
 └── golivebypass-standalone.sh     # Linux: o mesmo
 
-golive-gui/                        # app Electron de um clique (Windows): injeta o standalone,
-                                   #   mora na bandeja e reverte ao sair pelo ícone de lá;
-                                   #   scripts/sync-bypass.mjs mantém
-                                   #   a cópia embutida idêntica ao standalone
+golive-gui/                        # app Electron de um clique (Windows e macOS): injeta o
+                                   #   standalone, mora na bandeja / barra de menus e reverte
+                                   #   ao sair pelo ícone de lá. scripts/sync-bypass.mjs
+                                   #   mantém a cópia embutida idêntica ao standalone
 
 assets/
 └── instalacao.gif                 # o vídeo do começo deste README
@@ -768,6 +782,10 @@ Ela abriu a issue mostrando que dava para instalar o plugin no Vesktop apontando
 Location" para um build manual — e testou até funcionar. Ele transformou o relato dela no
 passo a passo completo que está no README, com direito à pegadinha do Flatpak.
 
+**Obrigado ao [Victor Mello](https://github.com/victorsvart)** pelo fork [GUI-MacOS](https://github.com/victorsvart/GoLiveBypass-GUI-MacOS).
+
+A interface gráfica existia apenas no Windows, então ele fez a portabilidade da GUI para o macOS.
+
 # English
 
 **GoLiveBypass** is an **Equicord/Vencord** plugin, made by a Brazilian developer, that **restores Go Live and camera for Brazilian Discord users**. On every launch it brings up a small local SOCKS router (loopback only) and points only Discord's gateway WebSocket hosts at it; the router carries that traffic through an exit outside Brazil — your own proxy, a local Tor, or a free proxy picked and tested for you — while **everything else stays direct at full speed**. Discord's region gate, evaluated once at voice-channel join from the gateway origin IP and never re-evaluated mid-call, then unlocks Go Live and camera. As a bonus, the login itself can optionally be routed too, hiding your real IP during authentication.
@@ -784,5 +802,5 @@ It was written after Brazil's data protection authority (ANPD) [ordered Discord 
 - Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings. On **Vesktop**, skip `pnpm inject` and point Vesktop's *Vencord Location* at your build's `dist` folder instead (see [Instalação no Vesktop](#instalação-no-vesktop)).
 - Made by **bezumiya** — [GitHub](https://github.com/bezumiya/GoLiveBypass), [Twitter](https://twitter.com/obezumiya), Discord `1366453661970071633`.
 - Thanks to **[mazxxy](https://github.com/mazxxy)** for the idea that became the project's backbone: a local SOCKS5 with an embedded PAC routing only the gateway through the proxy ([#3](https://github.com/bezumiya/GoLiveBypass/pull/3), merged for authorship — the lines were later rewritten, but the design is his).
-- Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[gabrigode](https://github.com/gabrigode)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override. Thanks to **[StellaThimoty](https://github.com/StellaThimoty)** for finding and testing the manual Vesktop path, and to **[pdl-clay](https://github.com/pdl-clay)** for turning it into the step-by-step guide in this README.
+- Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[gabrigode](https://github.com/gabrigode)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override. Thanks to **[StellaThimoty](https://github.com/StellaThimoty)** for finding and testing the manual Vesktop path, and to **[pdl-clay](https://github.com/pdl-clay)** for turning it into the step-by-step guide in this README. Thanks to **[Victor Mello](https://github.com/victorsvart)** for the [GUI-MacOS](https://github.com/victorsvart/GoLiveBypass-GUI-MacOS) fork: He ported the GUI app to MacOS
 - License: GPL-3.0-or-later.
