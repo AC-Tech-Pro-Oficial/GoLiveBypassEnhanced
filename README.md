@@ -30,12 +30,44 @@ O Windows pode mostrar um aviso do SmartScreen na primeira vez, porque o program
 
 > **Dica Importante:** Se a sua transmissão ficar com a tela preta ou não carregar de primeira, basta apertar **Ctrl + R** dentro do Discord para recarregar a tela, e ela voltará a funcionar!
 
+
+## 🐧 Interface Gráfica para Linux (AppImage)
+
+A mesma interface gráfica do Windows, **agora para Linux**, empacotada como **AppImage** (roda em qualquer distro: Debian, Ubuntu, Fedora, Arch e derivadas).
+
+Assim como a versão Windows, ela é **portátil**: ativa o GoLiveBypass ao clicar e **reverte tudo ao fechar a janela**. Por baixo, ela chama o [modo standalone](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) (POSIX, funciona em qualquer shell), então toda a lógica de detecção — Discord nativo, flatpak, bootstrap novo, snap — é a mesma dos scripts, com o progresso aparecendo na tela.
+
+### Como Baixar e Instalar
+1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)**.
+2. Baixe o **`GoLiveBypass-*.AppImage`**.
+3. Dê permissão de execução e abra:
+
+```sh
+chmod +x GoLiveBypass-*.AppImage
+./GoLiveBypass-*.AppImage
+```
+
+> Se o seu sistema não tiver FUSE (alguns containers/WSL), use `--appimage-extract-and-run`:
+> ```sh
+> ./GoLiveBypass-*.AppImage --appimage-extract-and-run
+> ```
+
+### Como Usar
+1. O aplicativo detecta o seu Discord automaticamente (nativo ou flatpak).
+2. Clique em **"Ativar GoLiveBypass"** — o Discord fecha, o bypass entra e ele reabre.
+3. Ao fechar esta janela, o Discord volta ao normal (como no Windows).
+
+> **Nota:** se o seu Discord é flatpak do sistema, a primeira ativação pode pedir sua senha (via `pkexec`) para liberar a pasta do bypass para o sandbox.
+
+---
+
 ---
 
 ## Índice
 
 **Quero instalar agora**
 - [**Interface Gráfica (Windows)**](#-novo-interface-gráfica-plug-and-play-apenas-windows) — 1 clique para ativar/desativar, sem terminal
+- [**Interface Gráfica (Linux, AppImage)**](#-interface-gráfica-para-linux-appimage) — 1 clique, portátil, em qualquer distro
 - [**Um comando só**](#um-comando-só) — uma linha no PowerShell ou no terminal, sem baixar nada
 - [Instalação automática](#instalação-automática-recomendado) — o instalador completo, com menu, para usar via plugin Equicord/Vencord
 - [Modo Standalone (Scripts)](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — direto no Discord, sem mod e sem compilar nada
