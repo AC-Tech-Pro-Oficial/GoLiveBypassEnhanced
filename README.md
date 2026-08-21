@@ -44,12 +44,44 @@ Dois avisos do sistema, e nenhum dos dois é o GoLiveBypass “quebrado”.
 
 > **Dica Importante:** Se a sua transmissão ficar com a tela preta ou não carregar de primeira, recarregue o Discord: **Ctrl + R** no Windows, **Cmd + R** no Mac.
 
+
+## 🐧 Interface Gráfica para Linux (AppImage)
+
+A mesma interface gráfica do Windows, **agora para Linux**, empacotada como **AppImage** (roda em qualquer distro: Debian, Ubuntu, Fedora, Arch e derivadas).
+
+Assim como a versão Windows, ela é **portátil**: ativa o GoLiveBypass ao clicar e **reverte tudo ao fechar a janela**. Por baixo, ela chama o [modo standalone](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) (POSIX, funciona em qualquer shell), então toda a lógica de detecção — Discord nativo, flatpak, bootstrap novo, snap — é a mesma dos scripts, com o progresso aparecendo na tela.
+
+### Como Baixar e Instalar
+1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)**.
+2. Baixe o **`GoLiveBypass-*.AppImage`**.
+3. Dê permissão de execução e abra:
+
+```sh
+chmod +x GoLiveBypass-*.AppImage
+./GoLiveBypass-*.AppImage
+```
+
+> Se o seu sistema não tiver FUSE (alguns containers/WSL), use `--appimage-extract-and-run`:
+> ```sh
+> ./GoLiveBypass-*.AppImage --appimage-extract-and-run
+> ```
+
+### Como Usar
+1. O aplicativo detecta o seu Discord automaticamente (nativo ou flatpak).
+2. Clique em **"Ativar GoLiveBypass"** — o Discord fecha, o bypass entra e ele reabre.
+3. Ao fechar esta janela, o Discord volta ao normal (como no Windows).
+
+> **Nota:** se o seu Discord é flatpak do sistema, a primeira ativação pode pedir sua senha (via `pkexec`) para liberar a pasta do bypass para o sandbox.
+
+---
+
 ---
 
 ## Índice
 
 **Quero instalar agora**
 - [**Interface Gráfica (Windows e macOS)**](#-novo-interface-gráfica-plug-and-play-windows-e-macos) — 1 clique para ativar/desativar, sem terminal
+- [**Interface Gráfica (Linux, AppImage)**](#-interface-gráfica-para-linux-appimage) — 1 clique, portátil, em qualquer distro
 - [**Um comando só**](#um-comando-só) — uma linha no PowerShell ou no terminal, sem baixar nada
 - [Instalação automática](#instalação-automática-recomendado) — o instalador completo, com menu, para usar via plugin Equicord/Vencord
 - [Modo Standalone (Scripts)](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — direto no Discord, sem mod e sem compilar nada
@@ -93,8 +125,8 @@ Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e 
 
 **Linux**, no terminal:
 
-```bash
-bash <(curl -fsSL https://bezu.dev/golive.sh)
+```sh
+curl -fsSL https://bezu.dev/golive.sh -o golive.sh && sh golive.sh
 ```
 
 Os dois abrem o mesmo menu da instalação normal.
@@ -105,17 +137,13 @@ Se quiser passar opções, elas vão no fim:
 & ([scriptblock]::Create((irm https://bezu.dev/golive.ps1))) -Proxy "socks5://usuario:senha@host:1080"
 ```
 
-```bash
-bash <(curl -fsSL https://bezu.dev/golive.sh) --proxy socks5://usuario:senha@host:1080
+```sh
+curl -fsSL https://bezu.dev/golive.sh -o golive.sh && sh golive.sh --proxy socks5://usuario:senha@host:1080
 ```
 
 > **Por que não `irm ... | iex` e `curl ... | bash`?** As duas formas curtas funcionam, mas em silêncio pela metade. No Windows, `iex` **ignora as opções** — um `-Proxy` no fim simplesmente não chega. No Linux é pior: o `bash` passa a ler o script pela entrada padrão, então o menu tenta ler a sua resposta e acaba consumindo a próxima linha do próprio script. A pergunta nunca aparece.
 
-Se o seu shell não tiver `<(...)`, como `sh` ou `dash`, baixe antes:
-
-```bash
-curl -fsSL https://bezu.dev/golive.sh -o golive.sh && bash golive.sh
-```
+**Roda em qualquer shell** — bash, zsh, sh, dash, ksh, fish, ou o que você tiver. O comando acima baixa o script e roda com `sh` (o instalador é POSIX, não depende de bash). A forma antiga `bash <(curl -fsSL ...)` só funciona em bash/zsh (usa process substitution) e, pior, o `bash` lendo o script pela entrada padrão consome a sua resposta do menu — por isso a pergunta nunca aparecia.
 
 ### Baixando o arquivo
 
@@ -714,10 +742,14 @@ standalone/
 ├── GoLiveBypass-Standalone.ps1    # Windows: instala direto no Discord
 └── golivebypass-standalone.sh     # Linux: o mesmo
 
-golive-gui/                        # app Electron de um clique (Windows e macOS): injeta o
+golive-gui/                        # app Electron de um clique (Windows, macOS e Linux AppImage): injeta o
                                    #   standalone, mora na bandeja / barra de menus e reverte
                                    #   ao sair pelo ícone de lá. scripts/sync-bypass.mjs
                                    #   mantém a cópia embutida idêntica ao standalone
+
+tests/
+└── test-posix.sh                  # suíte de portabilidade: roda os instaladores em containers
+                                   #   (podman/docker) com sh, dash, ash, bash, zsh, ksh e mksh
 
 assets/
 └── instalacao.gif                 # o vídeo do começo deste README

@@ -11,16 +11,13 @@
     "build:win": "npm run compile && electron-builder --win --x64",
     "build:mac": "npm run compile && electron-builder --mac --arm64",
     "preview": "vite preview",
-    "sync-bypass": "node scripts/sync-bypass.mjs"
+    "sync-bypass": "node scripts/sync-bypass.mjs",
+    "build:linux": "npm run compile && electron-builder --linux AppImage"
   },
   "build": {
     "appId": "com.golivebypass.gui",
     "productName": "GoLiveBypass",
-    "files": [
-      "dist",
-      "dist-electron",
-      "assets"
-    ],
+    "files": ["dist", "dist-electron", "assets"],
     "directories": {
       "output": "dist-app"
     },
@@ -31,6 +28,16 @@
     "portable": {
       "artifactName": "${productName}.${ext}"
     },
+    "extraResources": [
+      {
+        "from": "../standalone",
+        "to": "extra/standalone",
+        "filter": [
+          "golivebypass-standalone.sh",
+          "golivebypass.js"
+        ]
+      }
+    ],
     "mac": {
       "target": [
         {
@@ -51,6 +58,11 @@
     },
     "dmg": {
       "artifactName": "${productName}.${ext}"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Utility",
+      "icon": "build/icon.png"
     }
   },
   "devDependencies": {

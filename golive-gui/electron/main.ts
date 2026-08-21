@@ -14,11 +14,13 @@ import { homedir } from "os";
 import fs from "fs";
 import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { bypassCode } from "./bypass";
+import { runScript } from "./linux-helper";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const isMac = process.platform === "darwin";
+const IS_LINUX = process.platform === "linux";
 
 // O fs do Electron trata *.asar como pasta. original-fs e o disco de verdade, o mesmo
 // que o instalador do Vencord usa para renomear o app.asar.
@@ -169,7 +171,9 @@ function createWindow() {
   });
 
   mainWindow.on("close", (event) => {
-    if (quitting) return;
+    // No Linux a janela fecha de verdade e reverte (AppImage portatil). No Windows e no Mac
+    // o X so esconde na bandeja / barra de menus.
+    if (quitting || IS_LINUX) return;
     event.preventDefault();
     mainWindow?.hide();
   });
@@ -202,10 +206,10 @@ function statusLabel(status: string) {
 
 // O menu e remontado a cada mudanca: e o jeito simples de o rotulo de status e o item
 // Ativar/Desativar refletirem o estado atual sem logica de diff.
-function refreshTray() {
+async function refreshTray() {
   if (!tray) return;
   try {
-    const status = getStatus();
+    const status = IS_LINUX ? await linuxStatus() : getStatus();
     const label = statusLabel(status);
     tray.setToolTip(`GoLiveBypass — ${label}`);
     tray.setContextMenu(
@@ -239,8 +243,15 @@ function refreshTray() {
 
 async function toggleFromTray() {
   try {
-    if (getStatus() === "ACTIVE") await deactivateAll();
-    else await activateBypass(null, "");
+    if (IS_LINUX) {
+      const status = await linuxStatus();
+      if (status === "ACTIVE") await linuxDeactivate(() => {});
+      else await linuxActivate("", () => {});
+    } else if (getStatus() === "ACTIVE") {
+      await deactivateAll();
+    } else {
+      await activateBypass(null, "");
+    }
   } finally {
     refreshTray();
   }
@@ -284,7 +295,7 @@ if (!gotLock) {
 }
 
 // Cmd+Q no Mac nao passa por window-all-closed da mesma forma que o Sair da bandeja no Windows:
-// o restore vive aqui para os dois caminhos.
+// o restore vive aqui para os dois caminhos. No Linux, fechar a janela tambem cai aqui.
 app.on("before-quit", (event) => {
   // A segunda instancia so acorda a primeira e morre: sem esta guarda ela restauraria o
   // Discord na saida, desfazendo o bypass que a instancia principal acabou de aplicar.
@@ -292,7 +303,8 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   quitting = true;
   cleaningUp = true;
-  deactivateAll().finally(() => {
+  const restore = IS_LINUX ? linuxDeactivate(() => {}) : deactivateAll();
+  restore.finally(() => {
     app.quit();
   });
 });
@@ -300,6 +312,7 @@ app.on("before-quit", (event) => {
 app.on("window-all-closed", () => {
   // No Mac o app fica na barra de menus com a janela fechada; no Windows o X ja esconde, entao
   // isto so dispara de verdade na hora de sair, e o restore ja foi pelo before-quit.
+  // No Linux a janela fecha de verdade (portatil) e o restore tambem vai pelo before-quit.
   if (!isMac) {
     quitting = true;
     app.quit();
@@ -668,17 +681,73 @@ function getStatus(): string {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Linux: delega para o script standalone (POSIX). A GUI e uma casca: quem decide
+// tudo (deteccao, flatpak, sudo, injecao) e o script, e a GUI mostra o progresso.
+// ---------------------------------------------------------------------------
+
+function linuxStatus(): Promise<string> {
+  return runScript(["--status", "--json"])
+    .then(({ code, stdout }) => {
+      if (code !== 0) return "NOT_FOUND";
+      try {
+        const data = JSON.parse(stdout);
+        const discords = data.discords ?? [];
+        if (discords.length === 0) return "NOT_FOUND";
+        const anyOurs = discords.some((d: { state: string }) => d.state === "nosso");
+        const anyMod = discords.some((d: { state: string }) => d.state === "outromod");
+        if (anyOurs) return "ACTIVE";
+        if (anyMod) return "OTHER_MOD";
+        return "INACTIVE";
+      } catch {
+        return "NOT_FOUND";
+      }
+    })
+    .catch(() => "NOT_FOUND");
+}
+
+async function linuxActivate(proxyAddress: string, onChunk: (c: string) => void) {
+  const args = ["--yes"];
+  if (proxyAddress.trim() !== "") args.push("--proxy", proxyAddress.trim());
+  const { code, stderr } = await runScript(args, onChunk);
+  if (code !== 0) {
+    throw new Error(
+      stderr.split("\n").filter(Boolean).slice(-3).join("\n") || "Falha ao ativar",
+    );
+  }
+}
+
+async function linuxDeactivate(onChunk: (c: string) => void) {
+  const { code, stderr } = await runScript(["--uninstall"], onChunk);
+  if (code !== 0) {
+    throw new Error(
+      stderr.split("\n").filter(Boolean).slice(-3).join("\n") || "Falha ao desativar",
+    );
+  }
+}
+
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
 // tambem remontam o menu ao terminar.
-ipcMain.handle("activate", async (event, proxyAddress: string) => {
-  await activateBypass(event, proxyAddress);
+ipcMain.handle("activate", async (event, proxyAddress: string = "") => {
+  if (IS_LINUX) {
+    await linuxActivate(proxyAddress, (c) => event.sender.send("bypass-log", c));
+  } else {
+    await activateBypass(event, proxyAddress);
+  }
   refreshTray();
 });
-ipcMain.handle("deactivate", async () => {
-  await deactivateAll();
+ipcMain.handle("deactivate", async (event) => {
+  if (IS_LINUX) {
+    await linuxDeactivate((c) => event.sender.send("bypass-log", c));
+  } else {
+    await deactivateAll();
+  }
   refreshTray();
 });
-ipcMain.handle("get-status", () => getStatus());
+ipcMain.handle("get-status", async () => {
+  if (IS_LINUX) return linuxStatus();
+  return getStatus();
+});
 ipcMain.handle("get-startup", () => getStartup());
 ipcMain.handle("set-startup", (_event, enabled: unknown) => {
   setStartup(enabled === true);

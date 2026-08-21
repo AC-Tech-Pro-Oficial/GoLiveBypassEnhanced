@@ -10,6 +10,8 @@ declare global {
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
       onRefreshStartup: (callback: () => void) => void;
+
+      onLog: (cb: (chunk: string) => void) => () => void;
     }
   }
 }
@@ -42,7 +44,16 @@ const warningAlert = document.getElementById('warningAlert')!;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 
+const logBox = document.getElementById('logBox') as HTMLPreElement;
+
 let currentState = 'INACTIVE';
+
+// Progresso do script (Linux): mostra a saida em tempo real.
+window.api.onLog((chunk) => {
+  if (!logBox) return;
+  logBox.textContent += chunk;
+  logBox.scrollTop = logBox.scrollHeight;
+});
 
 async function updateStatus() {
   try {
@@ -84,14 +95,15 @@ async function updateStatus() {
 toggleBtn.addEventListener('click', async () => {
   toggleBtn.disabled = true;
   toggleBtn.classList.add('loading');
-  
+
   try {
+    if (logBox) logBox.style.display = 'block';
     if (currentState === 'ACTIVE') {
       await window.api.deactivate();
     } else {
       const proxy = proxyInput.value.trim();
       await window.api.activate(proxy);
-      
+
       // Popup de aviso
       alert(`GoLiveBypass Ativado!\n\nAVISO IMPORTANTE: Se a transmissão ficar preta ou não carregar, aperte ${reloadShortcut} dentro do Discord.`);
     }
@@ -100,6 +112,7 @@ toggleBtn.addEventListener('click', async () => {
   }
 
   await updateStatus();
+  if (logBox) logBox.textContent = '';
 });
 
 // Inicialização

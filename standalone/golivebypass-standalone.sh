@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # GoLiveBypass standalone - instalador para Linux
 #
@@ -13,20 +13,48 @@
 #   ./golivebypass-standalone.sh --uninstall
 #   ./golivebypass-standalone.sh --status
 
-set -euo pipefail
+# So construcoes POSIX: roda em dash, bash, zsh, ksh e busybox ash.
+set -eu
+SCRIPT_PATH="${SCRIPT_PATH:-$0}"
+
+# ---------------------------------------------------------------------------
+# Portabilidade entre shells (POSIX + dash/ash/bash/zsh/ksh/mksh)
+#
+# zsh, por padrao, aborta com "no matches found" quando um glob nao casa
+# (nomatch). O comportamento POSIX - e o de todos os outros shells - e deixar
+# o glob literal, e os testes do script dependem disso (ex.: app-*/resources).
+if [ -n "${ZSH_VERSION:-}" ]; then
+    # so o zsh entende; nos outros shells isto e "command not found", engolido.
+    setopt NULL_GLOB 2>/dev/null || true
+fi
+
+# ksh93 nao tem o builtin `local` (usa `typeset`); dash, bash, zsh, mksh e
+# busybox ash tem. O probe roda `local` dentro de uma funcao: so e valido onde
+# o builtin existe. Onde nao existe, definimos um wrapper via eval — o conteudo
+# so e parseado nesse momento, entao o dash nunca ve a definicao.
+_local_probe() { local _probe_var=1; }
+if ! _local_probe 2>/dev/null; then
+    eval 'local() { typeset "$@"; }'
+fi
+unset -f _local_probe 2>/dev/null || true
+
+
+
+
 
 PATCHER_NAME="golivebypass.js"
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass"
 STUB_PACKAGE='{"name":"discord","main":"index.js"}'
-FLATPAK_IDS=("com.discordapp.Discord" "com.discordapp.DiscordPTB" "com.discordapp.DiscordCanary")
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 MODE="install"
 PROXY=""
 EXCLUDED="BR"
 ASSUME_YES=0
+JSON=0
 
-C_OFF=$'\033[0m'; C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_DIM=$'\033[2m'
+C_OFF=$(printf '\033[0m'); C_CYAN=$(printf '\033[36m'); C_GREEN=$(printf '\033[32m'); C_YELLOW=$(printf '\033[33m'); C_RED=$(printf '\033[31m'); C_DIM=$(printf '\033[2m')
 
 # Tudo em stderr: estas funcoes sao chamadas de dentro de $(...), e escrever em stdout faria o
 # texto colar no valor de retorno. Foi assim que a primeira versao do instalador de Linux
@@ -42,8 +70,9 @@ while [ $# -gt 0 ]; do
         --excluded-countries) EXCLUDED="${2:-BR}"; shift ;;
         --uninstall) MODE="uninstall" ;;
         --status) MODE="status" ;;
+        --json) JSON=1 ;;
         -y|--yes) ASSUME_YES=1 ;;
-        -h|--help) sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,14p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "Opcao desconhecida: $1" ;;
     esac
     shift
@@ -62,11 +91,13 @@ os_field() {
 # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e :
 # codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
 # bypass cairia para a lista gratuita sem dizer por que.
-if [ -n "$PROXY" ] && ! [[ "$PROXY" =~ ^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}$ ]]; then
-    printf '\n  %s[X]%s Endereco de proxy invalido.\n' "$C_RED" "$C_OFF" >&2
-    printf '      %sUse socks5://host:porta, ou socks5://usuario:senha@host:porta.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '      %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A).%s\n\n' "$C_DIM" "$C_OFF" >&2
-    exit 1
+if [ -n "$PROXY" ]; then
+    if ! printf '%s' "$PROXY" | grep -Eq '^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}$'; then
+        printf '\n  %s[X]%s Endereco de proxy invalido.\n' "$C_RED" "$C_OFF" >&2
+        printf '      %sUse socks5://host:porta, ou socks5://usuario:senha@host:porta.%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '      %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A).%s\n\n' "$C_DIM" "$C_OFF" >&2
+        exit 1
+    fi
 fi
 
 confirm() {
@@ -74,7 +105,10 @@ confirm() {
     local answer
     printf '  %s [s/N] ' "$1" >&2
     read -r answer || return 1
-    [[ "$answer" =~ ^[sSyY] ]]
+    case "$answer" in
+        [sSyY]*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Procura o app.asar de verdade em vez de confiar numa lista de caminhos.
@@ -122,7 +156,7 @@ discord_dirs() {
     # refaz o deploy inteiro e leva a injecao junto.
     for raiz in /var/lib/flatpak/app "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app"; do
         [ -d "$raiz" ] || continue
-        for id in "${FLATPAK_IDS[@]}"; do
+        for id in $FLATPAK_IDS; do
             for sub in "$raiz/$id"/current/active/files/*/resources; do
                 if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                     printf '%s\n' "$sub"
@@ -133,7 +167,7 @@ discord_dirs() {
 
     # O mesmo bootstrap de que fala o comentario la em cima, so que dentro do flatpak: o HOME
     # do Discord vira ~/.var/app/<id>, e o app baixado cai la. Este e do proprio usuario.
-    for id in "${FLATPAK_IDS[@]}"; do
+    for id in $FLATPAK_IDS; do
         for sub in "$HOME/.var/app/$id"/config/discord*/app-*/resources; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                 printf '%s\n' "$sub"
@@ -147,9 +181,9 @@ discord_dirs() {
 # O id do flatpak a que um caminho pertence, ou nada se o caminho nao for de flatpak.
 flatpak_app_id() {
     local parte
-    while IFS= read -r parte; do
+    for parte in $(printf '%s\n' "${1:-}" | tr '/' '\n'); do
         case "$parte" in com.discordapp.*) printf '%s\n' "$parte"; return 0 ;; esac
-    done < <(printf '%s\n' "${1:-}" | tr '/' '\n')
+    done
     return 1
 }
 
@@ -160,15 +194,19 @@ flatpak_is_user_install() {
 # A liberacao ja existente aparece no --show-permissions, que nao precisa de raiz. Conferir
 # antes evita pedir a senha do sudo toda vez que o instalador roda de novo.
 flatpak_has_access() {
-    local entrada
+    local entrada lista IFS
     # Entrada por entrada, e comparando o texto inteiro: depois de um --nofilesystem a pasta
     # continua aparecendo na lista, so que como !pasta. Procurar o pedaco solto acharia essa
     # negacao e concluiria que o acesso existe, justamente quando ele nao existe mais.
-    while IFS= read -r entrada; do
+    lista="$(flatpak info --show-permissions "$1" 2>/dev/null | sed -n 's/^filesystems=//p' | tr ';' '\n')"
+    [ -n "$lista" ] || return 1
+    IFS='
+'
+    for entrada in $lista; do
         case "$entrada" in
             "$2"|"$2:rw"|"$2:ro"|"$2:create") return 0 ;;
         esac
-    done < <(flatpak info --show-permissions "$1" 2>/dev/null | sed -n 's/^filesystems=//p' | tr ';' '\n')
+    done
     return 1
 }
 
@@ -276,7 +314,7 @@ stop_discord() {
     pkill -x DiscordPTB 2>/dev/null || true
     if have flatpak; then
         local id
-        for id in "${FLATPAK_IDS[@]}"; do
+        for id in $FLATPAK_IDS; do
             flatpak kill "$id" >/dev/null 2>&1 || true
         done
     fi
@@ -349,6 +387,25 @@ remove_injection() {
     return 0
 }
 
+
+# Reabre o Discord depois de injetar ou de desfazer. Quem tem o flatpak e um Discord nativo
+# pela metade acabaria com o errado aberto: abre o mesmo que foi mexido.
+start_discord() {
+    local resources="${1:-}" id exe
+
+    if [ -n "$resources" ] && id="$(flatpak_app_id "$resources")" && have flatpak; then
+        nohup flatpak run "$id" >/dev/null 2>&1 &
+        return 0
+    fi
+
+    for exe in discord Discord discord-canary; do
+        if have "$exe"; then
+            nohup "$exe" >/dev/null 2>&1 &
+            return 0
+        fi
+    done
+}
+
 printf '\n  %sGoLiveBypass standalone%s\n' "$C_CYAN" "$C_OFF" >&2
 printf '  %sGo Live e camera de volta, direto no Discord%s\n' "$C_DIM" "$C_OFF" >&2
 
@@ -357,11 +414,25 @@ DISTRO="$(os_field PRETTY_NAME)"
 printf '  %s%s%s\n\n' "$C_DIM" "$DISTRO" "$C_OFF" >&2
 
 aviso_empacotado
-mapfile -t FOUND < <(discord_dirs)
-[ "${#FOUND[@]}" -gt 0 ] || fail "Nao achei nenhum Discord instalado."
+FOUND="$(discord_dirs)"
+[ -n "$FOUND" ] || fail "Nao achei nenhum Discord instalado."
 
 if [ "$MODE" = "status" ]; then
-    for resources in "${FOUND[@]}"; do
+    if [ "$JSON" -eq 1 ]; then
+        # Saida maquina para a GUI: um JSON com o estado de cada Discord encontrado.
+        # A ordem e estavel e o caminho e a chave, entao a GUI nao precisa de parser.
+        printf '{"discords":['
+        first=1
+        printf '%s\n' "$FOUND" | while IFS= read -r resources; do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"path":"%s","state":"%s"}' "$resources" "$(injection_state "$resources")"
+        done
+        printf ']}'
+        printf '\n'
+        exit 0
+    fi
+    printf '%s\n' "$FOUND" | while IFS= read -r resources; do
         case "$(injection_state "$resources")" in
             vanilla)  printf '  %s: sem nada instalado\n' "$resources" >&2 ;;
             nosso)    printf '  %s: com o GoLiveBypass standalone\n' "$resources" >&2 ;;
@@ -374,7 +445,7 @@ fi
 
 if [ "$MODE" = "uninstall" ]; then
     stop_discord
-    for resources in "${FOUND[@]}"; do
+    printf '%s\n' "$FOUND" | while IFS= read -r resources; do
         if [ "$(injection_state "$resources")" != "nosso" ]; then
             warn "$resources nao tem o standalone, deixando como esta."
             continue
@@ -384,10 +455,13 @@ if [ "$MODE" = "uninstall" ]; then
             revoke_flatpak_access "$id" "$INSTALL_DIR"
         fi
     done
+
+    # Modo portatil: ao desfazer, reabre o Discord limpo (mesmo comportamento do app do Windows).
+    start_discord "$(printf '%s\n' "$FOUND" | head -1)"
     exit 0
 fi
 
-for resources in "${FOUND[@]}"; do
+printf '%s\n' "$FOUND" | while IFS= read -r resources; do
     state="$(injection_state "$resources")"
     printf '  %s: %s\n' "$resources" "$state" >&2
 
@@ -418,12 +492,15 @@ for resources in "${FOUND[@]}"; do
     ok "$resources pronto."
 done
 
-printf '\n  %sAbra o Discord. O Go Live deve voltar sozinho.%s\n' "$C_GREEN" "$C_OFF" >&2
+# Modo portatil: reabre o Discord ja com o bypass ativo (mesmo comportamento do app do Windows).
+# head -1 em vez de pipe para o while: nohup num subshell morreria junto com ele.
+start_discord "$(printf '%s\n' "$FOUND" | head -1)"
+printf '\n  %sDiscord aberto com o GoLiveBypass.%s\n' "$C_GREEN" "$C_OFF" >&2
 
 # O updater do Discord baixa a versao nova numa pasta app-<versao> inteiramente nova, entao a
 # injecao fica na pasta velha e simplesmente para de valer. Nao ha como impedir isso do lado de
 # fora; avisar e o que da para fazer com honestidade.
-case " ${FOUND[*]} " in
+case " $FOUND " in
     *"/app-"*)
         printf '  %sQuando o Discord se atualizar, ele cria uma pasta app-<versao> nova e a%s\n' "$C_DIM" "$C_OFF" >&2
         printf '  %sinjecao fica para tras. Rode este instalador de novo depois de atualizar.%s\n' "$C_DIM" "$C_OFF" >&2 ;;
@@ -432,7 +509,7 @@ esac
 # O deploy do flatpak e refeito do zero a cada atualizacao, e a injecao mora dentro dele. Nao
 # da para impedir isso de fora, e nem o proprio bypass consegue se remendar depois: dentro do
 # sandbox a pasta do app e montada somente leitura. So resta avisar antes de acontecer.
-case " ${FOUND[*]} " in
+case " $FOUND " in
     *"/flatpak/app/"*)
         printf '  %sEste Discord e flatpak: um "flatpak update" desfaz a injecao. Quando isso%s\n' "$C_DIM" "$C_OFF" >&2
         printf '  %sacontecer, rode este instalador de novo.%s\n' "$C_DIM" "$C_OFF" >&2 ;;
