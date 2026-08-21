@@ -48,7 +48,13 @@ const TOR_PORT_TIMEOUT_MS = 400;
 // Quanto uma conexao de gateway espera por uma saida antes de sair direta. Segurar para sempre
 // travaria o login; soltar na hora perderia a corrida em toda abertura fria.
 const HOLD_BUDGET_MS = 12_000;
-const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// O pool guardado so vale por este tempo: saida gratuita morre em minutos ou horas, e uma
+// saida de ontem quase nunca esta viva hoje. Antes eram 24h, e o Discord voltava a travar
+// quando o pool inteiro apodrecia.
+const CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+// Depois de uma busca por saida nova falhar, espera este intervalo antes de tentar de novo:
+// a API de saidas gratuitas custa e nao responde mais rapido por repeticao.
+const REFRESH_COOLDOWN_MS = 30_000;
 const MAX_LOG_BYTES = 256 * 1024;
 
 const HERE = __dirname;
@@ -63,6 +69,9 @@ let exitSettled = false;
 // seria refazer a busca inteira no meio da sessao.
 let pool = [];
 const waitingForExit = [];
+// Estado da re-selecao em runtime: so uma busca por vez, e nunca antes do cooldown.
+let refreshingExit = null;
+let lastRefreshAt = 0;
 
 function log(line) {
     const stamp = new Date().toTimeString().slice(0, 8);
@@ -529,6 +538,30 @@ function currentExit() {
     });
 }
 
+// Todas as saidas conhecidas morreram no meio da sessao (acontece o tempo todo com saida
+// gratuita). Em vez de cair para direto — que e o IP bloqueado, e o "carregando para sempre" —
+// procura uma saida nova agora. Cooldown e dedupe: uma busca por vez, e nunca antes de 30s
+// depois da ultima, senao uma saida ruim derrubaria a API de saidas num loop.
+function refreshExit() {
+    if (refreshingExit !== null) return refreshingExit;
+    if (Date.now() - lastRefreshAt < REFRESH_COOLDOWN_MS) return Promise.resolve(null);
+
+    lastRefreshAt = Date.now();
+    refreshingExit = (async () => {
+        log("nenhuma saida do pool entregou, procurando uma saida nova");
+        const fresh = await pickFreeExit();
+        if (fresh !== null) {
+            settleExit(fresh);
+            log("saida nova encontrada: " + safeProxy(fresh));
+        } else {
+            log("nenhuma saida nova disponivel agora");
+        }
+        return fresh;
+    })();
+
+    return refreshingExit.finally(() => { refreshingExit = null; });
+}
+
 // ------------------------------------------------------------------ o roteador local
 
 function refuse(client) {
@@ -594,6 +627,16 @@ async function openThroughPool(target) {
             return socket;
         }
         log(safeProxy(candidate) + " nao entregou " + target.host);
+    }
+
+    // Pool inteiro morto: antes de render a conexao ao IP brasileiro (o "carregando para
+    // sempre"), tenta uma saida nova. Se achar, a conexao atual ja usa; senao, cai para direto
+    // como antes — Discord sem bypass e ruim, mas Discord que nao abre e pior.
+    const fresh = await refreshExit();
+    if (fresh !== null) {
+        const socket = await openTunnel(fresh, target.host, target.port, PROBE_TIMEOUT_MS);
+        if (socket !== null) return socket;
+        log(safeProxy(fresh) + " nao entregou " + target.host + " logo depois de escolhida");
     }
 
     return null;
