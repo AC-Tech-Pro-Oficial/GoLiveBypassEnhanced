@@ -294,21 +294,3 @@ p {
 }
 
 /* Caixa de log do script (Linux): mostra o progresso em tempo real. */
-
-.close-btn {
-  background: transparent;
-  border: 1px solid var(--glass-border);
-  color: var(--text-muted);
-  border-radius: 8px;
-  padding: 10px 16px;
-  width: 100%;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-.close-btn:hover {
-  color: var(--text);
-  border-color: var(--primary);
-  background: rgba(88, 101, 242, 0.1);
-}
