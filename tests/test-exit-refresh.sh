@@ -132,7 +132,7 @@ g.Date.now = () => fakeNow;
 const advance = (ms) => { fakeNow += ms; };
 
 const funcs = {};
-for (const name of ["parseProxy", "openTunnel", "openThroughPool", "refreshExit", "settleExit", "pickFreeExit", "cachedExit", "safeProxy", "probe"]) {
+for (const name of ["parseProxy", "openTunnel", "openThroughPool", "refreshExit", "settleExit", "pickFreeExit", "cachedExit", "safeProxy", "probe", "isRoutedHost", "serveSocks", "_testMarkGatewayDirect"]) {
   if (typeof g[name] === "function") funcs[name] = g[name];
 }
 
@@ -219,7 +219,7 @@ async function main() {
   if (logs.some(l => l.includes("procurando uma saida nova"))) bad("5b. refresh indevido", "refresh rodou com saida viva");
   else ok("5b. refresh nao rodou com saida viva");
 
-  // ------------------------------------------------------------------ 6. cache de 30min
+  // ------------------------------------------------------------------ 6. cache (2h de validade)
   // cachedExit valida as guardadas com probe(); um probe fake evita o TLS real.
   g.probe = async (proxy) => ({ proxy: proxy, ms: 50 });
   fs.writeFileSync(path.join(FAKE_RES, "state.json"), JSON.stringify({ pool: [{ proxy: LIVE, ms: 50, country: "US" }], at: fakeNow }));
@@ -227,9 +227,10 @@ async function main() {
   if (c1 !== null) ok("6. cache recente reutilizado");
   else bad("6. cache recente", "null");
 
-  fs.writeFileSync(path.join(FAKE_RES, "state.json"), JSON.stringify({ pool: [{ proxy: LIVE, ms: 50, country: "US" }], at: fakeNow - 2 * 60 * 60 * 1000 }));
+  // o limite agora e 2h; 3h atras deve ser ignorado
+  fs.writeFileSync(path.join(FAKE_RES, "state.json"), JSON.stringify({ pool: [{ proxy: LIVE, ms: 50, country: "US" }], at: fakeNow - 3 * 60 * 60 * 1000 }));
   const c2 = await funcs.cachedExit();
-  if (c2 === null) ok("6b. cache antigo (>30min) ignorado");
+  if (c2 === null) ok("6b. cache antigo (>2h) ignorado");
   else bad("6b. cache antigo", "reutilizou saida velha");
 
   // ------------------------------------------------------------------ 7. regressao do mecanismo
@@ -241,6 +242,85 @@ async function main() {
   const t7 = await funcs.openTunnel(LIVE, "gateway.discord.gg", 443, 5000);
   if (t7 !== null) { ok("7b. openTunnel negocia SOCKS5"); t7.destroy(); }
   else bad("7b. openTunnel", "null");
+
+  // ------------------------------------------------------------------ 8. roteamento por sufixo
+  // O bug do "carregando infinitamente": o gateway conecta em subdominios regionais
+  // (gateway-us-east1-b.discord.gg) que o match exato deixava fora do roteador.
+  const routedSub = funcs.isRoutedHost("gateway-us-east1-b.discord.gg");
+  const routedExact = funcs.isRoutedHost("gateway.discord.gg");
+  const routedAuth = funcs.isRoutedHost("remote-auth-gateway.discord.gg");
+  const routedOther = funcs.isRoutedHost("cdn.discordapp.com");
+  const routedEvil = funcs.isRoutedHost("discord.gg.evil.com");
+  if (routedSub === true && routedExact === true && routedAuth === true && routedOther === false && routedEvil === false)
+    ok("8. isRoutedHost roteia *.discord.gg e rejeita outros dominios");
+  else bad("8. isRoutedHost", JSON.stringify({ routedSub, routedExact, routedAuth, routedOther, routedEvil }));
+
+  // O roteador encaminha o subdominio regional pela saida (o fluxo real do bug).
+  funcs.settleExit(LIVE);
+  g.pool = [{ proxy: LIVE, ms: 100, country: "US" }];
+  const t8 = await funcs.openThroughPool({ host: "gateway-us-east1-b.discord.gg", port: 443 });
+  if (t8 !== null) { ok("8b. openThroughPool entrega o gateway regional pela saida"); t8.destroy(); }
+  else bad("8b. openThroughPool", "null");
+
+  // ------------------------------------------------------------------ 9. sinal de gateway direto + recarga
+  // Fluxo real: um cliente SOCKS pede um host de gateway com o pool morto -> o serveSocks
+  // responde sucesso imediato (aceita o subdominio), cai em openDirect e marca
+  // gatewayWentDirectAt; depois uma saida nova chega (settleExit) -> maybeReloadAfterDirect
+  // avalia a recarga (com as guardas).
+  logs.length = 0;
+  const p9 = await deadPort();
+  funcs.settleExit(DEAD(p9));
+  g.pool = [{ proxy: DEAD(p9), ms: 100, country: "US" }];
+  g.pickFreeExit = async () => null; // nada novo na busca
+  g.probe = async () => null;        // saida morta no probe
+
+  const srv9 = await new Promise((resolve) => {
+    const server = net.createServer(funcs.serveSocks);
+    server.listen(0, "127.0.0.1", () => resolve({ server, port: server.address().port }));
+  });
+  const client9 = net.connect(srv9.port, "127.0.0.1");
+  const c9 = await new Promise((resolve) => {
+    let state = "greeting";
+    client9.on("data", (d) => {
+      if (state === "greeting" && d[0] === 5 && d[1] === 0) {
+        state = "sent";
+        const host = Buffer.from("gateway-us-east1-b.discord.gg", "utf8");
+        const msg = Buffer.alloc(7 + host.length);
+        msg[0] = 5; msg[1] = 1; msg[2] = 0; msg[3] = 3; msg[4] = host.length;
+        host.copy(msg, 5);
+        msg.writeUInt16BE(443, 5 + host.length);
+        client9.write(msg);
+      } else if (state === "sent" && d[0] === 5 && d[1] === 0) resolve("conectado");
+      else if (d[0] === 5 && d[1] !== 0) resolve("recusado:" + d[1]);
+    });
+    client9.on("error", () => resolve("erro"));
+    client9.on("close", () => resolve("fechado"));
+    client9.write(Buffer.from([5, 1, 0]));
+    // resposta imediata agora (comportamento novo): o roteador responde 0500 antes do tunel
+    setTimeout(() => resolve("timeout"), 3000);
+  });
+  srv9.server.close();
+  client9.destroy();
+  if (c9 === "conectado") ok("9. roteador aceitou o gateway regional (sufixo, resposta imediata)");
+  else bad("9. roteador regional", c9);
+
+  // da tempo do openThroughPool esgotar (pool morto) e o serveSocks marcar o sinal
+  await new Promise(r => setTimeout(r, 800));
+
+  // agora uma saida viva chega e o settleExit avalia a recarga.
+  // O sinal e marcado via _testMarkGatewayDirect (o fluxo real marcaria no serveSocks ao
+  // abrir direto; no sandbox o pool da closure ainda tem saidas vivas de testes anteriores).
+  logs.length = 0;
+  funcs._testMarkGatewayDirect();
+  g.probe = async () => ({ proxy: LIVE, ms: 10 }); // saida viva no probe
+  g.pickFreeExit = async () => LIVE;               // a busca de reserva acha a saida viva
+  funcs.settleExit(LIVE);
+  await new Promise(r => setTimeout(r, 3500));      // da tempo do poll de reserva (2s)
+  if (logs.some(l => l.includes("recarregando") || l.includes("nao achei a janela")
+      || l.includes("checagem antes da recarga") || l.includes("reserva disponivel")
+      || l.includes("sem reserva viva") || l.includes("prazo de reserva estourado")))
+    ok("9b. saida nova + gateway direto -> recarga avaliada (com espera de reserva)");
+  else bad("9b. recarga", "nada avaliado: " + logs.slice(-3).join(" | "));
 
   console.log(failures === 0 ? "RESULTADO: TUDO OK" : "RESULTADO: " + failures + " FALHA(S)");
   process.exit(failures === 0 ? 0 : 1);

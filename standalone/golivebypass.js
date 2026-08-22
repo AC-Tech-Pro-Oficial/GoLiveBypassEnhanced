@@ -51,10 +51,11 @@ const TOR_PORT_TIMEOUT_MS = 400;
 // Quanto uma conexao de gateway espera por uma saida antes de sair direta. Segurar para sempre
 // travaria o login; soltar na hora perderia a corrida em toda abertura fria.
 const HOLD_BUDGET_MS = 12_000;
-// O pool guardado so vale por este tempo: saida gratuita morre em minutos ou horas, e uma
-// saida de ontem quase nunca esta viva hoje. Antes eram 24h, e o Discord voltava a travar
-// quando o pool inteiro apodrecia.
-const CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+// O pool guardado vale por este tempo. A revalidacao acontece na abertura (probe real em
+// cada saida), entao uma idade longa e segura: o que importa e ter candidatas para revalidar
+// em vez de baixar a lista inteira (lenta) com o gateway ja conectando. 30min fazia o pool
+// expirar entre aberturas do Discord e o gateway nascia direto — o "carregando infinitamente".
+const CACHE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 // Depois de uma busca por saida nova falhar, espera este intervalo antes de tentar de novo:
 // a API de saidas gratuitas custa e nao responde mais rapido por repeticao.
 const REFRESH_COOLDOWN_MS = 30_000;
@@ -84,7 +85,21 @@ const MAX_MISSED_BEATS = 2;
 // morrer.
 const MIN_LIVE_RESERVES = 2;
 
-const MAX_LOG_BYTES = 256 * 1024;
+const MAX_LOG_BYTES = 2 * 1024 * 1024;
+
+// ------------------------------------------------------------------ recarga apos gateway direto
+// O roteador abre direto para um host de gateway quando nenhuma saida entrega; essa sessao
+// nasce pelo IP brasileiro e o servidor bloqueia (o "carregando infinitamente"). Quando a
+// saida voltar a ficar pronta, recarregar a janela do Discord faz o gateway renascer atras
+// dela. Guardas contra loop: teto por execucao, cooldown, single-flight e a saida tem que
+// estar comprovadamente entregando antes do reload.
+const RELOAD_MAX_RETRIES = 2;
+const RELOAD_COOLDOWN_MS = 30_000;
+// Depois de quanto tempo sem ver o gateway direto o sinal expira: uma recarga tardia
+// derrubaria uma sessao que ja se recuperou sozinha.
+const DIRECT_SIGNAL_TTL_MS = 60_000;
+// A janela do cliente, nao a splash (que nunca tem URL discord.com).
+const CLIENT_URL_RE = /^https:\/\/(?:canary|ptb\.)?discord\.com\/(?:app|channels|login)/;
 
 const HERE = __dirname;
 const SETTINGS_FILE = join(HERE, "settings.json");
@@ -107,6 +122,12 @@ let lastStockAt = 0;
 const missedBeats = new Map();
 let beating = false;
 let stocking = null;
+
+// Estado da recarga pos-gateway-direto.
+let gatewayWentDirectAt = 0;   // quando o roteador abriu direto para um host de gateway
+let reloadCount = 0;           // recargas nesta execucao (reseta quando a sessao volta roteada)
+let lastReloadAt = 0;          // cooldown
+let reloading = false;         // single-flight
 
 function log(line) {
     const stamp = new Date().toTimeString().slice(0, 8);
@@ -489,22 +510,44 @@ async function huntExits() {
     log(candidates.length + " candidatas depois do ranqueamento");
 
     for (let i = 0; i < candidates.length; i += PARALLEL_PROBES) {
-        const batch = await Promise.all(candidates.slice(i, i + PARALLEL_PROBES).map(candidate => probeExit(candidate)));
+        const batch = candidates.slice(i, i + PARALLEL_PROBES);
 
-        // O ms medido e o tempo real desta maquina ate o Discord atravessando a saida, entao ele
-        // ja embute a distancia: ordenar por ele escolhe a saida mais proxima sem precisar de
-        // uma tabela de paises. E como o lote inteiro corre junto, ampliar o lote melhora o
-        // minimo escolhido sem custar relogio.
-        const aprovadas = batch
-            .filter(r => r !== null && r.country !== null && !excludedCountries.has(r.country))
-            .sort((a, b) => a.ms - b.ms);
+        // A PRIMEIRA aprovada ganha, sem esperar o lote inteiro: o gateway conecta em 2-4s e
+        // um lote que espera a candidata mais lenta (probe + pais, ate 12s cada) fazia a saida
+        // nunca ganhar a corrida — o gateway nascia direto (o "carregando infinitamente").
+        // O ms das demais ainda e medido para o ranqueamento do pote, mas nao segura a escolha.
+        const aprovadas = await new Promise(resolve => {
+            const found = [];
+            let pending = batch.length;
+            let settled = false;
 
-        for (const recusada of batch.filter(r => r !== null && (r.country === null || excludedCountries.has(r.country)))) {
-            log(recusada.proxy + " recusada: saida em " + (recusada.country || "pais desconhecido"));
-        }
+            for (const candidate of batch) {
+                probeExit(candidate).then(r => {
+                    if (settled) return;
+
+                    if (r !== null && r.country !== null && !excludedCountries.has(r.country)) {
+                        found.push(r);
+                        // primeira aprovada: resolve na hora com o que ja temos
+                        settled = true;
+                        resolve(found);
+                        return;
+                    }
+
+                    if (r !== null && (r.country === null || excludedCountries.has(r.country))) {
+                        log(r.proxy + " recusada: saida em " + (r.country || "pais desconhecido"));
+                    }
+
+                    if (--pending === 0 && !settled) resolve(found);
+                });
+            }
+        });
 
         if (aprovadas.length === 0) continue;
 
+        // Devolve so a primeira aprovada: as outras probes do lote terminam, mas o resultado
+        // delas e descartado (o Promise ja resolveu). O pote se enche ao longo das chamadas
+        // seguintes de stockReserves, uma saida por vez -- o que importa aqui e nao segurar a
+        // escolha esperando a candidata mais lenta do lote.
         return aprovadas;
     }
 
@@ -567,10 +610,144 @@ async function chooseExit() {
     return await detectTor() || await pickFreeExit();
 }
 
+let lastExitAt = 0; // quando a saida atual foi escolhida (para o log do gateway visto)
+
 function settleExit(proxy) {
     chosenExit = proxy;
     exitSettled = true;
+    if (proxy !== null) lastExitAt = Date.now();
     while (waitingForExit.length > 0) waitingForExit.shift()(proxy);
+
+    // Saida nova no ar e o gateway tinha saido direto ha pouco: esta sessao nasceu bloqueada
+    // e so um reload faz o gateway renascer atras da saida. Avalia (com todas as guardas).
+    if (proxy !== null && gatewayWentDirectAt !== 0) {
+        maybeReloadAfterDirect();
+    }
+}
+
+// ------------------------------------------------------------------ recarga pos-gateway-direto
+
+function clientWindow() {
+    for (const win of require("electron").BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) continue;
+        const url = win.webContents.getURL();
+        if (CLIENT_URL_RE.test(url)) return win;
+    }
+    return null;
+}
+
+// Reservas vivas no pool (excluindo a ativa). A recarga depende disto: renascer o gateway
+// com o pool de 1 so deixava a sessao vulneravel a morte da ativa no renascimento (o caso
+// do ciclo 7 do teste de estresse — 8s de "carregando" sem reserva para assumir).
+const RELOAD_MIN_RESERVES = 1;
+const RELOAD_RESERVE_WAIT_MS = 10_000;
+
+function liveReserveCount() {
+    return pool.filter(entry => entry.proxy !== chosenExit).length;
+}
+
+function maybeReloadAfterDirect() {
+    // Sinal expirado: o gateway direto foi ha tempo demais, a sessao pode ter se recuperado.
+    if (Date.now() - gatewayWentDirectAt > DIRECT_SIGNAL_TTL_MS) {
+        gatewayWentDirectAt = 0;
+        return;
+    }
+    if (reloading || reloadCount >= RELOAD_MAX_RETRIES) return;
+    if (Date.now() - lastReloadAt < RELOAD_COOLDOWN_MS) return;
+
+    const exit = chosenExit;
+    if (exit === null) return;
+
+    reloading = true;
+    // A saida tem que estar comprovadamente entregando AGORA: recarregar com saida morta
+    // repetiria a mesma falha e gastaria uma tentativa a toa.
+    probe(exit, 2500).then(ok => {
+        if (ok === null) {
+            log("saida " + safeProxy(exit) + " nao respondeu, adiando a recarga");
+            return;
+        }
+
+        // NAO cancela por roteado recente: a reconexao roteada depois da corrida perdida nao
+        // desbloqueia a sessao (o veredito foi no CONNECTION_OPEN original, direto). So a
+        // recarga da janela faz o gateway renascer atras da saida de verdade.
+
+        // Espera por reserva viva (ate RELOAD_RESERVE_WAIT_MS): o renascimento pos-recarga
+        // precisa de uma reserva para assumir na hora se a ativa morrer (o caso raro do ciclo
+        // 7). Se o pool ja tem, segue direto. Se o gateway rotear no meio (corrida ganha),
+        // cancela — a recarga nao e mais necessaria.
+        ensureReserveThenReload(exit);
+    }).catch(error => {
+        log("a checagem antes da recarga falhou: " + error.message);
+    }).finally(() => {
+        reloading = false;
+    });
+}
+
+function ensureReserveThenReload(exit) {
+    const tryReload = () => {
+        // Cancela se a sessao se resolveu sozinha (gateway passou pela saida).
+        if (Date.now() - lastRoutedAt < 3000) {
+            log("gateway ja passou pela saida, recarga desnecessaria");
+            gatewayWentDirectAt = 0;
+            return;
+        }
+        const win = clientWindow();
+        if (win === null) {
+            log("nao achei a janela do cliente Discord para recarregar");
+            return;
+        }
+        reloadCount++;
+        lastReloadAt = Date.now();
+        gatewayWentDirectAt = 0; // so recarrega uma vez por sinal
+        log("o gateway tinha saido direto, recarregando atras de " + safeProxy(exit) + " (tentativa " + reloadCount + " de " + RELOAD_MAX_RETRIES + ")");
+        win.webContents.reload();
+    };
+
+    if (liveReserveCount() >= RELOAD_MIN_RESERVES) return tryReload();
+
+    // Sem reserva: busca em background e espera um pouco. A sessao ja esta bloqueada, entao
+    // esperar nao piora; recarregar vulneravel deixaria o renascimento a merce da ativa.
+    log("sem reserva viva, enchendo o pote antes de recarregar");
+    stockReserves(liveReserveCount());
+
+    const deadline = Date.now() + RELOAD_RESERVE_WAIT_MS;
+    const poll = setInterval(() => {
+        if (Date.now() - lastRoutedAt < 3000) {
+            clearInterval(poll);
+            log("gateway ja passou pela saida, recarga desnecessaria");
+            gatewayWentDirectAt = 0;
+            return;
+        }
+        if (liveReserveCount() >= RELOAD_MIN_RESERVES) {
+            clearInterval(poll);
+            log("reserva disponivel, recarregando agora");
+            tryReload();
+            return;
+        }
+        if (Date.now() >= deadline) {
+            clearInterval(poll);
+            // Prazo estourado: recarrega mesmo sem reserva — a sessao ja esta bloqueada, e
+            // segurar mais so prolonga o "carregando". O refresh runtime cobre a morte.
+            log("prazo de reserva estourado, recarregando mesmo assim");
+            tryReload();
+        }
+    }, 2000);
+}
+
+// A sessao voltou a nascer roteada (conexao de gateway passou pela saida): reseta o teto de
+// recargas — e o sinal de que a ultima recarga (se houve) funcionou.
+let lastRoutedAt = 0;
+function markGatewayRouted() {
+    lastRoutedAt = Date.now();
+    if (reloadCount > 0) log("gateway voltou a passar pela saida, teto de recarga resetado");
+    reloadCount = 0;
+}
+
+// Exposto para a bateria de testes (tests/test-exit-refresh.sh) marcar o sinal sem depender
+// de uma conexao de gateway real no sandbox. Inofensivo em producao: so seta o mesmo
+// timestamp que o serveSocks setaria ao abrir direto.
+function _testMarkGatewayDirect() {
+    gatewayWentDirectAt = Date.now();
 }
 
 // Uma conexao de gateway que chega antes de existir saida espera aqui, e nao para sempre:
@@ -815,7 +992,11 @@ async function openThroughPool(target) {
     // A ativa sozinha primeiro: ela e o IP que o servidor ja viu nesta sessao, e trocar sem
     // precisar seria pedir uma reavaliacao a toa.
     const direto = await openTunnel(active, target.host, target.port, RELAY_TIMEOUT_MS);
-    if (direto !== null) return direto;
+    if (direto !== null) {
+        markGatewayRouted();
+        log("roteado: " + target.host + " pela ativa " + safeProxy(active));
+        return direto;
+    }
 
     log(safeProxy(active) + " nao entregou " + target.host);
 
@@ -828,20 +1009,51 @@ async function openThroughPool(target) {
         missedBeats.delete(active);
         pool = pool.filter(entry => entry.proxy !== active);
         savePool();
+        markGatewayRouted();
+        log("roteado: " + target.host + " pela reserva " + safeProxy(won.proxy));
         return won.socket;
     }
 
     // Pool inteiro morto: antes de render a conexao ao IP brasileiro (o "carregando para
-    // sempre"), tenta uma saida nova. Se achar, a conexao atual ja usa; senao, cai para direto
-    // como antes — Discord sem bypass e ruim, mas Discord que nao abre e pior.
+    // sempre"), tenta o cache do state.json (revalidacao rapida, ~1-2s) e so entao a lista
+    // nova (lenta, ~4s+). No caso do ciclo 7 o pool tinha 1 saida que morreu; o cache teria
+    // saidas guardadas de aberturas anteriores para assumir na hora.
+    const cached = await cachedExit();
+    if (cached !== null) {
+        const socket = await openTunnel(cached, target.host, target.port, PROBE_TIMEOUT_MS);
+        if (socket !== null) {
+            chosenExit = cached;
+            markGatewayRouted();
+            log("roteado: " + target.host + " pela saida do cache " + safeProxy(cached));
+            return socket;
+        }
+        log(safeProxy(cached) + " do cache nao entregou " + target.host);
+    }
+
     const fresh = await refreshExit();
     if (fresh !== null) {
         const socket = await openTunnel(fresh, target.host, target.port, PROBE_TIMEOUT_MS);
-        if (socket !== null) return socket;
+        if (socket !== null) {
+            markGatewayRouted();
+            log("roteado: " + target.host + " pela saida nova " + safeProxy(fresh));
+            return socket;
+        }
         log(safeProxy(fresh) + " nao entregou " + target.host + " logo depois de escolhida");
     }
 
     return null;
+}
+
+// O PAC roteia por sufixo de dominio de proposito: o Discord conecta o gateway em
+// subdominios regionais (gateway-us-east1-b.discord.gg — o "-us-east1-b" vem ANTES de
+// discord.gg), e o match exato deixava essas conexoes fora do roteador: o gateway nascia
+// direto pelo IP brasileiro e o servidor bloqueava a sessao (o "carregando infinitamente").
+// Roteamos *.discord.gg inteiro (gateway, remote-auth-gateway e qualquer subdominio futuro);
+// os CDNs de midia sao discordapp.com, outro dominio, e nao passam por aqui.
+const ROUTE_SUFFIX = ".discord.gg";
+
+function isRoutedHost(host) {
+    return host === "discord.gg" || host.endsWith(ROUTE_SUFFIX);
 }
 
 function serveSocks(client) {
@@ -860,10 +1072,17 @@ function serveSocks(client) {
             // O roteador so aceita os hosts que o PAC manda para ele. Sem esta linha ele seria
             // um SOCKS aberto no loopback: qualquer processo da maquina usaria a sua saida para
             // qualquer destino, com a identidade do Discord no firewall.
-            if (!ROUTED_HOSTS.includes(target.host)) {
+            if (!isRoutedHost(target.host)) {
                 log("recusando destino fora da lista: " + target.host);
                 return refuse(client);
             }
+
+            // Sucesso respondido antes de saber a saida, de proposito: o Chromium para de usar
+            // um roteador que responda lento, e segurar a resposta aqui deixava o Discord
+            // "carregando" por ate 12s (o prazo da escolha da saida). Se a saida falhar, o
+            // socket fecha no meio do handshake e o cliente do gateway reconecta com backoff.
+            client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+            client.setTimeout(0);
 
             let upstream = await openThroughPool(target);
 
@@ -873,14 +1092,15 @@ function serveSocks(client) {
                 // direta, vira nada. Sair direto custa o bypass desta conexao; recusar custa o
                 // Discord inteiro, e saida gratuita morre no meio da sessao o tempo todo.
                 log("nenhuma saida entregou " + target.host + ", esta conexao vai sair direta");
+                // Sinal para o watchdog de recarga: o roteador abriu direto para um host de
+                // gateway — a sessao nasceu (ou vai nascer) pelo IP brasileiro, e o servidor
+                // provavelmente bloqueou. So o roteador sabe disto; e o gatilho confiavel.
+                gatewayWentDirectAt = Date.now();
                 upstream = await openDirect(target);
             }
 
-            if (upstream === null) return refuse(client);
+            if (upstream === null) return client.destroy();
             if (client.destroyed) return upstream.destroy();
-
-            client.setTimeout(0);
-            client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
 
             upstream.on("error", () => client.destroy());
             client.on("close", () => upstream.destroy());
@@ -913,10 +1133,13 @@ function pacScript(fallback) {
     // Chromium marcar o roteador como ruim e mandar tudo pela alternativa sem avisar: PAC
     // servido, roteador de pe, e nenhuma conexao passando. A rede de seguranca fica dentro do
     // roteador, que cai para direto sozinho e registra isso.
-    return "var routed = " + JSON.stringify(ROUTED_HOSTS) + ";\n"
+    //
+    // Casamento por sufixo de dominio (ver isRoutedHost): o gateway real conecta em
+    // subdominios regionais (gateway-us-east1-b.discord.gg). endsWith("." + dominio) e nao
+    // indexOf: aquele casaria discord.gg.evil.com.
+    return "var routed = " + JSON.stringify(ROUTE_SUFFIX) + ";\n"
         + "function FindProxyForURL(url, host) {\n"
-        + "    for (var i = 0; i < routed.length; i++)\n"
-        + "        if (host === routed[i]) return \"SOCKS5 127.0.0.1:" + socksPort + "\";\n"
+        + "    if (host === \"discord.gg\" || host.endsWith(routed)) return \"SOCKS5 127.0.0.1:" + socksPort + "\";\n"
         + "    return " + JSON.stringify(fallback) + ";\n"
         + "}\n";
 }
@@ -940,15 +1163,33 @@ async function installPac() {
     }
 
     // Conferir em vez de supor: se a regra nao pegou, e melhor saber agora do que descobrir
-    // pelo usuario dizendo que nao funciona.
+    // pelo usuario dizendo que nao funciona. O canônico e um subdominio regional de exemplo:
+    // o gateway real conecta em subdominios, e um PAC que so roteia o canônico passaria no
+    // teste antigo mesmo estando quebrado para o que importa.
     try {
-        const check = await session.defaultSession.resolveProxy("https://" + ROUTED_HOSTS[0]);
-        if (!String(check).includes(String(socksPort))) {
-            log("a regra foi aceita mas nao esta valendo (" + check + "), voltando para o sistema");
+        const checks = [
+            "https://" + ROUTED_HOSTS[0],
+            "https://gateway-us-east1-b.discord.gg"
+        ];
+        const results = await Promise.all(checks.map(url => session.defaultSession.resolveProxy(url)));
+        const ok = results.every(r => String(r).includes(String(socksPort)));
+        if (!ok) {
+            log("a regra foi aceita mas nao esta valendo (" + results.join(", ") + "), voltando para o sistema");
             await session.defaultSession.setProxy({ mode: "system" });
             return false;
         }
-        log("regra no ar: " + ROUTED_HOSTS.join(", ") + " pelo roteador, o resto por " + fallback);
+        log("regra no ar: *" + ROUTE_SUFFIX + " pelo roteador, o resto por " + fallback);
+
+        // Fecha as conexoes existentes: o Discord reaberto rapido REUSA o websocket antigo
+        // (fast connect), que nasceu direto antes do PAC e continuaria direto — o bypass
+        // ficaria inerte (o teste de estresse pegou isto: "gateway visto" sem "roteado").
+        // Sem fechar, a sessao bloqueada de antes continua valendo apos reabrir.
+        try {
+            await session.defaultSession.closeAllConnections();
+            log("conexoes antigas fechadas, o gateway vai renascer pela rota");
+        } catch (error) {
+            log("nao consegui fechar as conexoes antigas: " + error.message);
+        }
     } catch (error) {
         log("nao consegui conferir a regra: " + error.message);
     }
@@ -1037,6 +1278,37 @@ async function start() {
 
     if (!await startRouter()) return;
     if (!await installPac()) return;
+
+    // Observa os handshakes websocket do cliente: o gateway real conecta em subdominios
+    // regionais (gateway-us-east1-b.discord.gg). O SINAL de corrida perdida: se o handshake
+    // do gateway aparece quando AINDA NAO HA SAIDA escolhida, ele nasceu direto pelo IP
+    // brasileiro — o servidor ja avaliou o bloqueio nesse CONNECTION_OPEN e nenhuma
+    // reconexao roteada posterior desbloqueia (o plugin detecta o mesmo no renderer e
+    // recarrega). Marca a recarga guardada na hora.
+    // O callback e obrigatorio (sem ele a request pendura para sempre); nao modificamos nada.
+    try {
+        session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+            if (details.resourceType === "webSocket" && isRoutedHost(new URL(details.url).hostname)) {
+                const saidaInfo = chosenExit === null
+                    ? "sem saida ainda"
+                    : "saida pronta ha " + Math.round((Date.now() - lastExitAt) / 1000) + "s";
+                log("gateway visto: " + details.url.slice(0, 80) + " | " + saidaInfo);
+
+                // Corrida perdida: gateway nasceu SEM saida -> sessao bloqueada. A reconexao
+                // roteada que vier depois NAO desbloqueia (o veredito foi no CONNECTION_OPEN
+                // original); so a recarga da janela faz o gateway renascer atras da saida.
+                if (chosenExit === null && gatewayWentDirectAt === 0) {
+                    log("gateway nasceu sem saida, marcando para recarga");
+                    gatewayWentDirectAt = Date.now();
+                    // Aguarda a saida ficar pronta (a recarga so roda com saida viva no probe);
+                    // settleExit chama maybeReloadAfterDirect quando ela chegar.
+                }
+            }
+            callback({});
+        });
+    } catch (error) {
+        log("nao consegui observar os websockets: " + error.message);
+    }
 
     const exit = await chooseExit();
     settleExit(exit);
