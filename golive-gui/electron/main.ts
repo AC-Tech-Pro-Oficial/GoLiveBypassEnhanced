@@ -747,6 +747,10 @@ async function activateBypass(event: any, proxyAddress: string = "") {
   const installs = getDiscordInstalls();
   if (installs.length === 0) throw new Error("Nenhum Discord encontrado.");
 
+  // Salvo antes de mexer no Discord: mesmo que a injecao falhe, o que a pessoa digitou nao se
+  // perde, e o campo continua preenchido na proxima abertura.
+  saveProxy(proxyAddress);
+
   for (const install of installs) {
     assertDiscordSignature(install.bundlePath);
     assertResourcesWritable(install);
@@ -919,24 +923,55 @@ ipcMain.handle("set-startup", (_event, enabled: unknown) => {
   refreshTray().catch(() => {});
 });
 
-// A proxy salva fica no settings.json da pasta compartilhada do bypass
-// (a mesma que o standalone/golivebypass.js leem). Sem este handler a UI
-// nunca saberia que ha uma proxy configurada apos reiniciar o app.
+// A pasta compartilhada do bypass — a mesma que o standalone/golivebypass.js e os instaladores
+// usam. O XDG_DATA_HOME entra na conta porque o standalone e o plugin ja o respeitam: sem isso,
+// quem move essa pasta acabaria com duas configuracoes em lugares diferentes.
 function settingsDir() {
-  return process.platform === "win32"
-    ? path.join(process.env.LOCALAPPDATA || app.getPath("appData"), "GoLiveBypass")
-    : path.join(app.getPath("home"), ".local", "share", "GoLiveBypass");
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA || app.getPath("appData"), "GoLiveBypass");
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(app.getPath("home"), ".local", "share");
+  return path.join(base, "GoLiveBypass");
 }
 
-ipcMain.handle("get-proxy", () => {
+function readProxyFrom(file: string) {
   try {
-    const file = path.join(settingsDir(), "settings.json");
     if (!fs.existsSync(file)) return "";
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
     return typeof data.proxy === "string" ? data.proxy : "";
   } catch {
     return "";
   }
+}
+
+// Guardado fora da pasta do Discord de proposito: o settings.json que o bypass le vive dentro do
+// app.asar injetado, e esse some quando o bypass e desativado ou quando o Discord se atualiza.
+// A copia daqui e a configuracao da pessoa, e sobrevive aos dois.
+function saveProxy(proxy: string) {
+  try {
+    const dir = settingsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+
+    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...atual, proxy }, null, 4));
+  } catch (error) {
+    console.error("[settings] nao consegui salvar a proxy:", error);
+  }
+}
+
+ipcMain.handle("get-proxy", () => {
+  const salva = readProxyFrom(path.join(settingsDir(), "settings.json"));
+  if (salva !== "") return salva;
+
+  // Quem ativou antes desta versao so tem o settings.json dentro do app.asar injetado. Ler de
+  // la evita que a proxy configurada suma na atualizacao do app.
+  for (const install of getDiscordInstalls()) {
+    const doAsar = readProxyFrom(path.join(install.resources, "app.asar", "settings.json"));
+    if (doAsar !== "") return doAsar;
+  }
+
+  return "";
 });
 
 // A pagina reporta a altura de que precisa (o warning do bypass ativo faz o conteudo crescer).
