@@ -15,6 +15,7 @@ import fs from "fs";
 import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { bypassCode } from "./bypass";
 import { runScript } from "./linux-helper";
+import { setupUpdater } from "./updater";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -424,6 +425,9 @@ if (!gotLock) {
     // evita o Tray cair para o GtkStatusIcon, que o Plasma 6 nao exibe.
     waitForStatusNotifier().then(createTray);
     app.on("activate", showWindow);
+    // Checa por atualizacao na release do GitHub (Windows portable: baixa e substitui;
+    // Mac/Linux: autoUpdater nativo). Roda sozinho e em silencio se nao houver nada.
+    setupUpdater(() => mainWindow);
   });
 }
 

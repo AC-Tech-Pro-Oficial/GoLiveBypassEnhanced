@@ -7,17 +7,30 @@
   "scripts": {
     "dev": "vite",
     "compile": "node scripts/sync-bypass.mjs && tsc && vite build",
-    "build": "npm run compile && electron-builder",
-    "build:win": "npm run compile && electron-builder --win --x64",
-    "build:mac": "npm run compile && electron-builder --mac --arm64",
+    "build": "npm run compile && electron-builder --publish never",
+    "build:win": "npm run compile && electron-builder --win --x64 --publish never",
+    "build:mac": "npm run compile && electron-builder --mac --arm64 --publish never",
     "preview": "vite preview",
     "sync-bypass": "node scripts/sync-bypass.mjs",
-    "build:linux": "npm run compile && electron-builder --linux AppImage"
+    "build:linux": "npm run compile && electron-builder --linux AppImage --publish never",
+    "publish:win": "npm run compile && electron-builder --win --x64 --publish always",
+    "publish:mac": "npm run compile && electron-builder --mac --arm64 --publish always",
+    "publish:linux": "npm run compile && electron-builder --linux AppImage --publish always"
   },
   "build": {
     "appId": "com.golivebypass.gui",
     "productName": "GoLiveBypass",
-    "files": ["dist", "dist-electron", "assets"],
+    "publish": {
+      "provider": "github",
+      "owner": "bezumiya",
+      "repo": "GoLiveBypass",
+      "releaseType": "release"
+    },
+    "files": [
+      "dist",
+      "dist-electron",
+      "assets"
+    ],
     "directories": {
       "output": "dist-app"
     },
@@ -42,11 +55,15 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         }
       ],
       "icon": "build/icon.png",
@@ -60,7 +77,9 @@
       "artifactName": "${productName}.${ext}"
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Utility",
       "icon": "build/icon.png",
       "artifactName": "${productName}.AppImage"
@@ -73,5 +92,8 @@
     "vite": "^8.2.0",
     "vite-plugin-electron": "^1.1.1",
     "vite-plugin-electron-renderer": "^1.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }
