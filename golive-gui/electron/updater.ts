@@ -146,10 +146,27 @@ export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
   if (process.platform !== "win32") {
     autoUpdater.autoDownload = true;
     autoUpdater.logger = console;
-    autoUpdater.on("update-downloaded", () => {
+
+    // O download corre sozinho em background; ao terminar, avisa o usuario e
+    // so instala com o OK dele — atualizar sem avisar derruba o app na hora.
+    autoUpdater.on("update-downloaded", (info) => {
       updateReady = true;
-      autoUpdater.quitAndInstall();
+      const win = getMainWindow();
+      const choice = win
+        ? dialog.showMessageBoxSync(win, {
+            type: "info",
+            title: "Atualização disponível",
+            message: `GoLiveBypass ${info.version} foi baixada.`,
+            detail: "Reiniciar agora para aplicar a atualização? O app fecha e reabre sozinho.",
+            buttons: ["Reiniciar agora", "Depois"],
+            defaultId: 0,
+            cancelId: 1,
+          })
+        : 0;
+
+      if (choice === 0) autoUpdater.quitAndInstall();
     });
+
     autoUpdater.checkForUpdatesAndNotify().catch(() => {});
     return;
   }

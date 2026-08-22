@@ -1,0 +1,155 @@
+# Auto-update do GoLiveBypass — guia do mantenedor
+
+O app se atualiza sozinho consultando as **releases do GitHub** (`api.github.com`),
+sem servidor intermediário. Este documento explica como configurar, publicar e
+testar — inclui o que é obrigatório para o auto-update funcionar em cada SO.
+
+## Como funciona
+
+| SO | Mecanismo | Requisito |
+|----|-----------|-----------|
+| Windows | Updater **portable** próprio (`electron/updater.ts`): consulta a release, baixa o `.exe` novo, substitui via `PORTABLE_EXECUTABLE_FILE` e reabre | Nenhum (não precisa assinar) |
+| Linux | `electron-updater` nativo (AppImageUpdater) com **download diferencial** (blockMap) | Nenhum |
+| macOS | `electron-updater` nativo (MacUpdater, dmg/zip) | **Obrigatório: app assinado** (sem assinatura o download falha) |
+
+O `publish` está configurado em `golive-gui/package.json`:
+
+```json
+"publish": {
+  "provider": "github",
+  "owner": "bezumiya",
+  "repo": "GoLiveBypass",
+  "releaseType": "release"
+}
+```
+
+## Publicar uma release (fluxo do CI)
+
+1. Crie a tag no formato `vX.Y.Z` (ex.: `v1.1.5`) no commit desejado
+2. Dispare o workflow **build-gui** (manual, `workflow_dispatch`) informando a tag
+3. O CI roda `npm run publish:win|linux|mac` — o `electron-builder --publish always`
+   gera e publica na release:
+   - `GoLiveBypass.exe` + `latest.yml` (Windows)
+   - `GoLiveBypass.AppImage` + `latest-linux.yml` (Linux)
+   - `GoLiveBypass.dmg` + `GoLiveBypass.zip` + `latest-mac.yml` (macOS)
+
+> O `latest*.yml` é o metadata com checksum SHA-512 e o blockMap. **Sem ele na
+> release, o app detecta a versão nova mas não consegue baixar** (erro 404).
+
+## Assinatura (macOS — obrigatória; Windows — opcional)
+
+O auto-update do macOS só funciona com o app **assinado e notarizado**. O
+mantenedor precisa gerar os certificados e configurar os secrets do repositório
+(Settings → Secrets and variables → Actions):
+
+| Secret | O que é | Obrigatório para |
+|--------|---------|------------------|
+| `CSC_LINK` | Certificado de desenvolvedor da Apple (base64 do `.p12`) | macOS (e Windows, se quiser assinar) |
+| `CSC_KEY_PASSWORD` | Senha do certificado | macOS / Windows |
+| `APPLE_ID` | Apple ID do desenvolvedor | Notarização do macOS |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password do Apple ID | Notarização do macOS |
+| `APPLE_TEAM_ID` | Team ID do desenvolvedor | Notarização do macOS |
+
+Para macOS:
+1. Gere o certificado "Developer ID Application" no Apple Developer portal
+2. Exporte como `.p12` e codifique em base64: `base64 -i cert.p12`
+3. Configure `CSC_LINK` com o base64, `CSC_KEY_PASSWORD` com a senha
+4. Gere um app-specific password em appleid.apple.com e configure
+   `APPLE_APP_SPECIFIC_PASSWORD` (+ `APPLE_ID` e `APPLE_TEAM_ID`)
+
+Sem os secrets, o CI builda sem assinatura e o auto-update do macOS fica
+desabilitado (o app funciona, mas não atualiza sozinho).
+
+> No Windows o portable **não exige assinatura** (o updater próprio substitui o
+> exe sem checagem de assinatura). Se quiser evitar o SmartScreen, assine com um
+> certificado de código (pode usar o mesmo `CSC_LINK` do Mac).
+
+## Notificação ao usuário
+
+O fluxo de atualização avisa antes de instalar:
+
+- **Mac/Linux**: o download corre em background; ao terminar, aparece um diálogo
+  *"GoLiveBypass X.Y.Z foi baixada — Reiniciar agora?"* — só instala com o OK
+- **Windows portable**: ao detectar a versão nova, pergunta *"Atualizar agora?"*
+  antes de baixar/substituir
+
+## Teste E2E (procedimento validado)
+
+### Linux (AppImage) — fluxo completo
+
+```bash
+# 1. Build da versão "nova" apontando para o fork de teste
+cd golive-gui
+sed -i 's/"owner": "bezumiya"/"owner": "SEU_FORK"/' package.json
+sed -i 's/"version": "1.0.0"/"version": "1.1.5"/' package.json
+npm run build:linux
+
+# 2. Publica a release de teste no fork (AppImage + latest-linux.yml)
+gh release create v1.1.5-test --repo SEU_FORK/GoLiveBypass \
+  dist-app/GoLiveBypass.AppImage dist-app/latest-linux.yml
+
+# 3. Build da versão "antiga" (1.0.0) e extrai para rodar sem o AppImageLauncher
+sed -i 's/"version": "1.1.5"/"version": "1.0.0"/' package.json
+npm run build:linux
+./dist-app/GoLiveBypass.AppImage --appimage-extract   # gera squashfs-root/
+
+# 4. Roda a antiga com APPIMAGE apontando para o arquivo a substituir
+APPIMAGE=$PWD/dist-app/GoLiveBypass.AppImage \
+  ./squashfs-root/golive-gui --no-sandbox
+```
+
+**Resultado esperado no log**: `Checking for update` → `Found version 1.1.5` →
+`New version 1.1.5 has been downloaded` → o arquivo `GoLiveBypass.AppImage` é
+substituído (tamanho muda) → reexecuta.
+
+> ⚠️ O AppImageLauncher (binfmt) intercepta AppImages e quebra o teste. A
+> extração com `--appimage-extract` + env `APPIMAGE` contorna isso.
+
+### Windows (portable) — procedimento
+
+```bash
+# 1. Build da versão "nova" no fork
+sed -i 's/"owner": "bezumiya"/"owner": "SEU_FORK"/' package.json
+sed -i 's/"version": "1.0.0"/"version": "1.1.5"/' package.json
+npm run build:win          # ou publish:win com GH_TOKEN
+
+# 2. Publica a release com GoLiveBypass.exe (+ latest.yml)
+gh release create v1.1.5-test --repo SEU_FORK/GoLiveBypass \
+  dist-app/GoLiveBypass.exe dist-app/latest.yml
+
+# 3. Roda o exe antigo (1.0.0); ele detecta a 1.1.5, pergunta "Atualizar agora?",
+#    baixa, substitui o exe em uso (com retry) e reabre a versão nova
+```
+
+**Pontos de atenção no Windows**:
+- O updater usa `PORTABLE_EXECUTABLE_FILE` (variável do electron-builder
+  portable) para achar o exe em uso — sem ela o update é pulado
+- A substituição tem retry (até 10 tentativas, 1s entre elas) porque o Windows
+  segura o exe em uso por um instante após o fechamento
+- Teste também o fluxo "Depois": o app continua rodando e a checagem periódica
+  (a cada 4h) oferece de novo
+
+### macOS — procedimento
+
+```bash
+# Com os secrets de assinatura configurados:
+npm run publish:mac          # gera dmg/zip assinados + latest-mac.yml
+
+# Roda o app antigo (1.0.0) num Mac; o autoUpdater detecta, baixa em background,
+# mostra "Reiniciar agora?" e aplica no quit (Squirrel.Mac aplica no relaunch)
+```
+
+**Validações no macOS**:
+- `codesign -dv --verbose=2 GoLiveBypass.app` deve mostrar `Developer ID Application`
+- `spctl -a -vv GoLiveBypass.dmg` deve passar (notarização ok)
+- O `latest-mac.yml` precisa estar na release junto do dmg/zip
+
+## Solução de problemas
+
+| Sintoma | Causa provável |
+|---------|----------------|
+| `Cannot find latest-linux.yml ... 404` | Release sem o metadata (CI antigo ou upload manual) — publique com `--publish always` |
+| `APPIMAGE env is not defined` | App rodando fora do runtime AppImage (teste extraído) — rode o AppImage normal ou set `APPIMAGE` |
+| `Update for version X is not available` | A release tem a **mesma versão** do app rodando — suba a versão no package.json |
+| macOS: download falha/instalação falha | App sem assinatura — configure `CSC_LINK`/`CSC_KEY_PASSWORD`/`APPLE_*` |
+| `downgrade is disallowed` | A release é mais antiga que a versão local — publique uma versão maior |
