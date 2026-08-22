@@ -49,6 +49,25 @@ const TOR_PORT_TIMEOUT_MS = 400;
 const POOL_SIZE = 5;
 const POOL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+// De quanto em quanto tempo as saidas do pote sao reconferidas com a sessao ja aberta. Trinta
+// segundos e curto o bastante para a reserva estar quente quando o gateway reconectar, e longo
+// o bastante para nao virar carga na saida gratuita, que costuma limitar conexoes.
+const HEARTBEAT_MS = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 4000;
+
+// Quantos batimentos seguidos uma saida pode errar antes de sair do pote. Cortar no primeiro
+// seria cruel com saida gratuita congestionada, que erra um e volta; nunca cortar deixaria o
+// pote cheio de endereco morto, que e o mesmo que nao ter reserva nenhuma.
+const MAX_MISSED_BEATS = 2;
+
+// Abaixo disto o batimento vai atras de reservas novas. Uma so nao e reserva: e a proxima a
+// morrer.
+const MIN_LIVE_RESERVES = 2;
+
+// Trava entre buscas de fundo: sem ela, um pote que nao consegue encher viraria uma varredura
+// inteira da lista gratuita a cada trinta segundos, pela sessao toda.
+const HUNT_COOLDOWN_MS = 3 * 60_000;
+
 const MAX_LOG_LINES = 400;
 const MAX_LOG_BYTES = 256 * 1024;
 const MAX_RETRIES = 2;
@@ -378,6 +397,31 @@ function openTunnel(proxy: string, host: string, port: number, timeoutMs = PROBE
     });
 }
 
+// Abre o mesmo destino por varias saidas ao mesmo tempo e fica com a primeira que responder.
+// Quem chega depois e fechado na hora: tunel aberto e esquecido segura uma conexao do outro
+// lado, e saida gratuita costuma ter poucas.
+function firstTunnel(candidates: string[], host: string, port: number, timeoutMs: number): Promise<{ proxy: string; socket: Socket; } | null> {
+    return new Promise(resolve => {
+        let pending = candidates.length;
+        if (pending === 0) return resolve(null);
+
+        let settled = false;
+
+        for (const candidate of candidates) {
+            openTunnel(candidate, host, port, timeoutMs).then(socket => {
+                if (socket !== null && !settled) {
+                    settled = true;
+                    resolve({ proxy: candidate, socket });
+                    return;
+                }
+
+                socket?.destroy();
+                if (--pending === 0 && !settled) resolve(null);
+            });
+        }
+    });
+}
+
 function readOverTls(socket: Socket, host: string, path: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<string | null> {
     return new Promise(resolve => {
         let body = "";
@@ -658,8 +702,16 @@ function dropExit(dead: string, excluded?: Set<string>) {
 
     log(`${safeProxy(dead)} parou de entregar, tirando do pote e procurando outra`);
     writePool(readPool().filter(entry => entry.proxy !== dead));
+    missed.delete(dead);
     exit = null;
-    chooseExit(excluded);
+
+    // Volta a segurar conexao nova enquanto a busca corre. Sem isto, toda conexao de gateway
+    // que chegasse durante a troca sairia direta na hora -- e a reconexao logo depois de uma
+    // saida morrer e justamente a que decide se a transmissao sobrevive. O then fecha a corrida
+    // de a busca em curso ja ter passado pelo settleExit: sem ele os que esperam so sairiam
+    // pelo prazo, doze segundos parados.
+    exitSettled = false;
+    void chooseExit(excluded).then(() => { if (!exitSettled) settleExit(exit); });
 }
 
 // Guarda a promessa, nao um booleano: retryWithProxy precisa esperar o resultado antes de
@@ -745,6 +797,124 @@ async function refillPool(excluded: Set<string>, keep: PoolEntry) {
     }
 }
 
+// ------------------------------------------------------------------ manter reserva viva
+
+// Saida gratuita nao avisa que morreu: ela para de encaminhar, e quem descobre e a conexao que
+// estava passando por ela. No meio de uma transmissao isso custa a sessao inteira -- o gateway
+// reconecta, e se reconectar direto o servidor reavalia a conta e o video cai. O batimento
+// existe para que, quando isso acontecer, ja haja no pote uma reserva testada ha trinta
+// segundos para assumir na hora, em vez de a busca comecar com o Discord ja reconectando.
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let beating = false;
+let lastHunt = 0;
+
+const missed = new Map<string, number>();
+
+function startHeartbeat() {
+    if (heartbeatTimer !== null) return;
+
+    heartbeatTimer = setInterval(() => { void beat(); }, HEARTBEAT_MS);
+    log(`batimento ligado: reconfiro as saidas a cada ${Math.round(HEARTBEAT_MS / 1000)}s`);
+}
+
+function stopHeartbeat() {
+    if (heartbeatTimer === null) return;
+
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+    missed.clear();
+}
+
+async function beat() {
+    // Um batimento lento nunca pode se sobrepor ao proximo: seriam duas rodadas de conexoes na
+    // mesma saida ao mesmo tempo, que e justamente o que derruba as fracas.
+    if (beating || scope === "off") return;
+    beating = true;
+
+    try {
+        await checkPool();
+    } catch {
+        // Batimento e rede de seguranca. Se ele falhar, o caminho antigo continua valendo:
+        // falhar no trafego vivo e cair para a reserva ali mesmo.
+    } finally {
+        beating = false;
+    }
+}
+
+// Leve de proposito: um tunel ate o gateway e o TLS fechando nele, sem repetir o trace da
+// Cloudflare. O pais ja foi decidido quando a saida entrou no pote, e cada checagem extra e
+// mais uma conexao simultanea numa saida que talvez nao aceite duas.
+async function checkPool() {
+    const stored = readPool();
+    const active = exit;
+
+    // A ativa entra na rodada mesmo estando fora do pote: proxy do campo e Tor local nunca sao
+    // guardados, e sao exatamente os que a pessoa mais sente quando caem.
+    const targets = [...new Set([...(active === null ? [] : [active]), ...stored.map(entry => entry.proxy)])];
+    if (targets.length === 0) return huntReserves(0);
+
+    const beats = await Promise.all(targets.map(async proxy => ({ proxy, ok: await reachesGateway(proxy, HEARTBEAT_TIMEOUT_MS) })));
+
+    const dead = new Set<string>();
+    for (const { proxy, ok } of beats) {
+        if (ok) {
+            missed.delete(proxy);
+            continue;
+        }
+
+        const count = (missed.get(proxy) ?? 0) + 1;
+        missed.set(proxy, count);
+        if (count >= MAX_MISSED_BEATS) dead.add(proxy);
+    }
+
+    if (dead.size > 0) {
+        const survivors = stored.filter(entry => !dead.has(entry.proxy));
+        if (survivors.length !== stored.length) {
+            log(`fora do pote: ${[...dead].map(safeProxy).join(", ")} (sem resposta em ${MAX_MISSED_BEATS} batimentos)`);
+            writePool(survivors);
+        }
+
+        for (const proxy of dead) missed.delete(proxy);
+    }
+
+    const live = beats.filter(entry => entry.ok).map(entry => entry.proxy);
+
+    // A ativa e trocada no primeiro erro, nao no segundo: trocar nao custa nada -- socket que ja
+    // esta de pe continua no tunel antigo, so conexao nova nasce pela reserva -- e a proxima
+    // conexao do gateway pode ser a reconexao que decide a transmissao.
+    if (active !== null && !live.includes(active)) {
+        const reserve = live.find(proxy => proxy !== active);
+        if (reserve === undefined) {
+            log(`${safeProxy(active)} perdeu o batimento e nao ha reserva viva`);
+            dropExit(active);
+        } else {
+            log(`${safeProxy(active)} perdeu o batimento, assumindo a reserva ${safeProxy(reserve)}`);
+            exit = reserve;
+        }
+    }
+
+    huntReserves(live.filter(proxy => proxy !== exit).length);
+}
+
+// A busca cara nunca acontece dentro do batimento: ela e solta em segundo plano e o pote so
+// muda quando ela volta, entao um batimento continua custando o mesmo com o pote vazio.
+function huntReserves(liveReserves: number) {
+    if (liveReserves >= MIN_LIVE_RESERVES) return;
+    if (Date.now() - lastHunt < HUNT_COOLDOWN_MS) return;
+
+    lastHunt = Date.now();
+    log(`o pote esta com ${liveReserves} reserva(s) viva(s), procurando mais em segundo plano`);
+
+    sharedFreeExit(excludedCountries(), POOL_SIZE).then(found => {
+        const known = new Set(readPool().map(entry => entry.proxy));
+        const fresh = found.filter(entry => !known.has(entry.proxy));
+        if (fresh.length === 0) return;
+
+        writePool([...readPool(), ...fresh]);
+        log(`${fresh.length} reserva(s) nova(s) no pote`);
+    }).catch(() => { });
+}
+
 // ------------------------------------------------------------------ o roteador local
 
 let socks: Server | undefined;
@@ -820,17 +990,21 @@ async function serveRequest(client: Socket, request: Buffer | null) {
         upstream = await openTunnel(through, target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS);
 
         // Trocar para uma reserva ja testada custa uma conexao; esperar a proxima abertura do
-        // Discord custa a sessao inteira sem bypass.
+        // Discord custa a sessao inteira sem bypass. As reservas correm juntas em vez de uma
+        // por vez: com 2,5s de prazo cada, a fila somava mais de dez segundos com o gateway
+        // reconectando, tempo de sobra para o Chromium desistir do roteador.
         if (upstream === null) {
-            for (const reserve of readPool()) {
-                if (reserve.proxy === through) continue;
-                upstream = await openTunnel(reserve.proxy, target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS);
-                if (upstream !== null) {
-                    log(`${safeProxy(through)} falhou, usando a reserva ${safeProxy(reserve.proxy)}`);
-                    writePool(readPool().filter(entry => entry.proxy !== through));
-                    exit = reserve.proxy;
-                    break;
-                }
+            const won = await firstTunnel(
+                readPool().map(entry => entry.proxy).filter(proxy => proxy !== through),
+                target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS
+            );
+
+            if (won !== null) {
+                log(`${safeProxy(through)} falhou, usando a reserva ${safeProxy(won.proxy)}`);
+                writePool(readPool().filter(entry => entry.proxy !== through));
+                missed.delete(through);
+                exit = won.proxy;
+                upstream = won.socket;
             }
         }
 
@@ -951,6 +1125,7 @@ async function startRouter(next: Scope) {
 
 async function stopRouter() {
     scope = "off";
+    stopHeartbeat();
 
     try {
         await session.defaultSession.setProxy({ mode: "system" });
@@ -1015,6 +1190,7 @@ async function enableOnce() {
         if (!started) return { success: false as const };
 
         chooseExit();
+        startHeartbeat();
         return { success: true as const };
     } catch {
         // Falhar aqui e abrir o Discord sem bypass. Deixar a excecao subir no boot era abrir
