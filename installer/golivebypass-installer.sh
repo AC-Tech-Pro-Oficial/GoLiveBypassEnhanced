@@ -333,6 +333,7 @@ installed_mod() {
             *equicord*) echo "Equicord"; return 0 ;;
             *vesktop*) echo "Vesktop"; return 0 ;;
             *vencord*) echo "Vencord"; return 0 ;;
+            *legcord*) echo "Legcord"; return 0 ;;
         esac
     done <<EOF
 $(discord_resources)

@@ -59,6 +59,13 @@ const diskFs: typeof fs = (() => {
 
 const FLAVOURS = ["Discord", "DiscordPTB", "DiscordCanary"];
 
+// Clientes paralelos do Discord (mods standalone) com a MESMA estrutura Electron: pasta
+// <LOCALAPPDATA>/<Nome>/app-<versao>/resources com app.asar. O bypass injeta igual — o
+// que diferencia e o nome da pasta/do executavel. O "Vencord" citado pelos usuarios e o
+// Vesktop (o desktop do Vencord); Vencord/Equicord em si sao builds que usam o plugin.
+const PARALLEL_APPS = ["Vesktop", "Equibop", "Legcord"];
+const ALL_APPS = [...FLAVOURS, ...PARALLEL_APPS];
+
 const MAC_APPS = [
   { flavour: "Discord", appName: "Discord.app", processName: "Discord" },
   {
@@ -71,6 +78,9 @@ const MAC_APPS = [
     appName: "Discord Canary.app",
     processName: "Discord Canary",
   },
+  { flavour: "Vesktop", appName: "Vesktop.app", processName: "Vesktop" },
+  { flavour: "Equibop", appName: "Equibop.app", processName: "Equibop" },
+  { flavour: "Legcord", appName: "Legcord.app", processName: "Legcord" },
 ] as const;
 
 const MAC_HELPER_PROCESSES = [
@@ -78,6 +88,18 @@ const MAC_HELPER_PROCESSES = [
   "Discord Helper (GPU)",
   "Discord Helper (Renderer)",
   "Discord Helper (Plugin)",
+  "Vesktop Helper",
+  "Vesktop Helper (GPU)",
+  "Vesktop Helper (Renderer)",
+  "Vesktop Helper (Plugin)",
+  "Equibop Helper",
+  "Equibop Helper (GPU)",
+  "Equibop Helper (Renderer)",
+  "Equibop Helper (Plugin)",
+  "Legcord Helper",
+  "Legcord Helper (GPU)",
+  "Legcord Helper (Renderer)",
+  "Legcord Helper (Plugin)",
 ];
 
 let mainWindow: BrowserWindow | null = null;
@@ -495,7 +517,7 @@ function getWinDiscordInstalls(): DiscordInstall[] {
   if (!localAppData) return [];
 
   const installs: DiscordInstall[] = [];
-  for (const flavour of FLAVOURS) {
+  for (const flavour of ALL_APPS) {
     const rootPath = path.join(localAppData, flavour);
     if (!diskFs.existsSync(rootPath)) continue;
 
@@ -555,7 +577,7 @@ function discordIsRunning(): boolean {
     return false;
   }
 
-  for (const flavour of FLAVOURS) {
+  for (const flavour of ALL_APPS) {
     try {
       const out = execSync(`tasklist /FI "IMAGENAME eq ${flavour}.exe" /NH`, {
         encoding: "utf8",
@@ -599,7 +621,7 @@ async function killDiscord() {
     return;
   }
 
-  for (const flavour of FLAVOURS) {
+  for (const flavour of ALL_APPS) {
     try {
       execSync(`taskkill /F /T /IM ${flavour}.exe`, { stdio: "ignore" });
     } catch {}

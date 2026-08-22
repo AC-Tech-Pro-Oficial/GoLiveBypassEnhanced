@@ -170,6 +170,26 @@ discord_dirs() {
         done
     done
 
+    # Clientes paralelos (mods standalone) com a mesma estrutura Electron: Vesktop (o desktop
+    # do Vencord), Equibop (fork do Vesktop) e Legcord. Instalam em /opt, /usr/lib e
+    # ~/.local/share conforme o empacotamento (AUR, .deb/.rpm ou portable). O bootstrap do
+    # Discord nao se aplica aqui: o app vem inteiro com o resources/ embutido.
+    for raiz in \
+        /usr/share/vesktop /usr/lib/vesktop /usr/lib64/vesktop /opt/vesktop /opt/Vesktop \
+        /usr/share/equibop /usr/lib/equibop /usr/lib64/equibop /opt/equibop /opt/Equibop \
+        /usr/share/legcord /usr/lib/legcord /usr/lib64/legcord /opt/legcord /opt/Legcord \
+        /usr/local/share/vesktop /usr/local/share/equibop /usr/local/share/legcord \
+        "$HOME/.local/share/vesktop" "$HOME/.local/share/equibop" "$HOME/.local/share/legcord"
+    do
+        [ -d "$raiz" ] || continue
+        for sub in "$raiz/resources" "$raiz"; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                printf '%s\n' "$sub"
+                break
+            fi
+        done
+    done
+
     # Flatpak. O deploy do ostree e do root, mas e um diretorio comum: a injecao troca o nome
     # do app.asar e cria uma pasta ao lado, sem reescrever arquivo nenhum, entao os objetos do
     # repositorio ficam intactos. O que muda em relacao ao resto e que um `flatpak update`
