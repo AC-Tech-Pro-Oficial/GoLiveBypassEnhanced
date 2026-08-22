@@ -72,6 +72,7 @@ while [ $# -gt 0 ]; do
         --proxy) PROXY="${2:-}"; shift ;;
         --excluded-countries) EXCLUDED="${2:-BR}"; shift ;;
         --uninstall) MODE="uninstall" ;;
+        --restore) MODE="restore" ;;
         --status) MODE="status" ;;
         --json) JSON=1 ;;
         -y|--yes) ASSUME_YES=1 ;;
@@ -530,6 +531,24 @@ if [ "$MODE" = "uninstall" ]; then
 
     # Modo portatil: ao desfazer, reabre o Discord limpo (mesmo comportamento do app do Windows).
     start_discord "$(printf '%s\n' "$FOUND" | head -1)"
+    exit 0
+fi
+
+# Igual ao --uninstall, mas sem reabrir o Discord: usado pela GUI no boot para reverter
+# uma injecao orfa de uma sessao anterior que morreu sem o quit limpo (PC desligado,
+# crash). Reabrir aqui abriria o Discord de surpresa no login.
+if [ "$MODE" = "restore" ]; then
+    stop_discord
+    printf '%s\n' "$FOUND" | while IFS= read -r resources; do
+        if [ "$(injection_state "$resources")" != "nosso" ]; then
+            warn "$resources nao tem o standalone, deixando como esta."
+            continue
+        fi
+        remove_injection "$resources" && ok "$resources voltou ao normal."
+        if id="$(flatpak_app_id "$resources")"; then
+            revoke_flatpak_access "$id" "$INSTALL_DIR"
+        fi
+    done
     exit 0
 fi
 
