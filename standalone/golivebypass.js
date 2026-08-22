@@ -28,7 +28,6 @@ const { join, dirname, basename } = require("path");
 
 const DISCORD_HOST = "discord.com";
 const GEO_HOST = "cloudflare.com";
-const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
 
 // So estes hosts atravessam o tunel. O gate e decidido na conexao do gateway, entao rotear
 // mais que isso custaria velocidade em tudo sem comprar nada.
@@ -38,12 +37,14 @@ const PROBE_TIMEOUT_MS = 6000;
 // Mais candidatas por lote nao custa relogio, porque elas correm juntas: custa a mais lenta,
 // nao a soma. E com mais candidatas o minimo escolhido e melhor, o que se traduz direto em
 // menos latencia em tudo que passa pelo gateway.
-const PARALLEL_PROBES = 20;
+const PARALLEL_PROBES = 30;
 // Cinco em vez de tres: as candidatas do lote correm juntas, entao guardar mais reserva nao
 // custa relogio nenhum na busca e e exatamente o que sobra quando uma saida morre no meio de
 // uma transmissao.
 const POOL_SIZE = 5;
-const MAX_CANDIDATES = 40;
+// Com cinco fontes, o limite alto de candidatas permite varrer uma fatia grande da oferta;
+// o probe em paralelo faz a varredura custar o tempo do mais lento, nao a soma.
+const MAX_CANDIDATES = 80;
 const MIN_UPTIME = 90;
 const MAX_LISTED_TIMEOUT = 1500;
 const TOR_PORTS = [9052, 9150, 9050, 9250];
@@ -57,8 +58,10 @@ const HOLD_BUDGET_MS = 12_000;
 // expirar entre aberturas do Discord e o gateway nascia direto — o "carregando infinitamente".
 const CACHE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 // Depois de uma busca por saida nova falhar, espera este intervalo antes de tentar de novo:
-// a API de saidas gratuitas custa e nao responde mais rapido por repeticao.
-const REFRESH_COOLDOWN_MS = 30_000;
+// a API de saidas gratuitas custa e nao responde mais rapido por repeticao. Quinze segundos
+// mantem a resposta razoavel para a sessao que ficou sem saida (com vinte e cinco a morte da
+// ativa virava quase um minuto enxugando o gateway).
+const REFRESH_COOLDOWN_MS = 15_000;
 
 // Trava da reposicao de rotina. Tres minutos, igual ao plugin: sem ela, um pote que nao
 // consegue encher viraria uma varredura inteira da lista gratuita a cada trinta segundos, pela
@@ -84,6 +87,41 @@ const MAX_MISSED_BEATS = 2;
 // Abaixo disto o batimento vai atras de reservas novas. Uma so nao e reserva: e a proxima a
 // morrer.
 const MIN_LIVE_RESERVES = 2;
+
+// ------------------------------------------------------------------ estabilidade da sessao
+// Uma saida gratuita passa no probe e ainda assim entrega mal: RTT alto e instavel faz o
+// websocket do gateway perder heartbeat e reconectar em loop, derrubando o carregamento.
+// A troca proativa ataca antes de a conexao sofrer.
+
+// Acima disto a saida e considerada lenta demais para o gateway. Medido como EMA do RTT
+// dos probes (a media exponencial suaviza picos momentaneos sem ignorar degradacao real).
+const RTT_TROCA_MS = 450;
+// RTT lento por N batimentos seguidos vira troca: um pico isolado nao aposenta saida boa.
+const RTT_TROCA_BATIDAS = 3;
+// Fator da EMA (0.3 = o RTT novo pesa 30%, o historico 70%).
+const RTT_EMA_ALPHA = 0.3;
+
+// O medidor mais confiavel de sofrimento e o proprio gateway: reconexoes em rajada (3+ em
+// 180s) significam que a saida nao esta aguentando o trafego vivo, mesmo passando no probe.
+// Acima disto, troca forcada de saida — e reseta o contador.
+const RECONEXAO_JANELA_MS = 180_000;
+const RECONEXAO_LIMITE = 3;
+
+// Cooldown das trocas PROATIVAS (por RTT ou por rajada): quando o pool inteiro esta lento,
+// trocar em cascata vira ping-pong entre ruins — cada troca faz o gateway renascer e a
+// sessao recarregar. Esperar o cooldown suaviza; a troca por saida MORTA e emergencia e
+// nao passa por aqui.
+const SWAP_COOLDOWN_MS = 60_000;
+// Nas trocas proativas, so vale trocar para uma reserva pELO MENOS tao boa quanto a atual:
+// trocar para outra lenta (ou pior) nao ajuda o gateway e ainda o faz renascer a toa.
+const SWAP_RESERVA_RAZAO = 1.2;
+
+// Prazo global da busca por saidas, do inicio ao fim (nao por lote): o probe completo numa
+// candidata de RTT medio leva ~4-8s (duas conexoes + TLS), entao um prazo curto por lote
+// cortava os probes antes de aprovarem e a busca voltava vazia — o gateway nascia direto e
+// a sessao ficava bloqueada (video nunca chega, so audio). Os lotes correm ate este prazo e
+// a melhor aprovada que tiver chegado vence.
+const HUNT_BUSCA_TOTAL_MS = 10_000;
 
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
 
@@ -122,6 +160,53 @@ let lastStockAt = 0;
 const missedBeats = new Map();
 let beating = false;
 let stocking = null;
+
+// Medicao de qualidade por saida (estado desta sessao): EMA do RTT dos probes e quantos
+// batimentos seguidos ela ficou acima do teto. A troca por RTT so acontece depois de
+// RTT_TROCA_BATIDAS leituras ruins seguidas — pico momentaneo nao aposenta saida boa.
+const rttEma = new Map();          // proxy -> EMA do RTT (ms)
+const rttLentoSeguidas = new Map(); // proxy -> batimentos ruins consecutivos
+
+// Janela deslizante das reconexoes do gateway (so o cliente real conecta em
+// gateway-*.discord.gg). A rajada e o sinal de que a saida nao aguenta o trafego vivo.
+const gatewayReconexoes = [];      // timestamps das reconexoes na janela
+let ultimaTrocaProativaEm = 0;    // cooldown das trocas proativas (RTT/rajada)
+
+// Quarentena de saidas que ja causaram sofrimento: a saida passa no probe e mesmo assim o
+// gateway sofre; sem um "nao voltar para essa agora", o refresh reelege exatamente ela (a
+// mesma mai famosa do dia). Fica de fora por QUARENTENA_MS e o pool e obrigado a testar
+// alternativas.
+const QUARENTENA_MS = 90_000;
+const quarentena = new Map();     // proxy -> ate quando fica evitada
+
+function quarentenar(proxy, motivo) {
+    if (proxy === null) return;
+    const ate = Date.now() + QUARENTENA_MS;
+    const ja = quarentena.get(proxy);
+    if (ja === undefined || ate > ja) quarentena.set(proxy, ate);
+    log(safeProxy(proxy) + " em quarentena ate daqui a " + Math.round(QUARENTENA_MS / 1000) + "s (" + motivo + ")");
+}
+
+function foraDeQuarentena(itens) {
+    const agora = Date.now();
+    for (const [proxy, ate] of quarentena) if (ate <= agora) quarentena.delete(proxy);
+    return itens.filter(item => !quarentena.has(typeof item === "string" ? item : item.proxy));
+}
+
+// Troca proativa de saida com cooldown: impede o ping-pong entre saidas ruins quando o pool
+// inteiro esta lento. A troca por saida MORTA (emergencia) chama trocarPara direto.
+function trocaProativaPode() {
+    return Date.now() - ultimaTrocaProativaEm > SWAP_COOLDOWN_MS;
+}
+
+function trocarPara(nova, motivo) {
+    ultimaTrocaProativaEm = Date.now();
+    gatewayReconexoes.length = 0;
+    missedBeats.delete(nova);
+    rttLentoSeguidas.delete(nova);
+    log(safeProxy(chosenExit) + " -> " + safeProxy(nova) + " (" + motivo + ")");
+    chosenExit = nova;
+}
 
 // Estado da recarga pos-gateway-direto.
 let gatewayWentDirectAt = 0;   // quando o roteador abriu direto para um host de gateway
@@ -381,7 +466,12 @@ async function probe(proxy, timeoutMs) {
     const response = await readOverTls(socket, DISCORD_HOST, "/api/v9/gateway", timeoutMs);
     if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
 
-    return { proxy: proxy, ms: Date.now() - started };
+    const ms = Date.now() - started;
+    // Alimenta a EMA de RTT da saida: a troca proativa por lentidao le desta leitura.
+    const ema = rttEma.has(proxy) ? rttEma.get(proxy) : ms;
+    rttEma.set(proxy, ema + RTT_EMA_ALPHA * (ms - ema));
+
+    return { proxy: proxy, ms: ms };
 }
 
 async function exitCountry(proxy, timeoutMs) {
@@ -408,7 +498,7 @@ async function probeExit(proxy) {
 
 // ------------------------------------------------------------------ escolher a saida
 
-function downloadText(url) {
+function downloadText(url, timeoutMs) {
     return new Promise((resolve, reject) => {
         const req = request(url, res => {
             if (res.statusCode !== 200) {
@@ -426,26 +516,108 @@ function downloadText(url) {
         });
 
         req.on("error", reject);
-        req.setTimeout(15_000, () => req.destroy(new Error("tempo esgotado")));
+        req.setTimeout(timeoutMs || 15_000, () => req.destroy(new Error("tempo esgotado")));
         req.end();
     });
 }
 
-function rankFreeProxies(body) {
+// As listas gratuitas de uma fonte so mudam de vez em quando e variam de qualidade; juntar
+// varias fontes dilui a dependencia de uma unica lista e aumenta a chance de achar uma saida
+// com RTT decente. A proxyscrape (formato JSON com uptime) segue sendo a primeira; as demais
+// trazem candidatas de outras redes. Tudo e testado de verdade pelo probe antes de usar.
+const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
+const FREE_PROXY_FONTES = [
+    { tipo: "proxyscrape", url: FREE_PROXY_API },
+    { tipo: "plain", url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt" },
+    { tipo: "plain", url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" },
+    { tipo: "plain", url: "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt" },
+    { tipo: "geonode", url: "https://proxylist.geonode.com/api/proxy-list?limit=80&page=1&sort_by=lastChecked&sort_type=desc&protocols=socks5" }
+];
+// As fontes sao baixadas juntas; prazo curto para a mais lenta nao atrasar a escolha (o
+// gateway espera no roteador por ate HOLD_BUDGET_MS).
+const FONTES_TIMEOUT_MS = 6000;
+
+// Cada formato de fonte vira a mesma coisa: { proxy, uptime?, timeout?, country? }. O
+// timeout quando a fonte reporta e a latencia declarada — usada no ranqueamento, nao como
+// verdade (o probe decide).
+function parsePlain(body) {
+    const itens = [];
+    for (const linha of body.split("\n")) {
+        const p = linha.trim();
+        if (p === "" || p.startsWith("#")) continue;
+        // listas "host:port" e "socks5://host:port" convivem; normaliza para o segundo.
+        const proxy = p.includes("://") ? p : "socks5://" + p;
+        if (parseProxy(proxy) !== null) itens.push({ proxy: proxy });
+    }
+    return itens;
+}
+
+function parseGeonode(body) {
+    const data = JSON.parse(body);
+    const list = Array.isArray(data.data) ? data.data : [];
+    return list.map(entry => ({
+        proxy: "socks5://" + entry.ip + ":" + entry.port,
+        uptime: typeof entry.upTime === "number" ? entry.upTime : undefined,
+        timeout: typeof entry.latency === "number" ? entry.latency : undefined,
+        country: String(entry.country || "")
+    })).filter(item => parseProxy(item.proxy) !== null);
+}
+
+function parseProxyScrape(body) {
     const data = JSON.parse(body);
     const list = Array.isArray(data.proxies) ? data.proxies : [];
+    return list.map(entry => ({
+        proxy: String(entry.proxy || ""),
+        uptime: typeof entry.uptime === "number" ? entry.uptime : undefined,
+        timeout: typeof entry.timeout === "number" ? entry.timeout : undefined,
+        country: String((entry.ip_data && entry.ip_data.countryCode) || "")
+    })).filter(item => item.proxy !== "" && parseProxy(item.proxy) !== null);
+}
 
-    return list
-        .filter(entry => entry && entry.alive !== false && entry.proxy)
+async function fetchFreeProxies() {
+    const porFonte = await Promise.all(FREE_PROXY_FONTES.map(async fonte => {
+        try {
+            const body = await downloadText(fonte.url, FONTES_TIMEOUT_MS);
+            if (fonte.tipo === "plain") return parsePlain(body);
+            if (fonte.tipo === "geonode") return parseGeonode(body);
+            return parseProxyScrape(body);
+        } catch {
+            return [];
+        }
+    }));
+
+    // Junta as fontes e tira duplicata (primeira vence; a ordem das fontes define a
+    // precedencia quando a mesma saida aparece em duas listas).
+    const unicos = new Map();
+    for (const itens of porFonte) {
+        for (const item of itens) if (!unicos.has(item.proxy)) unicos.set(item.proxy, item);
+    }
+    return [...unicos.values()];
+}
+
+function rankFreeProxies(lista) {
+    const base = foraDeQuarentena(lista)
+        .filter(entry => entry && entry.proxy)
         .filter(entry => typeof entry.uptime !== "number" || entry.uptime >= MIN_UPTIME)
         .filter(entry => typeof entry.timeout !== "number" || entry.timeout <= MAX_LISTED_TIMEOUT)
         // A porta 4145 e quase toda de intermediario que responde por qualquer destino sem
         // encaminhar nada. Ela reprova no teste, mas so depois de gastar o prazo.
         .filter(entry => !String(entry.proxy).endsWith(":4145"))
-        .filter(entry => !excludedCountries.has(String(entry.ip_data && entry.ip_data.countryCode).toUpperCase()))
-        .sort((a, b) => (a.timeout || 9999) - (b.timeout || 9999))
-        .slice(0, MAX_CANDIDATES)
-        .map(entry => String(entry.proxy));
+        .filter(entry => !excludedCountries.has(String(entry.country).toUpperCase()));
+
+    // As listas sem metadado (plain) nao tem timeout declarado: ordenar so por ele jogaria
+    // ~2700 candidatas para o fim e o primeiro lote testaria apenas fontes com campo de
+    // latencia — que podem estar todas mortas. Intercala mantendo a melhor de cada lado.
+    const comTimeout = base.filter(e => typeof e.timeout === "number").sort((a, b) => a.timeout - b.timeout);
+    const semTimeout = base.filter(e => typeof e.timeout !== "number");
+    const intercalado = [];
+    const fim = Math.max(comTimeout.length, semTimeout.length);
+    for (let i = 0; i < fim && intercalado.length < MAX_CANDIDATES; i++) {
+        if (i < comTimeout.length) intercalado.push(comTimeout[i]);
+        if (i < semTimeout.length && intercalado.length < MAX_CANDIDATES) intercalado.push(semTimeout[i]);
+    }
+
+    return intercalado.map(entry => String(entry.proxy));
 }
 
 function listening(port, timeoutMs) {
@@ -496,12 +668,17 @@ async function detectTor() {
     return null;
 }
 
-// Devolve as aprovadas do primeiro lote que der alguma, sem mexer no pote nem na saida ativa:
-// quem chama decide se isto e a escolha da sessao ou so reserva chegando por baixo.
+// Devolve as aprovadas da busca, sem mexer no pote nem na saida ativa: quem chama decide se
+// isto e a escolha da sessao ou so reserva chegando por baixo. As aprovadas vem ORDENADAS
+// pelo RTT do probe (menor primeiro): a primeira aprovada que chega costuma ser so a mais
+// rapida de CHEGAR, nao a mais rapida de verdade — e colocar uma saida de 1.7s quando a
+// busca tinha uma de 400ms e a propria instabilidade que derruba o gateway. Parou de cortar
+// probes por lote: o prazo agora e global, e quem completa dentro dele entra na escolha.
 async function huntExits() {
     let candidates;
     try {
-        candidates = rankFreeProxies(await downloadText(FREE_PROXY_API));
+        // Baixa as fontes juntas, junta sem duplicata e filtra/ranqueia.
+        candidates = rankFreeProxies(await fetchFreeProxies());
     } catch (error) {
         log("nao consegui baixar a lista de saidas: " + error.message);
         return [];
@@ -509,17 +686,28 @@ async function huntExits() {
 
     log(candidates.length + " candidatas depois do ranqueamento");
 
+    const prazoFinal = Date.now() + HUNT_BUSCA_TOTAL_MS;
+
     for (let i = 0; i < candidates.length; i += PARALLEL_PROBES) {
+        const restante = prazoFinal - Date.now();
+        if (restante <= 0) break;
+
         const batch = candidates.slice(i, i + PARALLEL_PROBES);
 
-        // A PRIMEIRA aprovada ganha, sem esperar o lote inteiro: o gateway conecta em 2-4s e
-        // um lote que espera a candidata mais lenta (probe + pais, ate 12s cada) fazia a saida
-        // nunca ganhar a corrida — o gateway nascia direto (o "carregando infinitamente").
-        // O ms das demais ainda e medido para o ranqueamento do pote, mas nao segura a escolha.
+        // Todas as probes do lote podem completar; a escolha sai no prazo global OU quando o
+        // lote terminou — o que vier primeiro. Uma aprovada que chega antes ja entra.
         const aprovadas = await new Promise(resolve => {
             const found = [];
             let pending = batch.length;
             let settled = false;
+            const prazo = setTimeout(terminar, restante);
+
+            function terminar() {
+                if (settled) return;
+                settled = true;
+                clearTimeout(prazo);
+                resolve(found);
+            }
 
             for (const candidate of batch) {
                 probeExit(candidate).then(r => {
@@ -527,28 +715,19 @@ async function huntExits() {
 
                     if (r !== null && r.country !== null && !excludedCountries.has(r.country)) {
                         found.push(r);
-                        // primeira aprovada: resolve na hora com o que ja temos
-                        settled = true;
-                        resolve(found);
-                        return;
-                    }
-
-                    if (r !== null && (r.country === null || excludedCountries.has(r.country))) {
+                    } else if (r !== null) {
                         log(r.proxy + " recusada: saida em " + (r.country || "pais desconhecido"));
                     }
 
-                    if (--pending === 0 && !settled) resolve(found);
+                    if (--pending === 0) terminar();
                 });
             }
         });
 
         if (aprovadas.length === 0) continue;
 
-        // Devolve so a primeira aprovada: as outras probes do lote terminam, mas o resultado
-        // delas e descartado (o Promise ja resolveu). O pote se enche ao longo das chamadas
-        // seguintes de stockReserves, uma saida por vez -- o que importa aqui e nao segurar a
-        // escolha esperando a candidata mais lenta do lote.
-        return aprovadas;
+        // Menor RTT primeiro: a ativa vira a melhor da busca, e o pool herda a mesma ordem.
+        return aprovadas.sort((a, b) => a.ms - b.ms);
     }
 
     return [];
@@ -573,10 +752,14 @@ async function cachedExit() {
     if (state === null || typeof state.at !== "number") return null;
     if (Date.now() - state.at > CACHE_MAX_AGE_MS) return null;
 
-    // Versoes anteriores guardavam uma saida so, em state.proxy.
-    const guardadas = Array.isArray(state.pool)
-        ? state.pool.filter(e => e && typeof e.proxy === "string")
-        : (typeof state.proxy === "string" ? [{ proxy: state.proxy, ms: 0, country: "?" }] : []);
+    // Versoes anteriores guardavam uma saida so, em state.proxy. As que estao em quarentena
+    // nao sao reeleitas: quem causou sofrimento no passado recente nao volta so por estar
+    // guardada.
+    const guardadas = foraDeQuarentena(
+        Array.isArray(state.pool)
+            ? state.pool.filter(e => e && typeof e.proxy === "string")
+            : (typeof state.proxy === "string" ? [{ proxy: state.proxy, ms: 0, country: "?" }] : [])
+    );
 
     // Testadas em paralelo e escolhida a mais rapida de agora: a ordem de ontem nao vale hoje,
     // e testar uma por vez gastaria o orcamento inteiro na primeira que tivesse morrido.
@@ -597,11 +780,17 @@ async function chooseExit() {
     if (manual === null) {
         log("o endereco em proxy nao e valido, ignorando");
     } else if (manual !== "") {
-        if (await probe(manual, 2500) !== null) {
-            log("usando a saida que voce configurou: " + safeProxy(manual));
-            return manual;
-        }
-        log("a saida que voce configurou nao respondeu: " + safeProxy(manual));
+        // Saida escolhida e gravada pela pessoa nas settings: usar NA HORA, sem probe.
+        // O probe completo (TLS ate o Discord) gasta ~1s, e o gateway conecta em menos —
+        // com a escolha devagar a corrida morre e a sessao nasce direta pelo IP brasileiro
+        // (o "carregando infinitamente" no video). Com a saida na mao em milissegundos o
+        // gateway ja nasce roteado; o batimento valida a cada 30s, e se ela estiver morta
+        // o trafego vivo cai para reserva/cache/lista antes de ir direto.
+        log("usando a saida que voce configurou: " + safeProxy(manual));
+        probe(manual, 2500).then(ok => {
+            if (ok === null) log("a saida que voce configurou nao respondeu ao probe em segundo plano: " + safeProxy(manual));
+        });
+        return manual;
     }
 
     const cached = await cachedExit();
@@ -737,8 +926,15 @@ function ensureReserveThenReload(exit) {
 // A sessao voltou a nascer roteada (conexao de gateway passou pela saida): reseta o teto de
 // recargas — e o sinal de que a ultima recarga (se houve) funcionou.
 let lastRoutedAt = 0;
+// A saida ativa entregou trafego de gateway recentemente (isto e o probe mais fiel possivel:
+// o proprio gateway esta vivo por ela). O batimento usa isto para NAO abrir uma conexao de
+// probe na ativa a cada 30s — saida gratuita limita conexoes simultaneas, e o probe extra
+// concorre com a conexao do gateway e pode derruba-la. A morte real da ativa aparece no
+// trafego vivo (openThroughPool), nao precisa do probe para ser percebida.
+let ativaEntregouEm = 0;
 function markGatewayRouted() {
     lastRoutedAt = Date.now();
+    ativaEntregouEm = Date.now();
     if (reloadCount > 0) log("gateway voltou a passar pela saida, teto de recarga resetado");
     reloadCount = 0;
 }
@@ -828,7 +1024,10 @@ async function checkPool() {
     // A ativa entra na rodada mesmo estando fora do pote: proxy do settings.json e Tor local
     // nunca sao guardados, e sao exatamente os que a pessoa mais sente quando caem.
     const targets = [];
-    if (active !== null) targets.push(active);
+    // Camada 3: se a ativa entregou trafego de gateway dentro da janela do batimento, ela
+    // esta viva por definicao — pular o probe dela poupa uma conexao na saida gratuita, que
+    // limita conexoes simultaneas. A morte real cai no openThroughPool e vira troca ali.
+    if (active !== null && Date.now() - ativaEntregouEm > HEARTBEAT_MS) targets.push(active);
     for (const entry of pool) if (!targets.includes(entry.proxy)) targets.push(entry.proxy);
     if (targets.length === 0) return;
 
@@ -862,6 +1061,10 @@ async function checkPool() {
 
     const live = beats.filter(entry => entry.ok).map(entry => entry.proxy);
 
+    // A ativa que foi pulada (entregou trafego na janela) e considerada viva: ela nao passou
+    // por probe, mas tem prova viva de que funciona.
+    if (active !== null && !targets.includes(active) && !live.includes(active)) live.push(active);
+
     // A ativa e trocada no primeiro erro, nao no segundo: trocar nao custa nada -- socket que ja
     // esta de pe continua no tunel antigo, so conexao nova nasce pela reserva -- e a proxima
     // conexao do gateway pode ser a reconexao que decide a transmissao.
@@ -875,11 +1078,70 @@ async function checkPool() {
             return;
         }
 
-        log(safeProxy(active) + " perdeu o batimento, assumindo a reserva " + safeProxy(reserve));
-        chosenExit = reserve;
+        // Emergencia (a ativa morreu): troca direto, sem cooldown.
+        trocarPara(reserve, "perdeu o batimento");
+    } else if (active !== null) {
+        // A ativa esta viva no probe. Mesmo viva, pode estar lenta demais para o gateway
+        // (RTT EMA alto): trocar antes de o websocket sofrer.
+        const trocar = trySwapByRtt(active, live);
+        if (trocar !== null) chosenExit = trocar;
     }
 
+    // Sempre ordena o pool pelo RTT (EMA) ao salvar: a melhor reserva para assumir na hora
+    // e a mais rapida, nao a que chegou primeiro.
+    pool = [...pool].sort((a, b) => (a.proxy === chosenExit ? -1 : b.proxy === chosenExit ? 1 : (rttEma.get(a.proxy) ?? a.ms) - (rttEma.get(b.proxy) ?? b.ms)));
+    savePool();
+
     stockReserves(live.filter(proxy => proxy !== chosenExit).length);
+}
+
+// A saida ativa passa no probe mas esta entregando mal (RTT EMA acima do teto por
+// RTT_TROCA_BATIDAS batimentos seguidos). Troca para a reserva viva mais rapida antes de o
+// gateway sofrer. Devolve a nova saida, ou null se nao houver troca.
+function trySwapByRtt(active, live) {
+    const ema = rttEma.get(active);
+    if (ema === undefined || ema < RTT_TROCA_MS) {
+        rttLentoSeguidas.delete(active);
+        return null;
+    }
+
+    const ruins = (rttLentoSeguidas.get(active) || 0) + 1;
+    rttLentoSeguidas.set(active, ruins);
+    if (ruins < RTT_TROCA_BATIDAS) {
+        log(safeProxy(active) + " com RTT alto (" + Math.round(ema) + "ms), " + ruins + "/" + RTT_TROCA_BATIDAS + " batimentos");
+        return null;
+    }
+
+    // Cooldown: quando o pool inteiro esta lento, esperar o cooldown antes de trocar de
+    // novo evita o ping-pong entre ruins (cada troca renasce o gateway a toa).
+    if (!trocaProativaPode()) {
+        rttLentoSeguidas.delete(active);
+        return null;
+    }
+
+    // Pelo menos 1 batimento de folga antes de trocar de novo pela mesma causa: evita
+    // cascata quando a reserva tambem esta lenta.
+    const alvo = live
+        .filter(proxy => proxy !== active)
+        .sort((a, b) => (rttEma.get(a) ?? Infinity) - (rttEma.get(b) ?? Infinity))[0];
+    if (alvo === undefined) {
+        log(safeProxy(active) + " lento mas sem reserva viva para trocar");
+        rttLentoSeguidas.delete(active);
+        return null;
+    }
+
+    // So vale trocar para uma reserva que nao seja visivelmente pior: a atual ja esta ruim,
+    // mas piorar (ou trocar pelo mesmo nivel) so renasce o gateway a toa.
+    const emaAlvo = rttEma.get(alvo) ?? Infinity;
+    if (emaAlvo > ema * SWAP_RESERVA_RAZAO) {
+        log(safeProxy(active) + " lento (" + Math.round(ema) + "ms EMA) e reserva pior (" + Math.round(emaAlvo) + "ms), mantendo e buscando reserva melhor");
+        rttLentoSeguidas.delete(active);
+        return null;
+    }
+
+    trocarPara(alvo, "ativa lenta " + Math.round(ema) + "ms EMA");
+    rttLentoSeguidas.delete(active);
+    return alvo;
 }
 
 // Repor reserva nao pode passar pelo refreshExit: aquele caminho troca a saida ativa, e trocar
@@ -1097,6 +1359,10 @@ function serveSocks(client) {
                 // provavelmente bloqueou. So o roteador sabe disto; e o gatilho confiavel.
                 gatewayWentDirectAt = Date.now();
                 upstream = await openDirect(target);
+                // A saida pode ter estado de pe e falhado so nesta conexao (congestionamento,
+                // giro de IP): com saida viva, a recarga repara a sessao na hora, em vez de
+                // esperar o Ctrl+R da pessoa. Sem saida, o settleExit futuro chama isto.
+                if (upstream !== null) maybeReloadAfterDirect();
             }
 
             if (upstream === null) return client.destroy();
@@ -1280,11 +1546,18 @@ async function start() {
     if (!await installPac()) return;
 
     // Observa os handshakes websocket do cliente: o gateway real conecta em subdominios
-    // regionais (gateway-us-east1-b.discord.gg). O SINAL de corrida perdida: se o handshake
-    // do gateway aparece quando AINDA NAO HA SAIDA escolhida, ele nasceu direto pelo IP
-    // brasileiro — o servidor ja avaliou o bloqueio nesse CONNECTION_OPEN e nenhuma
-    // reconexao roteada posterior desbloqueia (o plugin detecta o mesmo no renderer e
-    // recarrega). Marca a recarga guardada na hora.
+    // regionais (gateway-us-east1-b.discord.gg). O registro mostra se o gateway nasceu com
+    // ou sem saida na mao — o diagnostico da corrida. A marcacao de "nasceu direto" fica no
+    // serveSocks, no momento em que a conexao realmente sai direta; marcar aqui era cedo
+    // demais, porque a conexao de gateway espera a saida no currentExit (ate 12s) e passa
+    // roteada quando ela chega. O falso positivo ativava o fluxo de recarga em toda abertura
+    // e o cancelava em seguida ("recarga desnecessaria"), deixando o mecanismo sem efeito
+    // justamente nos casos em que a sessao tinha nascido direta de verdade.
+    //
+    // Este observador tambem e o medidor de sofrimento da saida: cada handshake NOVO do
+    // gateway (reconexao) e contado numa janela. Rajada de reconexoes = a saida nao esta
+    // aguentando o trafego vivo, mesmo passando no probe. Acima do limite, troca forcada
+    // para a reserva mais rapida — o sinal mais confiavel que temos.
     // O callback e obrigatorio (sem ele a request pendura para sempre); nao modificamos nada.
     try {
         session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
@@ -1294,14 +1567,39 @@ async function start() {
                     : "saida pronta ha " + Math.round((Date.now() - lastExitAt) / 1000) + "s";
                 log("gateway visto: " + details.url.slice(0, 80) + " | " + saidaInfo);
 
-                // Corrida perdida: gateway nasceu SEM saida -> sessao bloqueada. A reconexao
-                // roteada que vier depois NAO desbloqueia (o veredito foi no CONNECTION_OPEN
-                // original); so a recarga da janela faz o gateway renascer atras da saida.
-                if (chosenExit === null && gatewayWentDirectAt === 0) {
-                    log("gateway nasceu sem saida, marcando para recarga");
-                    gatewayWentDirectAt = Date.now();
-                    // Aguarda a saida ficar pronta (a recarga so roda com saida viva no probe);
-                    // settleExit chama maybeReloadAfterDirect quando ela chegar.
+                // Reconexao em rajada (ignora a primeira conexao da sessao, que nao e sinal).
+                const agora = Date.now();
+                if (chosenExit !== null) {
+                    gatewayReconexoes.push(agora);
+                    while (gatewayReconexoes.length > 0 && gatewayReconexoes[0] < agora - RECONEXAO_JANELA_MS) gatewayReconexoes.shift();
+
+                    // Segunda reconexao na janela: ja e sinal de saida agonizante. Dispara o
+                    // refresh em segundo plano — quando a rajada fechar (3+), ha candidato
+                    // novo para trocar em vez de so a sauda velha do pool.
+                    if (gatewayReconexoes.length === RECONEXAO_LIMITE - 1) {
+                        refreshExit().catch(error => log("a busca antecipada falhou: " + error.message));
+                    }
+
+                    if (gatewayReconexoes.length >= RECONEXAO_LIMITE) {
+                        const emaAtual = rttEma.get(chosenExit) ?? Infinity;
+                        // Cooldown + reserva que preste: trocar entre saidas ruins em cascata
+                        // so renasce o gateway a toa; sem reserva melhor, a atual vai para a
+                        // quarentena e a busca em 2o plano escolhe outra.
+                        const alvo = pool
+                            .map(entry => entry.proxy)
+                            .filter(proxy => proxy !== chosenExit)
+                            .sort((a, b) => (rttEma.get(a) ?? Infinity) - (rttEma.get(b) ?? Infinity))[0];
+                        const emaAlvo = alvo === undefined ? Infinity : (rttEma.get(alvo) ?? Infinity);
+                        if (alvo !== undefined && trocaProativaPode() && emaAlvo <= emaAtual * SWAP_RESERVA_RAZAO) {
+                            const antiga = chosenExit;
+                            trocarPara(alvo, RECONEXAO_LIMITE + "+ reconexoes do gateway na janela");
+                            quarentenar(antiga, "rajada de reconexoes");
+                        } else {
+                            gatewayReconexoes.length = 0;
+                            quarentenar(chosenExit, RECONEXAO_LIMITE + "+ reconexoes sem troca util");
+                            log(safeProxy(chosenExit) + " com " + RECONEXAO_LIMITE + "+ reconexoes do gateway sem troca util (cooldown ou reserva pior), em quarentena");
+                        }
+                    }
                 }
             }
             callback({});
