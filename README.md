@@ -371,7 +371,7 @@ Nenhum dos dois roda comando com sudo sem perguntar antes, e o comando exato apa
 3. Espere o toast. `Go Live is unlocked on this session` significa que o servidor liberou — só o gateway fica na proxy, todo o resto sai direto. `GoLiveBypass could not unlock this session` significa que mesmo recarregando o servidor manteve o bloqueio: confira o registro e, se usa proxy própria, verifique se ela está no ar.
 4. Entre na call e transmita.
 
-Se o Discord reconectar o gateway no meio da sessão (queda de rede, suspender o notebook), o socket novo nasce pela mesma saída e o desbloqueio sobrevive. Se a saída morrer e nenhuma reserva servir, a conexão cai para a direta, o plugin procura outra em segundo plano e, se a sessão continuar bloqueada, recarrega sozinho atrás da nova.
+Se o Discord reconectar o gateway no meio da sessão (queda de rede, suspender o notebook), o socket novo nasce pela mesma saída e o desbloqueio sobrevive. Se a saída morrer, o batimento de 30 em 30 segundos já deixa uma reserva testada pronta para assumir. Só quando nenhuma reserva serve é que a conexão cai para a direta, e aí o plugin procura outra em segundo plano e, se a sessão continuar bloqueada, recarrega sozinho atrás da nova.
 
 ## Configuração
 
@@ -469,7 +469,7 @@ Ou seja, o fluxo do GoLiveBypass — **o gateway nasce atrás da proxy e fica ne
 
 **Ressalvas honestas:**
 
-- Se a saída morrer no meio da sessão, o roteador local troca para uma reserva testada ou cai para a conexão direta naquela conexão — e aí a próxima entrada em canal de voz volta a ser avaliada como BR. O plugin detecta o bloqueio na próxima abertura de sessão e recarrega atrás de outra saída sozinho; um **Ctrl+R** resolve na hora se você não quiser esperar.
+- Se a saída morrer no meio da sessão, o batimento de 30 em 30 segundos costuma perceber antes da sua transmissão e já troca por uma reserva viva — a reconexão do gateway nasce atrás dela e a liberação sobrevive. Só quando *nenhuma* reserva responde é que a conexão cai para a direta, e aí a próxima entrada em canal de voz volta a ser avaliada como BR: o bypass procura outra saída, o plugin detecta o bloqueio na próxima abertura de sessão e recarrega sozinho. Um **Ctrl+R** resolve na hora se você não quiser esperar.
 - Isso depende de comportamento atual do Discord, que pode mudar a qualquer momento.
 - Usar proxy/VPN para contornar a restrição pode violar os Termos de Serviço do Discord. Risco de punição à conta é baixo, mas existe — considere usar uma conta secundária.
 
@@ -499,7 +499,7 @@ Por isso o plugin proxia **só o gateway**:
 
 1. Na abertura do app, o plugin sobe um **roteador SOCKS local** (só escuta em `127.0.0.1`) e instala uma regra PAC que aponta unicamente os hosts de gateway para ele. Todo o resto segue a regra que o seu sistema já usava.
 2. O roteador escolhe a saída — a sua proxy, um Tor local, ou uma gratuita testada — e segura o gateway por **até 12 segundos** enquanto isso. Estourado o prazo, aquela conexão sai direta: perde-se o Go Live daquela sessão, nunca o Discord.
-3. O gateway nasce atrás da saída e **permanece roteado pela sessão inteira**: se a rede oscilar e o WebSocket reconectar, ele renasce pela mesma saída e a liberação sobrevive. Se a saída morrer no meio da sessão, o roteador tenta uma reserva já testada antes de cair para a direta — e registra tudo.
+3. O gateway nasce atrás da saída e **permanece roteado pela sessão inteira**: se a rede oscilar e o WebSocket reconectar, ele renasce pela mesma saída e a liberação sobrevive. Enquanto a sessão está de pé, um **batimento a cada 30 segundos** reconfere a saída ativa e as reservas e promove uma reserva viva assim que a ativa falha — antes de a reconexão precisar dela. Só se nada responder é que a conexão cai para a direta, e tudo isso vai para o registro.
 4. Cerca de 1,5s depois da sessão abrir (a atribuição do experimento só é reavaliada alguns ticks após o `CONNECTION_OPEN`), o plugin confere o veredito no servidor e te diz num toast se a sessão ficou liberada de verdade. Se não ficou, ele recarrega o cliente atrás da saída — no máximo duas vezes, para nunca virar tela de carregamento infinita.
 
 O momento ainda importa, mas a corrida mudou de lado: quem espera é o socket do gateway, segurado pelo roteador, e não a abertura inteira do app.
@@ -518,7 +518,8 @@ Medido: escolher aleatoriamente e testar só o handshake acerta 12% das vezes; r
 
 - **Quem decide o fallback é o roteador, não o Chromium.** A regra PAC não tem alternativa do tipo `PROXY;DIRECT`: se a saída falha, a conexão cai para a direta *dentro* do roteador, com registro. Um proxy morto nunca deixa o Discord preso na tela de abertura — e nunca faz o Chromium desistir da regra em silêncio.
 - **Orçamento de espera por conexão**: o gateway aguarda uma saída por no máximo 12s; estourado, sai direto. Só o socket do gateway espera — a abertura do app nunca é segurada.
-- **Reservas já testadas**: até 5 saídas ficam guardadas num pote (24h) em `native-settings.json`, sob `pool`. Uma saída que morre no meio da sessão é substituída pela próxima do pote na hora, e o pote é reabastecido em segundo plano com a sessão já aberta.
+- **Reservas mantidas vivas (batimento)**: até 5 saídas ficam guardadas num pote em `native-settings.json`, sob `pool`. A cada **30 segundos**, com a sessão já aberta, a saída ativa e todas as reservas são reconferidas com um túnel de verdade até o gateway do Discord. Quem erra o batimento perde a vez na hora: a ativa é trocada por uma reserva **testada há 30 segundos** no primeiro erro, e sai do pote no segundo erro seguido (um erro solto costuma ser congestionamento, não morte). Quando sobra menos de uma reserva viva de folga, o pote é reabastecido em segundo plano — sem trocar a saída ativa, que é o IP que o servidor já aceitou nesta sessão.
+- **Reservas correndo juntas, não em fila**: quando a saída ativa não entrega uma conexão, todas as reservas são tentadas **ao mesmo tempo** e a primeira que responder leva. Em fila, com 2,5s de prazo cada, a troca podia somar mais de dez segundos — tempo de sobra para o Chromium desistir do roteador.
 - **Reutilizar só depois de testar de novo**: no boot, as saídas guardadas são revalidadas (orçamento de 2,5s) antes de valerem. Descobrir uma do zero leva de 8 a 23 segundos; o que causava o travamento antigo era reaplicar uma proxy morta às cegas, e isso não acontece mais.
 - **A regra de proxy do sistema é respeitada**: se ela varia por host (proxy corporativo ou PAC de verdade), o plugin se recusa a ligar o roteador em vez de atropelar a política da rede.
 

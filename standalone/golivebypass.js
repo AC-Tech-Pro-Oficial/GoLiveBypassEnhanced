@@ -39,7 +39,10 @@ const PROBE_TIMEOUT_MS = 6000;
 // nao a soma. E com mais candidatas o minimo escolhido e melhor, o que se traduz direto em
 // menos latencia em tudo que passa pelo gateway.
 const PARALLEL_PROBES = 20;
-const POOL_SIZE = 3;
+// Cinco em vez de tres: as candidatas do lote correm juntas, entao guardar mais reserva nao
+// custa relogio nenhum na busca e e exatamente o que sobra quando uma saida morre no meio de
+// uma transmissao.
+const POOL_SIZE = 5;
 const MAX_CANDIDATES = 40;
 const MIN_UPTIME = 90;
 const MAX_LISTED_TIMEOUT = 1500;
@@ -55,6 +58,32 @@ const CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 // Depois de uma busca por saida nova falhar, espera este intervalo antes de tentar de novo:
 // a API de saidas gratuitas custa e nao responde mais rapido por repeticao.
 const REFRESH_COOLDOWN_MS = 30_000;
+
+// Trava da reposicao de rotina. Tres minutos, igual ao plugin: sem ela, um pote que nao
+// consegue encher viraria uma varredura inteira da lista gratuita a cada trinta segundos, pela
+// sessao toda. E separada da trava acima para a rotina nunca adiar a emergencia.
+const STOCK_COOLDOWN_MS = 3 * 60_000;
+
+// Prazo do tunel no trafego vivo, bem menor que o do teste: uma saida agonizante que demora a
+// falhar faria o Chromium desistir do roteador inteiro.
+const RELAY_TIMEOUT_MS = 2500;
+
+// De quanto em quanto tempo as saidas sao reconferidas com a sessao ja aberta. O refreshExit
+// conserta depois que uma conexao falha; o batimento existe para que ela nao chegue a falhar.
+// Trinta segundos e curto o bastante para a reserva estar quente quando o gateway reconectar,
+// e longo o bastante para nao virar carga na saida gratuita, que costuma limitar conexoes.
+const HEARTBEAT_MS = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 4000;
+
+// Quantos batimentos seguidos uma saida pode errar antes de sair do pote. Cortar no primeiro
+// seria cruel com saida gratuita congestionada, que erra um e volta; nunca cortar deixaria o
+// pote cheio de endereco morto, que e o mesmo que nao ter reserva nenhuma.
+const MAX_MISSED_BEATS = 2;
+
+// Abaixo disto o batimento vai atras de reservas novas. Uma so nao e reserva: e a proxima a
+// morrer.
+const MIN_LIVE_RESERVES = 2;
+
 const MAX_LOG_BYTES = 256 * 1024;
 
 const HERE = __dirname;
@@ -72,6 +101,12 @@ const waitingForExit = [];
 // Estado da re-selecao em runtime: so uma busca por vez, e nunca antes do cooldown.
 let refreshingExit = null;
 let lastRefreshAt = 0;
+let lastStockAt = 0;
+// Quantos batimentos seguidos cada saida errou. Fora do pote de proposito: o pote vai para
+// disco, e isto e estado desta sessao.
+const missedBeats = new Map();
+let beating = false;
+let stocking = null;
 
 function log(line) {
     const stamp = new Date().toTimeString().slice(0, 8);
@@ -406,6 +441,20 @@ function listening(port, timeoutMs) {
     });
 }
 
+function savePool() {
+    writeJson(STATE_FILE, { pool: pool, at: Date.now() });
+}
+
+// Unica janela para o estado das saidas: chosenExit e pool sao locais deste arquivo, e sem isto
+// nem o registro nem um teste conseguem dizer o que o batimento decidiu.
+function poolStatus() {
+    return {
+        active: chosenExit,
+        pool: pool.map(entry => entry.proxy),
+        missed: [...missedBeats.entries()]
+    };
+}
+
 async function detectTor() {
     for (const port of TOR_PORTS) {
         const proxy = "socks5://127.0.0.1:" + port;
@@ -426,13 +475,15 @@ async function detectTor() {
     return null;
 }
 
-async function pickFreeExit() {
+// Devolve as aprovadas do primeiro lote que der alguma, sem mexer no pote nem na saida ativa:
+// quem chama decide se isto e a escolha da sessao ou so reserva chegando por baixo.
+async function huntExits() {
     let candidates;
     try {
         candidates = rankFreeProxies(await downloadText(FREE_PROXY_API));
     } catch (error) {
         log("nao consegui baixar a lista de saidas: " + error.message);
-        return null;
+        return [];
     }
 
     log(candidates.length + " candidatas depois do ranqueamento");
@@ -454,17 +505,24 @@ async function pickFreeExit() {
 
         if (aprovadas.length === 0) continue;
 
-        pool = aprovadas.slice(0, POOL_SIZE);
-        log("escolhida " + pool[0].proxy + ": " + pool[0].ms + "ms, saida em " + pool[0].country);
-        if (pool.length > 1) {
-            log("reservas: " + pool.slice(1).map(e => e.proxy + " (" + e.ms + "ms " + e.country + ")").join(", "));
-        }
-
-        writeJson(STATE_FILE, { pool: pool, at: Date.now() });
-        return pool[0].proxy;
+        return aprovadas;
     }
 
-    return null;
+    return [];
+}
+
+async function pickFreeExit() {
+    const aprovadas = await huntExits();
+    if (aprovadas.length === 0) return null;
+
+    pool = aprovadas.slice(0, POOL_SIZE);
+    log("escolhida " + pool[0].proxy + ": " + pool[0].ms + "ms, saida em " + pool[0].country);
+    if (pool.length > 1) {
+        log("reservas: " + pool.slice(1).map(e => e.proxy + " (" + e.ms + "ms " + e.country + ")").join(", "));
+    }
+
+    savePool();
+    return pool[0].proxy;
 }
 
 async function cachedExit() {
@@ -562,6 +620,124 @@ function refreshExit() {
     return refreshingExit.finally(() => { refreshingExit = null; });
 }
 
+// ------------------------------------------------------------------ manter reserva viva
+
+// Saida gratuita nao avisa que morreu: ela para de encaminhar, e quem descobre e a conexao que
+// estava passando por ela. No meio de uma transmissao isso custa a sessao inteira -- o gateway
+// reconecta, e se reconectar direto o servidor reavalia a conta e o video cai. O refreshExit
+// conserta isso depois que a conexao ja falhou; o batimento existe para que ela nao falhe: de
+// trinta em trinta segundos a ativa e as reservas sao reconferidas, e a troca acontece antes de
+// o Discord precisar.
+async function beat() {
+    // Um batimento lento nunca pode se sobrepor ao proximo: seriam duas rodadas de conexoes na
+    // mesma saida ao mesmo tempo, que e justamente o que derruba as fracas.
+    if (beating) return;
+    beating = true;
+
+    try {
+        await checkPool();
+    } catch (error) {
+        // Batimento e rede de seguranca. Se ele falhar, o caminho antigo continua valendo:
+        // falhar no trafego vivo, cair para a reserva e, no fim, o refreshExit.
+        log("o batimento falhou: " + error.message);
+    } finally {
+        beating = false;
+    }
+}
+
+async function checkPool() {
+    const active = chosenExit;
+
+    // A ativa entra na rodada mesmo estando fora do pote: proxy do settings.json e Tor local
+    // nunca sao guardados, e sao exatamente os que a pessoa mais sente quando caem.
+    const targets = [];
+    if (active !== null) targets.push(active);
+    for (const entry of pool) if (!targets.includes(entry.proxy)) targets.push(entry.proxy);
+    if (targets.length === 0) return;
+
+    const beats = await Promise.all(targets.map(async proxy => ({
+        proxy: proxy,
+        ok: await probe(proxy, HEARTBEAT_TIMEOUT_MS) !== null
+    })));
+
+    const dead = [];
+    for (const entry of beats) {
+        if (entry.ok) {
+            missedBeats.delete(entry.proxy);
+            continue;
+        }
+
+        const count = (missedBeats.get(entry.proxy) || 0) + 1;
+        missedBeats.set(entry.proxy, count);
+        if (count >= MAX_MISSED_BEATS) dead.push(entry.proxy);
+    }
+
+    if (dead.length > 0) {
+        const survivors = pool.filter(entry => !dead.includes(entry.proxy));
+        if (survivors.length !== pool.length) {
+            log("fora do pote: " + dead.map(safeProxy).join(", ") + " (sem resposta em " + MAX_MISSED_BEATS + " batimentos)");
+            pool = survivors;
+            savePool();
+        }
+
+        for (const proxy of dead) missedBeats.delete(proxy);
+    }
+
+    const live = beats.filter(entry => entry.ok).map(entry => entry.proxy);
+
+    // A ativa e trocada no primeiro erro, nao no segundo: trocar nao custa nada -- socket que ja
+    // esta de pe continua no tunel antigo, so conexao nova nasce pela reserva -- e a proxima
+    // conexao do gateway pode ser a reconexao que decide a transmissao.
+    if (active !== null && !live.includes(active)) {
+        const reserve = live.find(proxy => proxy !== active);
+        if (reserve === undefined) {
+            // Nada vivo. Comeca a busca agora, em vez de esperar a proxima conexao descobrir:
+            // o refreshExit ja tem dedupe e cooldown, entao chamar daqui nao duplica trabalho.
+            log(safeProxy(active) + " perdeu o batimento e nao ha reserva viva");
+            refreshExit().catch(error => log("a busca por saida nova falhou: " + error.message));
+            return;
+        }
+
+        log(safeProxy(active) + " perdeu o batimento, assumindo a reserva " + safeProxy(reserve));
+        chosenExit = reserve;
+    }
+
+    stockReserves(live.filter(proxy => proxy !== chosenExit).length);
+}
+
+// Repor reserva nao pode passar pelo refreshExit: aquele caminho troca a saida ativa, e trocar
+// de IP com a ativa saudavel pediria uma reavaliacao do servidor a toa. Aqui o pote enche por
+// baixo e quem esta entregando continua entregando.
+function stockReserves(liveReserves) {
+    if (liveReserves >= MIN_LIVE_RESERVES || stocking !== null) return;
+
+    // Relogio proprio, separado do refreshExit de proposito. Compartilhar os dois fazia a
+    // reposicao de rotina adiar a busca de emergencia: o pote esvazia justamente quando as
+    // saidas estao morrendo, que e quando a ativa tambem morre, entao a conexao de gateway que
+    // pedisse socorro nessa janela sairia direta. Era a falha que este batimento existe para
+    // impedir.
+    if (Date.now() - lastStockAt < STOCK_COOLDOWN_MS) return;
+
+    lastStockAt = Date.now();
+    log("o pote esta com " + liveReserves + " reserva(s) viva(s), procurando mais em segundo plano");
+
+    stocking = huntExits().then(aprovadas => {
+        const known = pool.map(entry => entry.proxy);
+        const fresh = aprovadas.filter(entry => !known.includes(entry.proxy));
+        if (fresh.length === 0) return;
+
+        // A ativa fica no pote mesmo sendo mais lenta que as novas: ela e o IP que o servidor ja
+        // aceitou nesta sessao, e trocar por velocidade custaria uma reavaliacao.
+        pool = [...pool, ...fresh]
+            .sort((a, b) => (a.proxy === chosenExit ? -1 : b.proxy === chosenExit ? 1 : a.ms - b.ms))
+            .slice(0, POOL_SIZE);
+
+        savePool();
+        log(fresh.length + " reserva(s) nova(s) no pote");
+    }).catch(error => log("a busca de reserva falhou: " + error.message))
+        .finally(() => { stocking = null; lastStockAt = Date.now(); });
+}
+
 // ------------------------------------------------------------------ o roteador local
 
 function refuse(client) {
@@ -606,27 +782,53 @@ function openDirect(target) {
     });
 }
 
+// Abre o mesmo destino por varias saidas ao mesmo tempo e fica com a primeira que responder.
+// Quem chega depois e fechado na hora: tunel aberto e esquecido segura uma conexao do outro
+// lado, e saida gratuita costuma ter poucas.
+function firstTunnel(candidates, target, timeoutMs) {
+    return new Promise(resolve => {
+        let pending = candidates.length;
+        if (pending === 0) return resolve(null);
+
+        let settled = false;
+
+        for (const candidate of candidates) {
+            openTunnel(candidate, target.host, target.port, timeoutMs).then(socket => {
+                if (socket !== null && !settled) {
+                    settled = true;
+                    return resolve({ proxy: candidate, socket: socket });
+                }
+
+                if (socket !== null) socket.destroy();
+                if (--pending === 0 && !settled) resolve(null);
+            });
+        }
+    });
+}
+
 // Tenta a saida ativa e, se ela nao entregar, as reservas ja testadas. Trocar aqui custa uma
 // conexao; esperar a proxima abertura do Discord custa a sessao inteira sem bypass.
 async function openThroughPool(target) {
     const active = await currentExit();
     if (active === null) return null;
 
-    const ordem = [active];
-    for (const reserva of pool) {
-        if (reserva.proxy !== active) ordem.push(reserva.proxy);
-    }
+    // A ativa sozinha primeiro: ela e o IP que o servidor ja viu nesta sessao, e trocar sem
+    // precisar seria pedir uma reavaliacao a toa.
+    const direto = await openTunnel(active, target.host, target.port, RELAY_TIMEOUT_MS);
+    if (direto !== null) return direto;
 
-    for (const candidate of ordem) {
-        const socket = await openTunnel(candidate, target.host, target.port, PROBE_TIMEOUT_MS);
-        if (socket !== null) {
-            if (candidate !== chosenExit) {
-                log("a saida " + safeProxy(chosenExit) + " parou de entregar, troquei para " + safeProxy(candidate));
-                chosenExit = candidate;
-            }
-            return socket;
-        }
-        log(safeProxy(candidate) + " nao entregou " + target.host);
+    log(safeProxy(active) + " nao entregou " + target.host);
+
+    // As reservas correm todas juntas em vez de uma por vez: enfileiradas, o prazo de cada uma
+    // somava com o gateway ja reconectando, e o Chromium desiste do roteador antes disso.
+    const won = await firstTunnel(pool.map(entry => entry.proxy).filter(proxy => proxy !== active), target, RELAY_TIMEOUT_MS);
+    if (won !== null) {
+        log("a saida " + safeProxy(active) + " parou de entregar, troquei para " + safeProxy(won.proxy));
+        chosenExit = won.proxy;
+        missedBeats.delete(active);
+        pool = pool.filter(entry => entry.proxy !== active);
+        savePool();
+        return won.socket;
     }
 
     // Pool inteiro morto: antes de render a conexao ao IP brasileiro (o "carregando para
@@ -839,6 +1041,11 @@ async function start() {
     const exit = await chooseExit();
     settleExit(exit);
     log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + safeProxy(exit));
+
+    // So depois da primeira escolha: batimento correndo junto da busca inicial disputaria banda
+    // com ela, e e a busca inicial que segura o gateway.
+    setInterval(() => { beat(); }, HEARTBEAT_MS);
+    log("batimento ligado: reconfiro as saidas a cada " + Math.round(HEARTBEAT_MS / 1000) + "s");
 }
 
 try {
