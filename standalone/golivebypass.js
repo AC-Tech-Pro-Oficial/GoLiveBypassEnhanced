@@ -544,8 +544,10 @@ async function huntExits() {
 
         if (aprovadas.length === 0) continue;
 
-        // As demais do lote continuam sendo medidas em background para encher o pote com as
-        // mais rapidas; a escolha ja esta feita.
+        // Devolve so a primeira aprovada: as outras probes do lote terminam, mas o resultado
+        // delas e descartado (o Promise ja resolveu). O pote se enche ao longo das chamadas
+        // seguintes de stockReserves, uma saida por vez -- o que importa aqui e nao segurar a
+        // escolha esperando a candidata mais lenta do lote.
         return aprovadas;
     }
 
@@ -1088,7 +1090,7 @@ function serveSocks(client) {
                 // Recusar aqui prendia o Discord em "conectando" para sempre: o PAC nao tem
                 // alternativa depois do ponto e virgula, entao uma recusa nao vira conexao
                 // direta, vira nada. Sair direto custa o bypass desta conexao; recusar custa o
-                // Discord inteiro, e saida gratuita morre no meio da sessao o todo.
+                // Discord inteiro, e saida gratuita morre no meio da sessao o tempo todo.
                 log("nenhuma saida entregou " + target.host + ", esta conexao vai sair direta");
                 // Sinal para o watchdog de recarga: o roteador abriu direto para um host de
                 // gateway — a sessao nasceu (ou vai nascer) pelo IP brasileiro, e o servidor
