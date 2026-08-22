@@ -15,6 +15,7 @@ import fs from "fs";
 import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { bypassCode } from "./bypass";
 import { runScript } from "./linux-helper";
+import { setupUpdater, isQuittingForUpdate } from "./updater";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -269,7 +270,11 @@ function refreshWindowStatus() {
 }
 
 function showWindow() {
-  if (mainWindow) {
+  // Durante o encerramento (quit, auto-update reexecutando) nao faz sentido
+  // mostrar janela: o mainWindow/tray podem ja estar destruidos, e acessar
+  // objetos destruidos derruba o app com "Object has been destroyed".
+  if (quitting) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
     mainWindow.focus();
     // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
@@ -432,12 +437,19 @@ if (!gotLock) {
     // evita o Tray cair para o GtkStatusIcon, que o Plasma 6 nao exibe.
     waitForStatusNotifier().then(createTray);
     app.on("activate", showWindow);
+    // Checa por atualizacao na release do GitHub (Windows portable: baixa e substitui;
+    // Mac/Linux: autoUpdater nativo). Roda sozinho e em silencio se nao houver nada.
+    setupUpdater(() => mainWindow);
   });
 }
 
 // Cmd+Q no Mac nao passa por window-all-closed da mesma forma que o Sair da bandeja no Windows:
 // o restore vive aqui para os dois caminhos.
 app.on("before-quit", (event) => {
+  // Durante o auto-update o quit nao pode ser adiado: o processo novo ja foi
+  // executado e precisa do lock de instancia unica. Sem esta saida, o app
+  // antigo fica vivo e o novo morre — o "fecha mas nao abre".
+  if (isQuittingForUpdate()) return;
   // A segunda instancia so acorda a primeira e morre: sem esta guarda ela restauraria o
   // Discord na saida, desfazendo o bypass que a instancia principal acabou de aplicar.
   if (!gotLock || cleaningUp) return;
