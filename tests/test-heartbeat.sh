@@ -197,7 +197,7 @@ async function main() {
   vivos([A]);                    // A viva, zero reservas vivas
   let stocked = 0;
   g.huntExits = async () => { stocked++; return []; };
-  fakeNow += 31_000;             // passa o cooldown
+  fakeNow += 181_000;            // passa o STOCK_COOLDOWN_MS, que e de tres minutos
   await g.checkPool();
   await new Promise(r => setTimeout(r, 20));
   s = g.poolStatus();

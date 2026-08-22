@@ -59,6 +59,11 @@ const CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 // a API de saidas gratuitas custa e nao responde mais rapido por repeticao.
 const REFRESH_COOLDOWN_MS = 30_000;
 
+// Trava da reposicao de rotina. Tres minutos, igual ao plugin: sem ela, um pote que nao
+// consegue encher viraria uma varredura inteira da lista gratuita a cada trinta segundos, pela
+// sessao toda. E separada da trava acima para a rotina nunca adiar a emergencia.
+const STOCK_COOLDOWN_MS = 3 * 60_000;
+
 // Prazo do tunel no trafego vivo, bem menor que o do teste: uma saida agonizante que demora a
 // falhar faria o Chromium desistir do roteador inteiro.
 const RELAY_TIMEOUT_MS = 2500;
@@ -96,6 +101,7 @@ const waitingForExit = [];
 // Estado da re-selecao em runtime: so uma busca por vez, e nunca antes do cooldown.
 let refreshingExit = null;
 let lastRefreshAt = 0;
+let lastStockAt = 0;
 // Quantos batimentos seguidos cada saida errou. Fora do pote de proposito: o pote vai para
 // disco, e isto e estado desta sessao.
 const missedBeats = new Map();
@@ -704,9 +710,15 @@ async function checkPool() {
 // baixo e quem esta entregando continua entregando.
 function stockReserves(liveReserves) {
     if (liveReserves >= MIN_LIVE_RESERVES || stocking !== null) return;
-    if (Date.now() - lastRefreshAt < REFRESH_COOLDOWN_MS) return;
 
-    lastRefreshAt = Date.now();
+    // Relogio proprio, separado do refreshExit de proposito. Compartilhar os dois fazia a
+    // reposicao de rotina adiar a busca de emergencia: o pote esvazia justamente quando as
+    // saidas estao morrendo, que e quando a ativa tambem morre, entao a conexao de gateway que
+    // pedisse socorro nessa janela sairia direta. Era a falha que este batimento existe para
+    // impedir.
+    if (Date.now() - lastStockAt < STOCK_COOLDOWN_MS) return;
+
+    lastStockAt = Date.now();
     log("o pote esta com " + liveReserves + " reserva(s) viva(s), procurando mais em segundo plano");
 
     stocking = huntExits().then(aprovadas => {
@@ -723,7 +735,7 @@ function stockReserves(liveReserves) {
         savePool();
         log(fresh.length + " reserva(s) nova(s) no pote");
     }).catch(error => log("a busca de reserva falhou: " + error.message))
-        .finally(() => { stocking = null; lastRefreshAt = Date.now(); });
+        .finally(() => { stocking = null; lastStockAt = Date.now(); });
 }
 
 // ------------------------------------------------------------------ o roteador local
