@@ -8,7 +8,8 @@
 // Mac e Linux: o autoUpdater do electron-updater cuida (dmg/zip assinado e AppImage).
 
 import { app, dialog, BrowserWindow } from "electron";
-import { createWriteStream } from "fs";
+import { createWriteStream, readFileSync } from "fs";
+import { createHash } from "crypto";
 import { rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -30,7 +31,7 @@ let updateReady = false;
 
 // ------------------------------------------------------------------ GitHub API
 
-function githubLatestRelease(): Promise<{ tag: string; url: string } | null> {
+function githubLatestRelease(): Promise<{ tag: string; url: string; digest: string | null } | null> {
   return new Promise((resolve) => {
     const req = request(
       {
@@ -58,7 +59,11 @@ function githubLatestRelease(): Promise<{ tag: string; url: string } | null> {
                 a.name.startsWith(EXE_PREFIX) && a.name.endsWith(".exe"),
             );
             if (!asset || !asset.browser_download_url) return resolve(null);
-            resolve({ tag: String(data.tag_name), url: asset.browser_download_url });
+            resolve({
+              tag: String(data.tag_name),
+              url: asset.browser_download_url,
+              digest: typeof asset.digest === "string" ? asset.digest : null,
+            });
           } catch {
             resolve(null);
           }
@@ -71,13 +76,33 @@ function githubLatestRelease(): Promise<{ tag: string; url: string } | null> {
   });
 }
 
-function downloadFile(url: string, dest: string): Promise<void> {
+// O browser_download_url do GitHub sempre responde 302 para release-assets.githubusercontent.com,
+// e o request do Node nao segue redirecionamento sozinho. Sem isto o download do Windows falhava
+// em toda tentativa: o app achava a versao nova e nunca conseguia baixar.
+const MAX_REDIRECTS = 5;
+
+function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<void> {
   return new Promise((resolve, reject) => {
-    const req = request(url, (res) => {
-      if (res.statusCode !== 200) {
+    // So https: um redirecionamento para http rebaixaria a conexao em silencio, e o que vem por
+    // ela substitui o executavel em uso.
+    if (!url.startsWith("https://")) {
+      return reject(new Error("recusando destino que nao e https: " + url));
+    }
+
+    const req = request(url, { headers: { "User-Agent": "GoLiveBypass" } }, (res) => {
+      const { statusCode, headers } = res;
+
+      if (statusCode !== undefined && statusCode >= 300 && statusCode < 400 && headers.location) {
         res.resume();
-        return reject(new Error("download falhou: HTTP " + res.statusCode));
+        if (hops <= 0) return reject(new Error("redirecionamentos demais"));
+        return downloadFile(new URL(headers.location, url).toString(), dest, hops - 1).then(resolve, reject);
       }
+
+      if (statusCode !== 200) {
+        res.resume();
+        return reject(new Error("download falhou: HTTP " + statusCode));
+      }
+
       const out = createWriteStream(dest);
       res.pipe(out);
       out.on("finish", () => {
@@ -89,6 +114,31 @@ function downloadFile(url: string, dest: string): Promise<void> {
     req.on("error", reject);
     req.end();
   });
+}
+
+// A API do GitHub devolve o digest do anexo na mesma resposta autenticada por TLS de onde sai a
+// URL. Conferir aqui deixa o Windows no mesmo nivel de Linux e macOS, que ganham a checagem de
+// graca pelo electron-updater. Sem isto, um arquivo truncado no meio do caminho viraria o
+// executavel em uso.
+function digestMatches(file: string, digest: string | null): boolean {
+  if (digest === null) {
+    console.warn("[updater] anexo sem digest na API; nao vou instalar sem conferir.");
+    return false;
+  }
+
+  const [algo, esperado] = digest.split(":");
+  if (algo === undefined || esperado === undefined) return false;
+
+  try {
+    const obtido = createHash(algo).update(readFileSync(file)).digest("hex");
+    if (obtido === esperado) return true;
+
+    console.error(`[updater] ${algo} nao confere: esperado ${esperado}, obtido ${obtido}`);
+    return false;
+  } catch (error) {
+    console.error("[updater] falhei ao conferir o digest:", error);
+    return false;
+  }
 }
 
 // ------------------------------------------------------------------ Windows portable
@@ -116,7 +166,7 @@ function tryReplace(target: string, downloaded: string): Promise<boolean> {
   });
 }
 
-async function updateWindowsPortable(url: string): Promise<boolean> {
+async function updateWindowsPortable(url: string, digest: string | null): Promise<boolean> {
   const current = portableExePath();
   if (current === null) {
     console.warn("[updater] PORTABLE_EXECUTABLE_FILE nao definido; pulando update.");
@@ -128,6 +178,13 @@ async function updateWindowsPortable(url: string): Promise<boolean> {
     await downloadFile(url, downloaded);
   } catch (error) {
     console.error("[updater] download falhou:", error);
+    return false;
+  }
+
+  // Conferido antes de encostar no exe em uso: depois do rename nao ha volta, o app se
+  // substituiu. Um arquivo que nao bate e apagado e a versao atual continua valendo.
+  if (!digestMatches(downloaded, digest)) {
+    await rm(downloaded, { force: true }).catch(() => {});
     return false;
   }
 
@@ -239,7 +296,7 @@ async function checkWindowsUpdate(getMainWindow: () => BrowserWindow | null) {
 
     if (choice !== 0) return;
 
-    const ok = await updateWindowsPortable(release.url);
+    const ok = await updateWindowsPortable(release.url, release.digest);
     if (ok) {
       updateReady = true;
       app.quit();
