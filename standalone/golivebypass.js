@@ -251,6 +251,15 @@ const excludedCountries = new Set(
         .split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
 );
 
+// Rede de saida escolhida na GUI. "auto" (ou vazio) = comportamento classico: Tor local se
+// houver, senao gratuitas. "tor" = SO o Tor (a GUI sobe o proprio). "free" = pula o Tor e
+// vai so as gratuitas (para quem nao quer Tor).
+const routeMode = typeof settings.routeMode === "string" ? settings.routeMode : "auto";
+// O endereco do Tor pode vir das settings (a GUI sobe o proprio numa porta dedicada).
+const TOR_ADDR = typeof settings.torAddr === "string" && settings.torAddr !== ""
+    ? settings.torAddr
+    : "127.0.0.1:9050";
+
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
 const PROXY_RE = /^(socks5|socks4|http|https):\/\/(?:(.+)@)?([^:/?#\s@]+):(\d{1,5})$/;
@@ -474,15 +483,36 @@ async function probe(proxy, timeoutMs) {
     return { proxy: proxy, ms: ms };
 }
 
+// O host que reporta o pais de saida quando o trace da Cloudflare nao traz um loc de pais
+// real — exatamente o que acontece com exits do Tor (o loc vem como "T1") e com varias
+// gratuitas. O ipwho.is responde via Tor/US; ifconfig.co provou ser instavel demais.
+const GEO_FALLBACK_HOST = "ipwho.is";
+
 async function exitCountry(proxy, timeoutMs) {
+    // O trace da Cloudflare prova o tunel e o pais numa conexao so; e o caminho rapido.
     const socket = await openTunnel(proxy, GEO_HOST, 443, timeoutMs);
-    if (socket === null) return null;
+    if (socket !== null) {
+        const response = await readOverTls(socket, GEO_HOST, "/cdn-cgi/trace", timeoutMs);
+        const match = response === null ? null : /^loc=([A-Z]{2})/m.exec(response);
+        // "T1" e o codigo especial que a Cloudflare usa para exits do Tor: nao e um pais.
+        if (match !== null && match[1] !== "T1") return match[1];
+    }
 
-    const response = await readOverTls(socket, GEO_HOST, "/cdn-cgi/trace", timeoutMs);
-    if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
+    // Fallback: sem um pais de verdade no trace, pergunta ao ipwho.is (JSON com
+    // country_code). Sem isto, Tor e varias gratuitas eram recusadas como "saida em pais
+    // desconhecido" mesmo com o tunel funcionando.
+    try {
+        const fallback = await openTunnel(proxy, GEO_FALLBACK_HOST, 443, timeoutMs);
+        if (fallback !== null) {
+            const json = await readOverTls(fallback, GEO_FALLBACK_HOST, "/?fields=country_code", timeoutMs);
+            const iso = json === null ? null : /"country_code"\s*:\s*"([A-Z]{2})"/.exec(json);
+            if (iso !== null) return iso[1];
+        }
+    } catch {
+        // sem o pais, o chamador recusa a saida — melhor que assumption errada
+    }
 
-    const match = /^loc=([A-Z]{2})/m.exec(response);
-    return match === null ? null : match[1];
+    return null;
 }
 
 // As duas conexoes em sequencia de proposito: saida gratuita sobrecarregada costuma limitar
@@ -649,8 +679,15 @@ function poolStatus() {
 }
 
 async function detectTor() {
-    for (const port of TOR_PORTS) {
-        const proxy = "socks5://127.0.0.1:" + port;
+    // No modo "tor" o endereco vem das settings (a GUI sobe o proprio Tor). Nos outros
+    // modos, procura as portas classicas de clientes Tor da maquina.
+    const candidatas = routeMode === "tor"
+        ? [TOR_ADDR]
+        : TOR_PORTS.map(port => "127.0.0.1:" + port);
+
+    for (const addr of candidatas) {
+        const proxy = "socks5://" + addr;
+        const port = Number(addr.split(":")[1] || 0);
         if (!await listening(port, TOR_PORT_TIMEOUT_MS)) continue;
         if (await probe(proxy) === null) {
             log("porta " + port + " esta aberta mas nao respondeu como proxy");
@@ -795,6 +832,20 @@ async function chooseExit() {
 
     const cached = await cachedExit();
     if (cached !== null) return cached;
+
+    // Modo "tor": SO o Tor conta. Sem Tor nao ha saida — o gateway fica segurado (nunca
+    // vaza direto para o IP brasileiro), e o refresh continua tentando ate o Tor voltar.
+    if (routeMode === "tor") {
+        const tor = await detectTor();
+        if (tor !== null) return tor;
+        log("modo tor: nenhum Tor respondeu em " + TOR_ADDR + ", segurando o gateway (sem saida direta)");
+        return null;
+    }
+
+    // Modo "free": pula o Tor (quem escolheu gratuitas nao quer depender de Tor).
+    if (routeMode === "free") {
+        return await pickFreeExit();
+    }
 
     return await detectTor() || await pickFreeExit();
 }
@@ -1079,6 +1130,13 @@ async function checkPool() {
         }
 
         // Emergencia (a ativa morreu): troca direto, sem cooldown.
+        // No modo "tor" nao existe reserva que valha a pena: o Tor e a escolha explicita e
+        // trocar para gratuita violaria o pedido. Segura — o refresh continua tentando o Tor.
+        if (routeMode === "tor") {
+            log("modo tor: o Tor caiu, segurando o gateway (sem saida direta)");
+            refreshExit().catch(error => log("a busca pelo Tor falhou: " + error.message));
+            return;
+        }
         trocarPara(reserve, "perdeu o batimento");
     } else if (active !== null) {
         // A ativa esta viva no probe. Mesmo viva, pode estar lenta demais para o gateway
@@ -1099,6 +1157,10 @@ async function checkPool() {
 // RTT_TROCA_BATIDAS batimentos seguidos). Troca para a reserva viva mais rapida antes de o
 // gateway sofrer. Devolve a nova saida, ou null se nao houver troca.
 function trySwapByRtt(active, live) {
+    // No modo "tor" a saida e uma escolha explicita da pessoa: o RTT alto do Tor e normal
+    // (1-1.4s medido) e trocar para gratuita violaria a escolha. Soh troca se o Tor morrer.
+    if (routeMode === "tor") return null;
+
     const ema = rttEma.get(active);
     if (ema === undefined || ema < RTT_TROCA_MS) {
         rttLentoSeguidas.delete(active);

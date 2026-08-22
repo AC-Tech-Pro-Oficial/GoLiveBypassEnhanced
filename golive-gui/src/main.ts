@@ -11,6 +11,10 @@ declare global {
       getPlatform: () => Promise<string>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
+      getNetMode: () => Promise<string>;
+      setNetMode: (mode: string) => Promise<string>;
+      getTorStatus: () => Promise<{ presente: boolean; ativo: boolean; porta: number }>;
+      installTor: () => Promise<{ ok: boolean; error?: string }>;
       onRefreshStartup: (callback: () => void) => void;
       onRefreshStatus: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
@@ -204,6 +208,8 @@ initTheme();
 updateStatus();
 refreshStartup();
 refreshProxy();
+refreshNetMode();
+refreshTorStatus();
 fitWindowToContent();
 
 async function refreshStartup() {
@@ -222,6 +228,82 @@ async function refreshProxy() {
   } catch (err) {
     console.error(err);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Rede de saida: tres modos segmentados (Tor / Gratuitas / Personalizado).
+// O padrao e TOR (o app instala e usa o Tor sempre). O campo de proxy so aparece
+// no modo Personalizado.
+// ---------------------------------------------------------------------------
+const segBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.seg-btn'));
+const torStatusEl = document.getElementById('torStatus') as HTMLElement;
+const manualProxyGroup = document.getElementById('manualProxyGroup') as HTMLElement;
+
+function selectMode(mode: string) {
+  for (const btn of segBtns) {
+    const checked = btn.dataset.mode === mode;
+    btn.setAttribute('aria-checked', String(checked));
+    btn.classList.toggle('seg-btn--active', checked);
+  }
+  manualProxyGroup.hidden = mode !== 'manual';
+  fitWindowToContent();
+}
+
+async function refreshNetMode() {
+  try {
+    const saved = await window.api.getNetMode();
+    const proxy = await window.api.getProxy();
+    // Mapeia o estado salvo para a UI de 3 opcoes:
+    // - "free" -> Gratuitas
+    // - "auto" com proxy preenchida -> Personalizado
+    // - "auto" sem proxy (e "tor") -> Tor (o padrao)
+    if (saved === 'free') selectMode('free');
+    else if (saved === 'auto' && proxy) selectMode('manual');
+    else selectMode('tor');
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function refreshTorStatus() {
+  try {
+    const st = await window.api.getTorStatus();
+    if (st.ativo) {
+      torStatusEl.textContent = `Tor pronto (porta ${st.porta})`;
+      torStatusEl.classList.add('tor-status--ok');
+    } else if (st.presente) {
+      torStatusEl.textContent = 'Tor baixado, aguardando ativacao...';
+      torStatusEl.classList.remove('tor-status--ok');
+    } else {
+      torStatusEl.textContent = 'Tor sera baixado automaticamente ao ativar.';
+      torStatusEl.classList.remove('tor-status--ok');
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+for (const btn of segBtns) {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.mode!;
+    selectMode(mode);
+
+    if (mode === 'tor') {
+      // Prepara o Tor (baixa/sobe) — o padrao. Nao espera: o status atualiza.
+      window.api.setNetMode('tor').catch(() => {});
+      window.api.installTor().then((r) => {
+        torStatusEl.textContent = r.ok ? 'Tor pronto (porta 9060)' : `Erro ao preparar Tor: ${r.error ?? ''}`;
+        torStatusEl.classList.toggle('tor-status--ok', !!r.ok);
+      }).catch(() => {});
+      fitWindowToContent();
+    } else if (mode === 'free') {
+      window.api.setNetMode('free').catch(() => {});
+    } else {
+      // Personalizado: volta ao auto com a proxy do campo.
+      window.api.setNetMode('auto').catch(() => {});
+      fitWindowToContent();
+    }
+  });
 }
 
 startupToggle.addEventListener('change', async () => {

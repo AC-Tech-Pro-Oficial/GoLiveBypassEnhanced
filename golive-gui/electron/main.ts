@@ -456,6 +456,8 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   quitting = true;
   cleaningUp = true;
+  // O Tor embutido morre junto com o app (e o Discord restaurado nao fica dependente dele).
+  stopTor();
   // Reversao em background: o runScript roda detached/unref, entao o filho sobrevive ao
   // app.quit() e o Discord nao fica com a injecao pendurada. Sem esperar: o "Sair" sai na
   // hora mesmo se o script demorar (fechar o Discord, flatpak, sudo...).
@@ -732,9 +734,16 @@ function writeInjection(asar: string, proxyAddress: string) {
       JSON.stringify({ name: "discord", main: "index.js" }),
     );
     diskFs.writeFileSync(path.join(asar, "golivebypass.js"), bypassCode);
+    // O modo de rede e a porta do Tor embutido vao junto: o bypass le routeMode e torAddr.
+    // No modo tor o campo proxy fica vazio (a saida e o Tor, nao um proxy manual).
     diskFs.writeFileSync(
       path.join(asar, "settings.json"),
-      JSON.stringify({ enabled: true, proxy: proxyAddress }),
+      JSON.stringify({
+        enabled: true,
+        proxy: proxyAddress,
+        routeMode: readNetMode(),
+        torAddr: `127.0.0.1:${TOR_PORTA}`,
+      }),
     );
     diskFs.writeFileSync(
       path.join(asar, "index.js"),
@@ -750,6 +759,19 @@ async function activateBypass(event: any, proxyAddress: string = "") {
   // Salvo antes de mexer no Discord: mesmo que a injecao falhe, o que a pessoa digitou nao se
   // perde, e o campo continua preenchido na proxima abertura.
   saveProxy(proxyAddress);
+
+  // No modo Tor, garante o Tor embutido de pe ANTES de injetar: o bypass le a porta dele do
+  // settings.json, e a sessao nasce ja roteada (sem o risco de o gateway nascer direto).
+  const modo = readNetMode();
+  if (modo === "tor") {
+    const ok = await ensureTor();
+    if (!ok.ok) throw new Error(`Nao consegui preparar o Tor: ${ok.error ?? "erro desconhecido"}`);
+    const ativo = await torDisponivel();
+    if (!ativo) {
+      const subiu = await spawnTor();
+      if (!subiu) throw new Error("O Tor baixou mas nao completou o bootstrap. Tente de novo.");
+    }
+  }
 
   for (const install of installs) {
     assertDiscordSignature(install.bundlePath);
@@ -944,6 +966,181 @@ function readProxyFrom(file: string) {
   }
 }
 
+// =============================================================================== Tor embutido
+// O "modo Tor" da GUI pode funcionar sem o Tor instalado: baixa o daemon oficial do
+// Tor Project, extrai para a pasta do GoLiveBypass e sobe como processo filho.
+//
+// O asset com o daemon SOZINHO (sem o navegador inteiro) e o "expert bundle" — hospedado no
+// archive oficial (archive.torproject.org), versao "13.5", que foi a ultima serie a publicar
+// esse pacote (~31MB, com geoip e as libs compartilhadas do tor). O dist.torproject.org
+// atual (15.x/16.x) so publica o navegador inteiro (~137MB), pesado demais para isso.
+
+const TOR_BUNDLE = "13.5";
+const TOR_PORTA = 9060; // dedicada, para nao conflitar com um Tor do sistema (9050)
+
+function torDir() {
+  return path.join(settingsDir(), "tor");
+}
+
+function torExePath() {
+  // Estrutura do expert bundle: <dir>/tor/tor (tor.exe no Windows) + libs ao lado.
+  return process.platform === "win32"
+    ? path.join(torDir(), "tor", "tor.exe")
+    : path.join(torDir(), "tor", "tor");
+}
+
+function torAssetUrl(): string {
+  const base = "https://archive.torproject.org/tor-package-archive/torbrowser";
+  if (process.platform === "win32") {
+    return `${base}/${TOR_BUNDLE}/tor-expert-bundle-windows-x86_64-${TOR_BUNDLE}.tar.gz`;
+  }
+  if (process.platform === "darwin") {
+    const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+    return `${base}/${TOR_BUNDLE}/tor-expert-bundle-macos-${arch}-${TOR_BUNDLE}.tar.gz`;
+  }
+  return `${base}/${TOR_BUNDLE}/tor-expert-bundle-linux-x86_64-${TOR_BUNDLE}.tar.gz`;
+}
+
+// Estado do processo Tor embutido. A GUI sobe um Tor proprio quando o modo pede e nao ha
+// Tor do sistema; ele morre junto com o app (will-quit).
+let torProcess: ReturnType<typeof spawn> | null = null;
+
+// Sobe o Tor embutido (binario ja extraido) com config minima: SOCKS na porta dedicada,
+// DataDirectory proprio e os geoip que vem no pacote. O bootstrap e acompanhado pelo log;
+// o proxy fica pronto quando o Tor imprimir "Bootstrapped 100%".
+function spawnTor(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const exe = torExePath();
+    const dir = torDir();
+    if (!fs.existsSync(exe)) return resolve(false);
+
+    const dataDir = path.join(dir, "data-state");
+    fs.mkdirSync(dataDir, { recursive: true });
+
+    // Os geoip vieram do pacote; o tor quebra sem eles ao validar o pais da saida.
+    const geoip = path.join(dir, "data", "geoip");
+    const geoip6 = path.join(dir, "data", "geoip6");
+
+    // O torrc e gerado aqui: config minima para um relay de saida SOCKS no loopback.
+    const torrc = path.join(dir, "torrc");
+    fs.writeFileSync(
+      torrc,
+      `SocksPort ${TOR_PORTA}\n` +
+        `DataDirectory ${dataDir}\n` +
+        `GeoIPFile ${geoip}\n` +
+        `GeoIPv6File ${geoip6}\n` +
+        `Log notice stdout\n`,
+    );
+
+    // As libs (libevent/libssl/libcrypto) vieram empacotadas ao lado do binario; sem
+    // apontar para elas o tor nao acha libevent. No macOS o DYLD e meio limitado pelo SIP,
+    // mas vale tentar antes de exigir brew.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (process.platform === "linux") {
+      env.LD_LIBRARY_PATH = path.join(dir, "tor");
+    } else if (process.platform === "darwin") {
+      env.DYLD_LIBRARY_PATH = path.join(dir, "tor");
+    }
+
+    let bootstrapOk = false;
+    const proc = spawn(exe, ["-f", torrc], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+      windowsHide: true,
+    });
+
+    torProcess = proc;
+
+    const onData = (buf: Buffer) => {
+      const text = buf.toString();
+      if (text.includes("Bootstrapped 100%")) {
+        bootstrapOk = true;
+        // Nao resolve na hora: deixa o SOCKS ficar de pe por um instante.
+        setTimeout(() => resolve(true), 1500);
+      }
+      console.log("[tor]", text.trim().split("\n").slice(-1)[0]);
+    };
+    proc.stdout?.on("data", onData);
+    proc.stderr?.on("data", onData);
+    proc.on("error", (err) => {
+      console.error("[tor] erro ao subir:", err.message);
+      resolve(false);
+    });
+    proc.on("exit", (code) => {
+      torProcess = null;
+      if (!bootstrapOk) resolve(false);
+    });
+
+    // Se nao completar o bootstrap em 90s, desiste.
+    setTimeout(() => {
+      if (!bootstrapOk && torProcess === proc) resolve(false);
+    }, 90_000);
+  });
+}
+
+function stopTor() {
+  if (torProcess) {
+    try {
+      torProcess.kill();
+    } catch {
+      // ja morreu
+    }
+    torProcess = null;
+  }
+}
+
+// Baixa e extrai o Tor embutido, se preciso. Devolve true quando o binario existe.
+async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const exe = torExePath();
+    if (fs.existsSync(exe)) return { ok: true };
+
+    const dir = torDir();
+    fs.mkdirSync(dir, { recursive: true });
+
+    const url = torAssetUrl();
+    const destino = path.join(dir, "tor-expert-bundle.tar.gz");
+
+    // Baixa com fetch (Node 18+/Electron tem fetch nativo).
+    const res = await fetch(url);
+    if (!res.ok) {
+      return { ok: false, error: `falha no download (HTTP ${res.status})` };
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(destino, buf);
+
+    // Extrai e valida o resultado; se algo falhar, remove o lixo para nao deixar estado
+    // meio-extraido que confundiria o proximo ensureTor.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const p = spawn("tar", ["-xzf", destino, "-C", dir]);
+        p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error("tar falhou"))));
+        p.on("error", reject);
+      });
+
+      if (!fs.existsSync(exe) || !fs.existsSync(path.join(dir, "data", "geoip"))) {
+        throw new Error("binario ou geoip nao encontrados apos extrair");
+      }
+    } catch (error) {
+      fs.rmSync(path.join(dir, "tor"), { recursive: true, force: true });
+      fs.rmSync(path.join(dir, "data"), { recursive: true, force: true });
+      throw error;
+    }
+
+    fs.rmSync(destino, { force: true });
+
+    // Garante permissao de execucao (o tar pode nao trazer).
+    try {
+      fs.chmodSync(exe, 0o755);
+    } catch {
+      // windows: chmod nao aplica
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 // Guardado fora da pasta do Discord de proposito: o settings.json que o bypass le vive dentro do
 // app.asar injetado, e esse some quando o bypass e desativado ou quando o Discord se atualiza.
 // A copia daqui e a configuracao da pessoa, e sobrevive aos dois.
@@ -959,6 +1156,79 @@ function saveProxy(proxy: string) {
     console.error("[settings] nao consegui salvar a proxy:", error);
   }
 }
+
+// Modo de rede escolhido (persistido no settings.json junto da proxy): "auto" | "tor" | "free".
+// "auto" com proxy preenchida = personalizado (o bypass usa a proxy do campo). O PADRAO e
+// "tor": o app baixa e usa o Tor sempre, para nunca cair no IP brasileiro.
+function saveNetMode(mode: string) {
+  try {
+    const dir = settingsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...atual, routeMode: mode }, null, 4));
+  } catch (error) {
+    console.error("[settings] nao consegui salvar o modo de rede:", error);
+  }
+}
+
+function readNetMode(): string {
+  try {
+    const file = path.join(settingsDir(), "settings.json");
+    if (!fs.existsSync(file)) return "tor"; // padrao: Tor
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    const m = typeof data.routeMode === "string" ? data.routeMode : "";
+    // Sem nada salvo (instalacao nova), o padrao e Tor. "auto" sem proxy tambem vira Tor.
+    if (m === "tor" || m === "free") return m;
+    if (m === "auto") {
+      const proxy = typeof data.proxy === "string" ? data.proxy.trim() : "";
+      return proxy === "" ? "tor" : "auto";
+    }
+    return "tor";
+  } catch {
+    return "tor";
+  }
+}
+
+// Detecta Tor disponivel: o embutido (porta dedicada) ou um Tor do sistema (portas classicas).
+async function torDisponivel(): Promise<boolean> {
+  const portas = [TOR_PORTA, 9050, 9150, 9052, 9250];
+  for (const porta of portas) {
+    try {
+      const s = require("net").connect({ host: "127.0.0.1", port: porta });
+      const ok = await new Promise<boolean>((resolve) => {
+        s.setTimeout(400, () => resolve(false));
+        s.on("connect", () => resolve(true));
+        s.on("error", () => resolve(false));
+      });
+      s.destroy();
+      if (ok) return true;
+    } catch {
+      // proxima porta
+    }
+  }
+  return false;
+}
+
+// IPC do modo de rede + Tor embutido.
+ipcMain.handle("get-net-mode", () => readNetMode());
+ipcMain.handle("set-net-mode", (_event, mode: unknown) => {
+  // A UI manda "auto" para o modo Personalizado (o campo de proxy define a saida).
+  const m = typeof mode === "string" && ["auto", "tor", "free"].includes(mode) ? mode : "tor";
+  saveNetMode(m);
+  return m;
+});
+ipcMain.handle("get-tor-status", async () => {
+  const presente = fs.existsSync(torExePath());
+  const ativo = await torDisponivel();
+  return { presente, ativo, porta: TOR_PORTA };
+});
+ipcMain.handle("install-tor", async () => {
+  const r = await ensureTor();
+  if (!r.ok) return r;
+  const up = await spawnTor();
+  return up ? { ok: true } : { ok: false, error: "o Tor baixou mas nao subiu" };
+});
 
 ipcMain.handle("get-proxy", () => {
   const salva = readProxyFrom(path.join(settingsDir(), "settings.json"));

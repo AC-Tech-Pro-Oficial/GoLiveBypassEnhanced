@@ -128,19 +128,37 @@
           <span id="startupLabel">Iniciar com o Windows</span>
         </label>
 
-        <details class="advanced">
-          <summary>
-            <span>Avan&ccedil;ado: Proxy Customizada</span>
-            <span class="plus" aria-hidden="true">
-              <span class="plus-bar bar-v"></span>
-              <span class="plus-bar bar-h"></span>
-            </span>
-          </summary>
-          <div class="proxy-input-group">
-            <input type="text" id="proxyInput" placeholder="socks5://host:porta" spellcheck="false" />
-            <small>Deixe em branco para usar gratuitas.</small>
+        <div class="net-mode-group">
+          <div class="segmented" id="netModeSegmented" role="radiogroup" aria-label="Rede de saída">
+            <button type="button" class="seg-btn" data-mode="tor" role="radio" aria-checked="true">
+              <span class="seg-label">Tor</span>
+              <span class="seg-hint">sempre, baixa sozinho</span>
+            </button>
+            <button type="button" class="seg-btn" data-mode="free" role="radio" aria-checked="false">
+              <span class="seg-label">Gratuitas</span>
+              <span class="seg-hint">proxies da lista</span>
+            </button>
+            <button type="button" class="seg-btn" data-mode="manual" role="radio" aria-checked="false">
+              <span class="seg-label">Personalizado</span>
+              <span class="seg-hint">sua proxy</span>
+            </button>
           </div>
-        </details>
+          <small id="torStatus" class="tor-status">Verificando Tor...</small>
+
+          <div class="proxy-input-group" id="manualProxyGroup" hidden>
+            <div class="float-field">
+              <input
+                type="text"
+                id="proxyInput"
+                placeholder=" "
+                spellcheck="false"
+                autocomplete="off"
+              />
+              <label for="proxyInput">socks5://host:porta</label>
+            </div>
+            <small>Use socks5://usuario:senha@host:porta se a sua proxy pedir login.</small>
+          </div>
+        </div>
 
         <footer class="footer">
           <p class="disclaimer">
