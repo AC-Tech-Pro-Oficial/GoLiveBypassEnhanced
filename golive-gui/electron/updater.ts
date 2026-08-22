@@ -225,7 +225,17 @@ export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
     }
   }
 
-  // Mac/Linux: updater nativo (dmg/zip assinado, AppImage).
+  // macOS fica de fora por enquanto. O MacUpdater exige app assinado com Developer ID, e o
+  // certificado ainda nao existe (os secrets CSC_LINK/CSC_KEY_PASSWORD nao estao configurados).
+  // Sem assinatura ele detecta a versao nova, tenta baixar e falha: pior do que nao oferecer,
+  // porque a pessoa fica esperando uma atualizacao que nunca chega. Para religar, basta
+  // configurar os secrets (ver UPDATER.md) e apagar este bloco.
+  if (process.platform === "darwin") {
+    console.log("[updater] macOS: auto-update desligado ate o app ser assinado.");
+    return;
+  }
+
+  // Linux: updater nativo do AppImage, com download diferencial.
   if (process.platform !== "win32") {
     autoUpdater.autoDownload = true;
     autoUpdater.logger = console;

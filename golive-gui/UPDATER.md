@@ -10,7 +10,7 @@ testar — inclui o que é obrigatório para o auto-update funcionar em cada SO.
 |----|-----------|-----------|
 | Windows | Updater **portable** próprio (`electron/updater.ts`): consulta a release, baixa o `.exe` novo, substitui via `PORTABLE_EXECUTABLE_FILE` e reabre | Nenhum (não precisa assinar) |
 | Linux | `electron-updater` nativo (AppImageUpdater) com **download diferencial** (blockMap) | Nenhum |
-| macOS | `electron-updater` nativo (MacUpdater, dmg/zip) | **Obrigatório: app assinado** (sem assinatura o download falha) |
+| macOS | **desligado por enquanto** — ver abaixo | **Obrigatório: app assinado** (sem assinatura o download falha) |
 
 O `publish` está configurado em `golive-gui/package.json`:
 
@@ -35,6 +35,18 @@ O `publish` está configurado em `golive-gui/package.json`:
 
 > O `latest*.yml` é o metadata com checksum SHA-512 e o blockMap. **Sem ele na
 > release, o app detecta a versão nova mas não consegue baixar** (erro 404).
+
+## macOS: por que está desligado
+
+O `MacUpdater` recusa aplicar uma atualização se o app não estiver assinado com um certificado
+Developer ID, e esse certificado ainda não existe neste projeto. Deixar ligado seria pior do que
+desligar: o app detectaria a versão nova, tentaria baixar e falharia — a pessoa ficaria esperando
+uma atualização que nunca chega.
+
+O bloco que desliga está em `electron/updater.ts`, logo no começo do `setupUpdater`, e diz
+exatamente isso. Para religar: configure os secrets da seção abaixo e apague o bloco.
+
+Enquanto isso, quem usa macOS baixa a versão nova pela página de releases.
 
 ## Assinatura (macOS — obrigatória; Windows — opcional)
 
