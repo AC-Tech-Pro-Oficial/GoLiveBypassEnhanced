@@ -39,7 +39,7 @@
       "icon": "build/icon.ico"
     },
     "portable": {
-      "artifactName": "${productName}.${ext}"
+      "artifactName": "${productName}-${version}.${ext}"
     },
     "extraResources": [
       {
@@ -82,7 +82,7 @@
       ],
       "category": "Utility",
       "icon": "build/icon.png",
-      "artifactName": "${productName}.AppImage"
+      "artifactName": "${productName}-${version}.${ext}"
     }
   },
   "devDependencies": {

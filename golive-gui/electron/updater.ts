@@ -17,7 +17,9 @@ import { autoUpdater } from "electron-updater";
 import { request } from "https";
 
 const REPO = "bezumiya/GoLiveBypass";
-const EXE_NAME = "GoLiveBypass.exe";
+// O artifactName leva a versao (GoLiveBypass-1.1.5.exe): o AppImageLauncher e
+// outros integradores nao sobrescrevem o arquivo quando o nome muda por versao.
+const EXE_PREFIX = "GoLiveBypass-";
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // re-checa a cada 4h
 const RETRY_COUNT = 10; // o exe em uso no Windows recusa rename por um tempo
 const RETRY_DELAY_MS = 1000;
@@ -52,7 +54,8 @@ function githubLatestRelease(): Promise<{ tag: string; url: string } | null> {
           try {
             const data = JSON.parse(body);
             const asset = (data.assets || []).find(
-              (a: { name: string }) => a.name === EXE_NAME,
+              (a: { name: string }) =>
+                a.name.startsWith(EXE_PREFIX) && a.name.endsWith(".exe"),
             );
             if (!asset || !asset.browser_download_url) return resolve(null);
             resolve({ tag: String(data.tag_name), url: asset.browser_download_url });
@@ -139,17 +142,29 @@ async function updateWindowsPortable(url: string): Promise<boolean> {
   return true;
 }
 
+// O main process consulta esta flag no before-quit: quando o auto-update esta
+// aplicando, o quit nao pode ser segurado (senao o app antigo fica vivo e o
+// novo morre no lock de instancia unica — o "fecha mas nao abre").
+let quittingForUpdate = false;
+export function markQuittingForUpdate() {
+  quittingForUpdate = true;
+}
+export function isQuittingForUpdate() {
+  return quittingForUpdate;
+}
+
 // ------------------------------------------------------------------ API publica
 
 export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
   // Dev (npm run dev): o app roda fora do pacote, sem o app-update.yml embutido.
   // O electron-updater usa o dev-app-update.yml na raiz do projeto + esta flag.
-  if (!app.isPackaged) {
+  const isDev = !app.isPackaged;
+  if (isDev) {
     autoUpdater.forceDevUpdateConfig = true;
     // Em dev nao existe o runtime AppImage; sem este env o AppImageUpdater aborta
     // antes de baixar. Aponta para um AppImage buildado (so o caminho importa aqui).
     if (process.env.APPIMAGE === undefined) {
-      process.env.APPIMAGE = join(app.getAppPath(), "dist-app", "GoLiveBypass.AppImage");
+      process.env.APPIMAGE = join(app.getAppPath(), "dist-app", `GoLiveBypass-${app.getVersion()}.AppImage`);
     }
   }
 
@@ -175,7 +190,14 @@ export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
           })
         : 0;
 
-      if (choice === 0) autoUpdater.quitAndInstall();
+      // Em dev o quitAndInstall nao funciona: nao ha runtime AppImage montado,
+      // e o processo e gerenciado pelo vite — o arquivo ate e substituido, mas
+      // o app nao reinicia (e o arquivo some). O dev serve para verificar a
+      // notificacao; a instalacao real so vale no app empacotado.
+      if (choice === 0 && !isDev) {
+        markQuittingForUpdate();
+        autoUpdater.quitAndInstall();
+      }
     });
 
     autoUpdater.checkForUpdatesAndNotify().catch(() => {});
