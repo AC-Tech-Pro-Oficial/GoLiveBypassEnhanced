@@ -144,6 +144,46 @@ npm run publish:mac          # gera dmg/zip assinados + latest-mac.yml
 - `spctl -a -vv GoLiveBypass.dmg` deve passar (notarização ok)
 - O `latest-mac.yml` precisa estar na release junto do dmg/zip
 
+## Testes por distro Linux
+
+O AppImage roda em qualquer distro, mas o comportamento do auto-update varia
+com o ambiente. Validar em pelo menos uma de cada grupo:
+
+### Grupo A — sem AppImageLauncher (mais comum: Ubuntu, Fedora, Arch puros)
+
+O fluxo padrão do electron-updater funciona sem ajustes: o AppImage é
+substituído in-place e reexecutado.
+
+```bash
+# 1. Publica a release de teste (v1.1.5) no fork (ver seção anterior)
+# 2. Copia o AppImage antigo (v1.0.0) para um diretório e roda
+mkdir -p ~/teste-update && cp dist-app/GoLiveBypass-1.0.0.AppImage ~/teste-update/
+chmod +x ~/teste-update/GoLiveBypass-1.0.0.AppImage
+~/teste-update/GoLiveBypass-1.0.0.AppImage
+# 3. Confirma: detecta -> baixa -> dialogo -> antigo morre -> novo abre
+#    (o arquivo em ~/teste-update agora tem o tamanho/versao da 1.1.5)
+```
+
+### Grupo B — com AppImageLauncher (KDE neon, Kubuntu, alguns Arch)
+
+O launcher intercepta AppImages e os renomeia com hash ao integrar
+(`GoLiveBypass-1.1.5_<hash>.AppImage`). O fluxo funciona, mas:
+
+- O arquivo atualizado aparece com nome `GoLiveBypass-1.1.5_<hash>` em
+  `~/Applications/` — **não** sobrescreve o antigo
+- O app antigo deve **morrer** (o `markQuittingForUpdate` garante) e o novo
+  abre integrado
+
+**Teste**: rodar o AppImage antigo de `~/Applications/` (integrado), atualizar,
+e conferir que o processo antigo sumiu (`pgrep -af golive-gui`) e o novo subiu.
+
+### Grupo C — sandbox/flatpak ou AppImage lido de mount temporário
+
+Se o AppImage for montado de um path temporário (ex.: teste extraído com
+`--appimage-extract`), o `APPIMAGE` env aponta para um arquivo que o updater
+não consegue substituir de forma estável. **Não é um cenário de produção** —
+use o AppImage inteiro (grupo A/B).
+
 ## Solução de problemas
 
 | Sintoma | Causa provável |
@@ -153,3 +193,5 @@ npm run publish:mac          # gera dmg/zip assinados + latest-mac.yml
 | `Update for version X is not available` | A release tem a **mesma versão** do app rodando — suba a versão no package.json |
 | macOS: download falha/instalação falha | App sem assinatura — configure `CSC_LINK`/`CSC_KEY_PASSWORD`/`APPLE_*` |
 | `downgrade is disallowed` | A release é mais antiga que a versão local — publique uma versão maior |
+| App fecha mas não abre após atualizar | App antigo segurando o lock de instância única — o `before-quit` não deve adiar o quit durante o update (o `markQuittingForUpdate` cuida disso; confira se o build tem esse fix) |
+| AppImageLauncher renomeia o arquivo com hash | Esperado: o nome versionado (`GoLiveBypass-1.1.5_<hash>`) evita sobrescrever o antigo; o app novo abre integrado |
