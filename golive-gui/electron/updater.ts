@@ -142,6 +142,17 @@ async function updateWindowsPortable(url: string): Promise<boolean> {
 // ------------------------------------------------------------------ API publica
 
 export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
+  // Dev (npm run dev): o app roda fora do pacote, sem o app-update.yml embutido.
+  // O electron-updater usa o dev-app-update.yml na raiz do projeto + esta flag.
+  if (!app.isPackaged) {
+    autoUpdater.forceDevUpdateConfig = true;
+    // Em dev nao existe o runtime AppImage; sem este env o AppImageUpdater aborta
+    // antes de baixar. Aponta para um AppImage buildado (so o caminho importa aqui).
+    if (process.env.APPIMAGE === undefined) {
+      process.env.APPIMAGE = join(app.getAppPath(), "dist-app", "GoLiveBypass.AppImage");
+    }
+  }
+
   // Mac/Linux: updater nativo (dmg/zip assinado, AppImage).
   if (process.platform !== "win32") {
     autoUpdater.autoDownload = true;

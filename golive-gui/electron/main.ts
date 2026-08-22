@@ -262,7 +262,11 @@ function refreshWindowStatus() {
 }
 
 function showWindow() {
-  if (mainWindow) {
+  // Durante o encerramento (quit, auto-update reexecutando) nao faz sentido
+  // mostrar janela: o mainWindow/tray podem ja estar destruidos, e acessar
+  // objetos destruidos derruba o app com "Object has been destroyed".
+  if (quitting) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
     mainWindow.focus();
     // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
