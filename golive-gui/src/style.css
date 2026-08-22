@@ -816,6 +816,22 @@ kbd {
   opacity: 0.8;
 }
 
+/* Sublinhado discreto em vez de cor de link: o rodape e a parte mais apagada da janela, e um
+   azul aqui competiria com o botao de ativar, que e a unica coisa que a pessoa precisa achar. */
+.credits-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  transition: opacity 0.15s ease, text-decoration-color 0.15s ease;
+}
+
+.credits-link:hover,
+.credits-link:focus-visible {
+  opacity: 1;
+  text-decoration-color: currentColor;
+}
+
 /* ------------------------------------------------------------
    Acessibilidade: movimento reduzido
    ------------------------------------------------------------ */
