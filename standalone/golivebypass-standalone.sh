@@ -45,7 +45,9 @@ unset -f _local_probe 2>/dev/null || true
 PATCHER_NAME="golivebypass.js"
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass"
 STUB_PACKAGE='{"name":"discord","main":"index.js"}'
-FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary"
+# Clientes do Discord por flatpak: os oficiais e o Vesktop (o unico paralelo com flatpak
+# publicado no Flathub — Equibop e Legcord so distribuem por GitHub/deb/rpm/AppImage).
+FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary dev.vencord.Vesktop"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 MODE="install"
@@ -222,7 +224,7 @@ discord_dirs() {
 flatpak_app_id() {
     local parte
     for parte in $(printf '%s\n' "${1:-}" | tr '/' '\n'); do
-        case "$parte" in com.discordapp.*) printf '%s\n' "$parte"; return 0 ;; esac
+        case "$parte" in com.discordapp.*|dev.vencord.*) printf '%s\n' "$parte"; return 0 ;; esac
     done
     return 1
 }
@@ -352,7 +354,7 @@ discord_running() {
     if have flatpak; then
         local rodando
         rodando="$(flatpak ps --columns=application 2>/dev/null || true)"
-        case "$rodando" in *com.discordapp.*) return 0 ;; esac
+        case "$rodando" in *com.discordapp.*|*dev.vencord.Vesktop*) return 0 ;; esac
     fi
     return 1
 }
