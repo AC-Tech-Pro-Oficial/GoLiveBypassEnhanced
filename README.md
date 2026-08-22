@@ -11,7 +11,7 @@ Por dentro, só o WebSocket de gateway do Discord passa por uma proxy fora do Br
 Criamos um aplicativo completo que faz todo o trabalho de forma **100% automática**, sem precisar abrir terminais, usar scripts ou instalar modificações complexas como o Equicord.
 
 <p align="center">
-  <img src="golive-gui/src/assets/hero2.png" alt="Screenshot da Interface Gráfica" width="400">
+  <img src="golive-gui/src/assets/hero-ui.png" alt="A interface do GoLiveBypass: status do Discord, botao de ativar, tema claro e escuro e proxy customizada" width="420">
 </p>
 
 ### Como Baixar e Instalar
@@ -37,7 +37,7 @@ Dois avisos do sistema, e nenhum dos dois é o GoLiveBypass “quebrado”.
 
 ### Como Usar
 1. O aplicativo vai detectar o seu Discord automaticamente (no Mac, em `/Applications` ou `~/Applications`, inclusive PTB e Canary).
-2. Clique no botão azul **"Ativar GoLiveBypass"**.
+2. Clique em **"Ativar Bypass"**.
 3. O Discord vai reiniciar automaticamente com o Go Live desbloqueado!
 4. Pode fechar a janela sem medo: o app fica na **bandeja** do Windows (junto do relógio) ou na **barra de menus** do Mac. Clique no ícone de lá para reabrir, ativar/desativar ou **Sair** — sair por esse ícone é o que reverte tudo ao normal.
 5. Se quiser que ele já abra com o PC (direto escondido, sem janela pulando na tela), marque **"Iniciar com o Windows"** ou **"Iniciar com o Mac"** na janela ou no menu do ícone.
@@ -68,7 +68,7 @@ chmod +x GoLiveBypass-*.AppImage
 
 ### Como Usar
 1. O aplicativo detecta o seu Discord automaticamente (nativo ou flatpak).
-2. Clique em **"Ativar GoLiveBypass"** — o Discord fecha, o bypass entra e ele reabre.
+2. Clique em **"Ativar Bypass"** — o Discord fecha, o bypass entra e ele reabre.
 3. Fechar a janela só a esconde na bandeja (o app continua vivo); para reverter o bypass de verdade, use o **Sair** no menu do ícone da bandeja.
 
 > **Nota:** se o seu Discord é flatpak do sistema, a primeira ativação pode pedir sua senha (via `pkexec`) para liberar a pasta do bypass para o sandbox.
