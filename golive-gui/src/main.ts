@@ -11,6 +11,10 @@ declare global {
       getPlatform: () => Promise<string>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
+      getNetMode: () => Promise<string>;
+      setNetMode: (mode: string) => Promise<string>;
+      getTorStatus: () => Promise<{ presente: boolean; ativo: boolean; porta: number }>;
+      installTor: () => Promise<{ ok: boolean; porta?: number; error?: string }>;
       onRefreshStartup: (callback: () => void) => void;
       onRefreshStatus: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
@@ -173,6 +177,9 @@ async function updateStatus() {
     statusTag.classList.add('tag--danger');
     statusCard.hidden = false;
   }
+  // O updateStatus acabou de reabilitar o botao; se o modo e Tor e o daemon nao esta de pe,
+  // a trava tem que valer por cima -- senao dava para injetar e ficar sem conectar.
+  aplicarTravaDoTor();
   // Depois de mudar o estado, ajusta a janela ao novo tamanho do conteudo.
   fitWindowToContent();
 }
@@ -196,6 +203,9 @@ toggleBtn.addEventListener('click', async () => {
   }
 
   await updateStatus();
+  // O Tor sobe durante a ativacao, entao o texto lido na abertura da janela ja nasceu velho:
+  // ficava em "aguardando ativacao" com o Tor de pe e o bypass funcionando.
+  refreshTorStatus();
 });
 
 // Inicialização
@@ -204,6 +214,11 @@ initTheme();
 updateStatus();
 refreshStartup();
 refreshProxy();
+refreshNetMode();
+refreshTorStatus();
+// O Tor pode subir depois (durante a ativacao) ou cair no meio; sem reconferir, o texto
+// congela no que era verdade quando a janela abriu. A checagem custa um connect no loopback.
+setInterval(refreshTorStatus, 5000);
 fitWindowToContent();
 
 async function refreshStartup() {
@@ -222,6 +237,121 @@ async function refreshProxy() {
   } catch (err) {
     console.error(err);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Rede de saida: tres modos segmentados (Tor / Gratuitas / Personalizado).
+// O padrao e TOR (o app instala e usa o Tor sempre). O campo de proxy so aparece
+// no modo Personalizado.
+// ---------------------------------------------------------------------------
+const segBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.seg-btn'));
+const torStatusEl = document.getElementById('torStatus') as HTMLElement;
+const manualProxyGroup = document.getElementById('manualProxyGroup') as HTMLElement;
+
+// O modo escolhido e se o Tor ja foi verificado: juntos decidem se o botao de ativar pode ser
+// liberado. Injetar em modo Tor sem o daemon de pe deixa o Discord sem conectar -- o bypass
+// segura o gateway em vez de vazar pelo IP brasileiro, entao o Discord fica sem rede nenhuma.
+let modoAtual = 'tor';
+let torPronto = false;
+
+// Libera ou trava o botao conforme o Tor. Fora do modo Tor nao ha o que travar; o resto do
+// estado (Discord ausente, etc.) continua mandando no updateStatus.
+function aplicarTravaDoTor() {
+  if (currentState === 'NOT_FOUND') return;
+  if (modoAtual !== 'tor' || currentState === 'ACTIVE') return;
+
+  if (torPronto) {
+    toggleBtn.disabled = false;
+    btnText.innerText = currentState === 'OTHER_MOD' ? 'Sobrescrever e Ativar' : 'Ativar Bypass';
+    return;
+  }
+
+  toggleBtn.disabled = true;
+  btnText.innerText = 'Aguardando o Tor...';
+}
+
+function selectMode(mode: string) {
+  modoAtual = mode;
+  for (const btn of segBtns) {
+    const checked = btn.dataset.mode === mode;
+    btn.setAttribute('aria-checked', String(checked));
+    btn.classList.toggle('seg-btn--active', checked);
+  }
+  manualProxyGroup.hidden = mode !== 'manual';
+  fitWindowToContent();
+}
+
+async function refreshNetMode() {
+  try {
+    const saved = await window.api.getNetMode();
+    const proxy = await window.api.getProxy();
+    // Mapeia o estado salvo para a UI de 3 opcoes:
+    // - "free" -> Gratuitas (escolha explicita)
+    // - "auto" com proxy preenchida -> Personalizado
+    // - o resto ("tor", "auto" sem proxy, vazio) -> Tor, que e o padrao
+    if (saved === 'free') selectMode('free');
+    else if (saved === 'auto' && proxy) selectMode('manual');
+    else selectMode('tor');
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function refreshTorStatus() {
+  try {
+    const st = await window.api.getTorStatus();
+    torPronto = st.ativo;
+    if (st.ativo) {
+      torStatusEl.textContent = `Tor pronto (porta ${st.porta})`;
+      torStatusEl.classList.add('tor-status--ok');
+    } else if (st.presente) {
+      torStatusEl.textContent = 'Tor baixado, preparando... o botao libera quando ele subir.';
+      torStatusEl.classList.remove('tor-status--ok');
+    } else {
+      torStatusEl.textContent = 'Tor sera baixado automaticamente ao ativar.';
+      torStatusEl.classList.remove('tor-status--ok');
+    }
+  } catch (err) {
+    console.error(err);
+  }
+  // O botao depende disto: em modo Tor ele so libera com o daemon verificado.
+  aplicarTravaDoTor();
+}
+
+for (const btn of segBtns) {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.mode!;
+    selectMode(mode);
+
+    if (mode === 'tor') {
+      // Prepara o Tor (baixa/sobe) — o padrao. Nao espera: o status atualiza.
+      window.api.setNetMode('tor').catch(() => {});
+      // Trava o botao na hora: ate o Tor estar de pe, injetar so deixaria o Discord sem
+      // conectar. O refreshTorStatus (a cada 5s) libera quando ele subir.
+      torPronto = false;
+      aplicarTravaDoTor();
+      window.api.installTor().then((r) => {
+        torPronto = !!r.ok;
+        torStatusEl.textContent = r.ok
+          ? `Tor pronto (porta ${r.porta ?? 9060})`
+          : `${r.error ?? 'nao consegui preparar o Tor'}`;
+        torStatusEl.classList.toggle('tor-status--ok', !!r.ok);
+        aplicarTravaDoTor();
+      }).catch(() => {});
+      fitWindowToContent();
+    } else if (mode === 'free') {
+      window.api.setNetMode('free').catch(() => {});
+      // Fora do modo Tor nao ha o que esperar: devolve o botao.
+      aplicarTravaDoTor();
+      updateStatus();
+    } else {
+      // Personalizado: volta ao auto com a proxy do campo.
+      window.api.setNetMode('auto').catch(() => {});
+      aplicarTravaDoTor();
+      updateStatus();
+      fitWindowToContent();
+    }
+  });
 }
 
 startupToggle.addEventListener('change', async () => {

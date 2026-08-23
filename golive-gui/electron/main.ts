@@ -10,8 +10,9 @@ import {
 import path, { dirname } from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
-import { homedir } from "os";
+import { homedir, EOL } from "os";
 import fs from "fs";
+import { createHash } from "crypto";
 import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { bypassCode } from "./bypass";
 import { runScript } from "./linux-helper";
@@ -431,6 +432,20 @@ if (!gotLock) {
   app.on("second-instance", () => showWindow());
 
   app.whenReady().then(() => {
+    // Se o modo salvo e Tor, comeca a subir o daemon JA na abertura. Sem isto ha um impasse:
+    // o botao de ativar so libera com o Tor verificado, e o Tor so subia ao ativar ou ao
+    // clicar no seletor -- mas quem abre o app com Tor ja selecionado nao clica em nada, e
+    // ficava olhando "Aguardando o Tor..." com ninguem tentando. Vale para toda instalacao
+    // nova, porque Tor e o padrao. Roda solto: o garantirTor ja insiste sozinho se falhar, e
+    // a tela libera o botao quando ficar pronto.
+    if (readNetMode() === "tor") {
+      garantirTor()
+        .then((r) => {
+          if (!r.ok) console.warn("[tor] nao subiu na abertura:", r.error);
+        })
+        .catch((error) => console.error("[tor] falha ao preparar na abertura:", error));
+    }
+
     // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
     if (!launchedHidden()) createWindow();
     // No KDE o watcher da bandeja (StatusNotifier) pode demorar a subir no login; esperar
@@ -456,6 +471,8 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   quitting = true;
   cleaningUp = true;
+  // O Tor embutido morre junto com o app (e o Discord restaurado nao fica dependente dele).
+  stopTor();
   // Reversao em background: o runScript roda detached/unref, entao o filho sobrevive ao
   // app.quit() e o Discord nao fica com a injecao pendurada. Sem esperar: o "Sair" sai na
   // hora mesmo se o script demorar (fechar o Discord, flatpak, sudo...).
@@ -732,9 +749,16 @@ function writeInjection(asar: string, proxyAddress: string) {
       JSON.stringify({ name: "discord", main: "index.js" }),
     );
     diskFs.writeFileSync(path.join(asar, "golivebypass.js"), bypassCode);
+    // O modo de rede e a porta do Tor embutido vao junto: o bypass le routeMode e torAddr.
+    // No modo tor o campo proxy fica vazio (a saida e o Tor, nao um proxy manual).
     diskFs.writeFileSync(
       path.join(asar, "settings.json"),
-      JSON.stringify({ enabled: true, proxy: proxyAddress }),
+      JSON.stringify({
+        enabled: true,
+        proxy: proxyAddress,
+        routeMode: readNetMode(),
+        torAddr: `127.0.0.1:${torPortaEmUso}`,
+      }),
     );
     diskFs.writeFileSync(
       path.join(asar, "index.js"),
@@ -750,6 +774,17 @@ async function activateBypass(event: any, proxyAddress: string = "") {
   // Salvo antes de mexer no Discord: mesmo que a injecao falhe, o que a pessoa digitou nao se
   // perde, e o campo continua preenchido na proxima abertura.
   saveProxy(proxyAddress);
+
+  // No modo Tor, garante o Tor embutido de pe ANTES de injetar: o bypass le a porta dele do
+  // settings.json, e a sessao nasce ja roteada (sem o risco de o gateway nascer direto).
+  const modo = readNetMode();
+  if (modo === "tor") {
+    // Aproveita um Tor que ja exista nesta maquina (o nosso de uma sessao anterior, o servico
+    // do sistema, o Tor Browser) e so baixa quando nao ha nenhum. A porta encontrada e a que
+    // vai escrita no settings.json logo abaixo.
+    const tor = await garantirTor();
+    if (!tor.ok) throw new Error(`Nao consegui preparar o Tor: ${tor.error ?? "erro desconhecido"}`);
+  }
 
   for (const install of installs) {
     assertDiscordSignature(install.bundlePath);
@@ -784,6 +819,7 @@ async function activateBypass(event: any, proxyAddress: string = "") {
     clearBundleQuarantine(install.bundlePath);
     startDiscord(install);
   }
+
 }
 
 async function deactivateAll() {
@@ -815,6 +851,7 @@ async function deactivateAll() {
     clearBundleQuarantine(install.bundlePath);
     startDiscord(install);
   }
+
 }
 
 function getStatus(): string {
@@ -871,6 +908,19 @@ async function linuxActivate(
   proxyAddress: string,
   onChunk: (c: string) => void,
 ) {
+  // No Windows/macOS quem injeta e o processo principal, entao activateBypass reconfere o Tor
+  // e grava a porta certa antes de mexer no Discord. No Linux quem injeta e o script standalone,
+  // que so copia o torAddr que JA estava salvo -- sem isto, o botao podia estar "liberado" (o
+  // Tor da Electron provado numa porta) e o script ainda injetar apontando para a porta antiga,
+  // travando o gateway para sempre com a UI dizendo "Tor pronto". E sem reconferir aqui, nada
+  // impede a ativacao de proceder com o Tor fora do ar: so o botao da tela travava, e um clique
+  // fora da tela (ou uma corrida de estado) passava direto.
+  if (readNetMode() === "tor") {
+    const tor = await garantirTor();
+    if (!tor.ok) throw new Error(`Nao consegui preparar o Tor: ${tor.error ?? "erro desconhecido"}`);
+    saveTorAddr(`127.0.0.1:${tor.porta}`);
+  }
+
   const args = ["--yes"];
   if (proxyAddress.trim() !== "") args.push("--proxy", proxyAddress.trim());
   const { code, stderr } = await runScript(args, onChunk);
@@ -880,6 +930,7 @@ async function linuxActivate(
         "Falha ao ativar",
     );
   }
+
 }
 
 async function linuxDeactivate(onChunk: (c: string) => void) {
@@ -944,6 +995,494 @@ function readProxyFrom(file: string) {
   }
 }
 
+// =============================================================================== Tor embutido
+// O "modo Tor" da GUI pode funcionar sem o Tor instalado: baixa o daemon oficial do
+// Tor Project, extrai para a pasta do GoLiveBypass e sobe como processo filho.
+//
+// O asset com o daemon SOZINHO (sem o navegador inteiro) e o "expert bundle" — hospedado no
+// archive oficial (archive.torproject.org), versao "13.5", que foi a ultima serie a publicar
+// esse pacote (~31MB, com geoip e as libs compartilhadas do tor). O dist.torproject.org
+// atual (15.x/16.x) so publica o navegador inteiro (~137MB), pesado demais para isso.
+
+const TOR_BUNDLE = "13.5";
+const TOR_PORTA = 9060; // dedicada, para nao conflitar com um Tor do sistema (9050)
+
+function torDir() {
+  return path.join(settingsDir(), "tor");
+}
+
+function torExePath() {
+  // Estrutura do expert bundle: <dir>/tor/tor (tor.exe no Windows) + libs ao lado.
+  return process.platform === "win32"
+    ? path.join(torDir(), "tor", "tor.exe")
+    : path.join(torDir(), "tor", "tor");
+}
+
+// sha256 de cada pacote, do sha256sums-unsigned-build.txt publicado pelo Tor Project junto da
+// serie 13.5. A versao esta fixada, entao estes arquivos nao mudam mais e o hash pode morar
+// aqui. Sem esta conferencia o app baixava um .tar.gz, dava chmod +x e executava o que viesse:
+// bastaria o archive sair do ar e um certificado indevido para virar execucao de codigo em
+// quem usa o modo Tor. Ao trocar TOR_BUNDLE, troque os quatro hashes junto.
+const TOR_SHA256: Record<string, string> = {
+  "tor-expert-bundle-linux-x86_64-13.5.tar.gz":
+    "147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d",
+  "tor-expert-bundle-windows-x86_64-13.5.tar.gz":
+    "5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb",
+  "tor-expert-bundle-macos-aarch64-13.5.tar.gz":
+    "e18f749fbe6114c918735e950b28c1f476a5c9d8bf224f5ec26e6bffa1222d49",
+  "tor-expert-bundle-macos-x86_64-13.5.tar.gz":
+    "9e23c21a4e45dc45b599e723373530ef7cabef106367b43677a534fae099b10d",
+};
+
+// URL e hash saem juntos de proposito: separados, era facil trocar um e esquecer o outro.
+function torAsset(): { url: string; sha256: string | undefined; nome: string } {
+  const base = "https://archive.torproject.org/tor-package-archive/torbrowser";
+  let nome: string;
+  if (process.platform === "win32") {
+    nome = `tor-expert-bundle-windows-x86_64-${TOR_BUNDLE}.tar.gz`;
+  } else if (process.platform === "darwin") {
+    const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+    nome = `tor-expert-bundle-macos-${arch}-${TOR_BUNDLE}.tar.gz`;
+  } else {
+    nome = `tor-expert-bundle-linux-x86_64-${TOR_BUNDLE}.tar.gz`;
+  }
+  return { url: `${base}/${TOR_BUNDLE}/${nome}`, sha256: TOR_SHA256[nome], nome };
+}
+
+// Estado do processo Tor embutido. A GUI sobe um Tor proprio quando o modo pede e nao ha
+// Tor do sistema; ele morre junto com o app (will-quit).
+let torProcess: ReturnType<typeof spawn> | null = null;
+
+// Uma porta especifica esta atendendo? O torJaAtendendo varre a lista toda; este responde
+// sobre uma porta so, que e o que o spawnTor precisa saber antes de subir um daemon.
+function portaViva(porta: number, timeoutMs = 400): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = require("net").connect({ host: "127.0.0.1", port: porta });
+    const fim = (v: boolean) => {
+      s.destroy();
+      resolve(v);
+    };
+    s.setTimeout(timeoutMs, () => fim(false));
+    s.on("connect", () => fim(true));
+    s.on("error", () => fim(false));
+  });
+}
+
+// O host que o bypass realmente vai rotear. Testar contra ele e nao contra um site qualquer:
+// o que interessa e se o Tor abre ESTE caminho.
+const TOR_ALVO_HOST = "gateway.discord.gg";
+const TOR_ALVO_PORTA = 443;
+
+// O portaViva so prova que alguma coisa escuta ali. Isso nao basta para liberar o modo Tor:
+// um Tor a meio bootstrap aceita a conexao e recusa o CONNECT, e um servico qualquer na 9050
+// nem fala SOCKS. Aqui a pergunta e a que importa -- este proxy consegue ABRIR um tunel ate o
+// gateway do Discord? So com um sim o modo Tor entra em uso.
+function torEntregando(porta: number, timeoutMs = 20_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = require("net").connect({ host: "127.0.0.1", port: porta });
+    let etapa: "saudacao" | "conexao" = "saudacao";
+    let buf = Buffer.alloc(0);
+
+    const fim = (v: boolean) => {
+      s.removeAllListeners();
+      s.destroy();
+      resolve(v);
+    };
+
+    s.setTimeout(timeoutMs, () => fim(false));
+    s.on("error", () => fim(false));
+    // Uma saida que aceita e fecha limpo no meio nao gera erro: FIN nao e erro. Sem isto o
+    // retorno so viria quando o prazo estourasse.
+    s.on("close", () => fim(false));
+
+    s.on("connect", () => {
+      // SOCKS5, uma unica forma de autenticacao: nenhuma.
+      s.write(Buffer.from([0x05, 0x01, 0x00]));
+    });
+
+    s.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+
+      if (etapa === "saudacao") {
+        if (buf.length < 2) return;
+        // 0x05 0x00 = SOCKS5 e sem autenticacao. Qualquer outra coisa nao e um Tor utilizavel.
+        if (buf[0] !== 0x05 || buf[1] !== 0x00) return fim(false);
+
+        etapa = "conexao";
+        buf = buf.subarray(2);
+
+        const host = Buffer.from(TOR_ALVO_HOST, "utf8");
+        const pedido = Buffer.concat([
+          Buffer.from([0x05, 0x01, 0x00, 0x03, host.length]),
+          host,
+          Buffer.from([(TOR_ALVO_PORTA >> 8) & 0xff, TOR_ALVO_PORTA & 0xff]),
+        ]);
+        s.write(pedido);
+        return;
+      }
+
+      // Resposta do CONNECT: o segundo byte e o veredito, 0x00 = tunel aberto. Um Tor que
+      // ainda nao tem circuito responde aqui com falha, que e exatamente o caso que queremos
+      // pegar antes de dizer que o modo Tor esta pronto.
+      if (buf.length < 2) return;
+      fim(buf[0] === 0x05 && buf[1] === 0x00);
+    });
+  });
+}
+
+// Portas onde um Tor costuma atender, na ordem em que preferimos: a nossa primeiro, depois
+// o servico do sistema (9050) e o Tor Browser (9150). Se qualquer uma responde, ja existe um
+// Tor de pe nesta maquina e nao ha por que baixar nem subir outro.
+const TOR_PORTAS = [TOR_PORTA, 9050, 9150, 9250, 9052];
+
+// Porta do Tor que estamos realmente usando. Comeca na nossa e passa a ser a de um Tor ja
+// existente quando encontramos um -- e esta que vai escrita no settings.json que o bypass le.
+let torPortaEmUso = TOR_PORTA;
+// Ja confirmamos um tunel de verdade por esta porta? O status da janela usa isto: sem a
+// flag, so um connect TCP nao distingue Tor pronto de porta ocupada por outra coisa, e o
+// teste de tunel e caro demais para rodar a cada atualizacao da tela.
+let torVerificado = false;
+
+// Em duas etapas de proposito: o portaViva e barato (400ms) e descarta as portas fechadas
+// sem custo; so quem atende paga o teste do tunel, que e caro mas e o unico que prova que o
+// Tor esta utilizavel. Varrer as cinco portas com o teste caro levaria mais de um minuto.
+async function torJaAtendendo(): Promise<number | null> {
+  for (const porta of TOR_PORTAS) {
+    if (!(await portaViva(porta))) continue;
+    if (await torEntregando(porta)) return porta;
+    console.log(`[tor] a porta ${porta} atende mas nao abriu tunel; nao serve`);
+  }
+  return null;
+}
+
+// Um tor instalado no sistema (pacote da distro, brew, ou no PATH do Windows). Serve para
+// subir sem baixar nada: o binario ja esta ai, so nao esta rodando.
+function torDoSistema(): string | null {
+  const cmd = process.platform === "win32" ? "where" : "which";
+  try {
+    const out = execFileSync(cmd, ["tor"], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+    // EOL do modulo os: o where do Windows separa com CRLF e o which do Linux com LF.
+    const linha = out.split(EOL).map((l) => l.trim()).find((l) => l !== "");
+    return linha && fs.existsSync(linha) ? linha : null;
+  } catch {
+    return null;
+  }
+}
+
+// Deixa um Tor utilizavel de pe, na ordem mais barata possivel:
+//   1. ja ha um atendendo (nosso de uma sessao anterior, servico do sistema, Tor Browser)
+//   2. o nosso ja esta extraido -> so sobe
+//   3. ha um tor instalado no sistema -> sobe esse, sem baixar 22MB
+//   4. so entao baixa o pacote oficial
+// Devolve a porta em uso, para o settings.json apontar para o Tor certo.
+// Uma passada: usa o que ja existe, ou tenta subir, ou baixa. Sem repeticao -- quem repete e
+// o garantirTor.
+async function tentarTor(): Promise<{ ok: boolean; porta?: number; error?: string }> {
+  const atendendo = await torJaAtendendo();
+  if (atendendo !== null) {
+    torPortaEmUso = atendendo;
+    torVerificado = true;
+    console.log(`[tor] ja ha um Tor atendendo na porta ${atendendo} -- usando ele`);
+    return { ok: true, porta: atendendo };
+  }
+
+  if (fs.existsSync(torExePath()) && (await spawnTor())) {
+    torPortaEmUso = TOR_PORTA;
+    torVerificado = true;
+    return { ok: true, porta: TOR_PORTA };
+  }
+
+  const doSistema = torDoSistema();
+  if (doSistema !== null) {
+    console.log("[tor] usando o tor instalado no sistema:", doSistema);
+    if (await spawnTor(doSistema)) {
+      torPortaEmUso = TOR_PORTA;
+      torVerificado = true;
+      return { ok: true, porta: TOR_PORTA };
+    }
+  }
+
+  const baixado = await ensureTor();
+  if (!baixado.ok) return { ok: false, error: baixado.error };
+  if (await spawnTor()) {
+    torPortaEmUso = TOR_PORTA;
+    torVerificado = true;
+    return { ok: true, porta: TOR_PORTA };
+  }
+  return { ok: false, error: "o Tor nao completou o bootstrap" };
+}
+
+// Espera entre as tentativas, crescendo: um bootstrap que falhou por rede ruim costuma dar
+// certo logo depois, e insistir de segundo em segundo so gastaria banda e CPU.
+const TOR_ESPERAS_MS = [3_000, 8_000, 20_000];
+let torTentandoEmFundo = false;
+
+// Continua tentando depois que as tentativas imediatas falharam. Roda sozinho, sem segurar a
+// janela: o status da tela consulta a cada 5s e passa a "pronto" quando isto der certo.
+function tentarTorEmFundo() {
+  if (torTentandoEmFundo) return;
+  torTentandoEmFundo = true;
+
+  const proxima = async (espera: number) => {
+    await new Promise((r) => setTimeout(r, espera));
+
+    // A pessoa pode ter trocado de modo enquanto esperavamos; ai nao ha mais o que insistir.
+    if (readNetMode() !== "tor") {
+      torTentandoEmFundo = false;
+      return;
+    }
+
+    const r = await tentarTor();
+    if (r.ok) {
+      console.log(`[tor] subiu na tentativa em segundo plano (porta ${r.porta})`);
+      torTentandoEmFundo = false;
+      return;
+    }
+
+    console.warn("[tor] ainda nao subiu:", r.error, "-- tentando de novo");
+    // O ultimo intervalo se repete: a insistencia nao acaba, so espaca. Um Tor que so vai
+    // subir quando a internet voltar precisa que alguem continue tentando.
+    void proxima(TOR_ESPERAS_MS[TOR_ESPERAS_MS.length - 1]);
+  };
+
+  void proxima(TOR_ESPERAS_MS[TOR_ESPERAS_MS.length - 1]);
+}
+
+// Deixa um Tor utilizavel de pe. Tenta algumas vezes seguidas antes de desistir da chamada, e
+// mesmo desistindo deixa uma insistencia rodando em segundo plano -- falhar uma vez costuma
+// ser rede ruim ou um bootstrap que demorou, nao uma maquina onde o Tor nunca vai funcionar.
+async function garantirTor(): Promise<{ ok: boolean; porta?: number; error?: string }> {
+  let ultimo: { ok: boolean; porta?: number; error?: string } = {
+    ok: false,
+    error: "nao consegui preparar o Tor",
+  };
+
+  for (let i = 0; i < TOR_ESPERAS_MS.length; i++) {
+    ultimo = await tentarTor();
+    if (ultimo.ok) return ultimo;
+
+    const espera = TOR_ESPERAS_MS[i];
+    console.warn(
+      `[tor] tentativa ${i + 1} de ${TOR_ESPERAS_MS.length} falhou (${ultimo.error}); ` +
+        `nova tentativa em ${Math.round(espera / 1000)}s`,
+    );
+    await new Promise((r) => setTimeout(r, espera));
+  }
+
+  const derradeira = await tentarTor();
+  if (derradeira.ok) return derradeira;
+
+  tentarTorEmFundo();
+  return {
+    ok: false,
+    error: (derradeira.error ?? ultimo.error) + " (continuo tentando em segundo plano)",
+  };
+}
+
+
+async function spawnTor(binario?: string): Promise<boolean> {
+  // Um tor nosso pode ter sobrevivido a uma sessao anterior morta sem quit limpo: ele so morre
+  // no stopTor. Subir um segundo sempre falha -- a porta esta ocupada e o DataDirectory tem
+  // lock -- e o erro chegava na tela como "o Tor baixou mas nao subiu", com o tor.exe vivo no
+  // gerenciador de tarefas. Se a porta ja atende, o daemon que existe serve.
+  if ((await portaViva(TOR_PORTA)) && (await torEntregando(TOR_PORTA))) {
+    console.log("[tor] ja havia um Tor entregando na porta", TOR_PORTA, "-- reaproveitado");
+    return true;
+  }
+
+  return new Promise((resolve) => {
+    // Sem argumento e o nosso, baixado; com argumento e um tor do sistema, que sobe com o
+    // mesmo torrc e na mesma porta nossa.
+    const exe = binario ?? torExePath();
+    const dir = torDir();
+    if (!fs.existsSync(exe)) return resolve(false);
+
+    const dataDir = path.join(dir, "data-state");
+    fs.mkdirSync(dataDir, { recursive: true });
+
+    // Os geoip vieram do pacote; o tor quebra sem eles ao validar o pais da saida.
+    const geoip = path.join(dir, "data", "geoip");
+    const geoip6 = path.join(dir, "data", "geoip6");
+
+    // O torrc e gerado aqui: config minima para um relay de saida SOCKS no loopback.
+    const torrc = path.join(dir, "torrc");
+    fs.writeFileSync(
+      torrc,
+      `SocksPort ${TOR_PORTA}\n` +
+        `DataDirectory ${dataDir}\n` +
+        // Os geoip so entram se vieram no nosso pacote: um tor instalado no sistema traz os
+        // dele, e apontar para um caminho que nao existe faz o daemon recusar a config.
+        (fs.existsSync(geoip) && fs.existsSync(geoip6)
+          ? `GeoIPFile ${geoip}\nGeoIPv6File ${geoip6}\n`
+          : "") +
+        `Log notice stdout\n`,
+    );
+
+    // As libs (libevent/libssl/libcrypto) vieram empacotadas ao lado do binario; sem
+    // apontar para elas o tor nao acha libevent. No macOS o DYLD e meio limitado pelo SIP,
+    // mas vale tentar antes de exigir brew.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (process.platform === "linux") {
+      env.LD_LIBRARY_PATH = path.join(dir, "tor");
+    } else if (process.platform === "darwin") {
+      env.DYLD_LIBRARY_PATH = path.join(dir, "tor");
+    }
+
+    let bootstrapOk = false;
+    const proc = spawn(exe, ["-f", torrc], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+      windowsHide: true,
+    });
+
+    torProcess = proc;
+
+    const onData = (buf: Buffer) => {
+      const text = buf.toString();
+      if (text.includes("Bootstrapped 100%") && !bootstrapOk) {
+        bootstrapOk = true;
+        // O "Bootstrapped 100%" e o que o Tor ACHA de si mesmo; nao e prova de que o SOCKS ja
+        // aceita um CONNECT. Antes de dar o modo Tor como pronto, abrimos um tunel de verdade
+        // ate o gateway -- e so ele libera. Sem isto o bypass era ligado apontando para uma
+        // porta que ainda recusava conexao, e o Discord ficava sem conectar.
+        void (async () => {
+          for (let tentativa = 1; tentativa <= 3; tentativa++) {
+            if (await torEntregando(TOR_PORTA)) {
+              console.log("[tor] tunel confirmado ate o gateway; modo Tor liberado");
+              return resolve(true);
+            }
+            console.log(`[tor] bootstrap pronto mas o tunel ainda nao abriu (${tentativa}/3)`);
+          }
+          console.error("[tor] o Tor subiu mas nao abriu tunel ate o gateway");
+          resolve(false);
+        })();
+      }
+      console.log("[tor]", text.trim().split("\n").slice(-1)[0]);
+    };
+    proc.stdout?.on("data", onData);
+    proc.stderr?.on("data", onData);
+    proc.on("error", (err) => {
+      console.error("[tor] erro ao subir:", err.message);
+      resolve(false);
+    });
+    proc.on("exit", (code) => {
+      torProcess = null;
+      if (!bootstrapOk) resolve(false);
+    });
+
+    // Se nao completar o bootstrap em 90s, desiste.
+    setTimeout(() => {
+      if (!bootstrapOk && torProcess === proc) resolve(false);
+    }, 90_000);
+  });
+}
+
+function stopTor() {
+  if (torProcess) {
+    try {
+      torProcess.kill();
+    } catch {
+      // ja morreu
+    }
+    torProcess = null;
+    // O que estava verificado era este daemon; sem ele a tela nao pode dizer "pronto".
+    torVerificado = false;
+  }
+}
+
+// Baixa e extrai o Tor embutido, se preciso. Devolve true quando o binario existe.
+async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const exe = torExePath();
+    if (fs.existsSync(exe)) return { ok: true };
+
+    const dir = torDir();
+    fs.mkdirSync(dir, { recursive: true });
+
+    const { url, sha256, nome } = torAsset();
+    const destino = path.join(dir, "tor-expert-bundle.tar.gz");
+
+    // Sem hash conhecido nao ha o que conferir, e o que vem depois e um binario que este app
+    // executa. Melhor falhar e dizer o porque do que rodar as cegas.
+    if (sha256 === undefined) {
+      return { ok: false, error: `sem sha256 conhecido para ${nome}` };
+    }
+
+    // Baixa com fetch (Node 18+/Electron tem fetch nativo).
+    const res = await fetch(url);
+    if (!res.ok) {
+      return { ok: false, error: `falha no download (HTTP ${res.status})` };
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+
+    // Conferido ANTES de gravar e extrair: o que sai daqui recebe permissao de execucao e sobe
+    // como processo filho, entao este e o unico ponto em que ainda da para recusar.
+    const obtido = createHash("sha256").update(buf).digest("hex");
+    if (obtido !== sha256) {
+      return {
+        ok: false,
+        error: `o pacote do Tor nao confere (esperado ${sha256}, obtido ${obtido})`,
+      };
+    }
+
+    fs.writeFileSync(destino, buf);
+
+    // Deixa de fora o que o modo Tor nao usa, e leva o resto INTEIRO.
+    //
+    // Fora: os pluggable transports (lyrebird, snowflake, conjure), que nada aqui chama -- o
+    // torrc gerado nao tem bridge nenhuma -- e que sao justamente os que o Windows Defender
+    // poe em quarentena como HackTool/Tor. Com eles no meio, o tar terminava com codigo != 0
+    // por nao conseguir grava-los e a limpeza ainda mascarava o motivo com um EPERM. Fora
+    // tambem o debug/, que e uma copia com simbolos e so ocupa espaco.
+    //
+    // Dentro: tudo o que sobra de data/ e tor/. Listar os membros um a um (o que eu fiz antes)
+    // funcionava no Windows, onde o tor.exe e autossuficiente, mas quebrava no Linux e no
+    // macOS: ali o pacote traz libcrypto/libssl/libevent/libstdc++ ao lado do binario, e sem
+    // elas o daemon nao sobe -- exatamente o "o Tor baixou mas nao subiu".
+    const filtros = ["--exclude", "tor/pluggable_transports/*", "--exclude", "debug/*"];
+
+    try {
+      const code = await new Promise<number | null>((resolve, reject) => {
+        const p = spawn("tar", ["-xzf", destino, "-C", dir, ...filtros, "data", "tor"]);
+        p.on("exit", resolve);
+        p.on("error", reject);
+      });
+
+      // Vale o que chegou no disco, nao o codigo de saida: um antivirus que remova um arquivo
+      // extra faz o tar reclamar sem que falte nada do que importa.
+      if (!fs.existsSync(exe) || !fs.existsSync(path.join(dir, "data", "geoip"))) {
+        throw new Error(
+          code === 0
+            ? "binario ou geoip nao encontrados apos extrair"
+            : `a extracao falhou (tar saiu com ${code}) -- um antivirus pode ter bloqueado o tor`,
+        );
+      }
+    } catch (error) {
+      // A limpeza nao pode mascarar o erro de verdade: o EPERM dela era o que a pessoa via,
+      // no lugar do motivo real.
+      try {
+        fs.rmSync(path.join(dir, "tor"), { recursive: true, force: true });
+        fs.rmSync(path.join(dir, "data"), { recursive: true, force: true });
+      } catch {
+        // arquivo presos pelo antivirus; o proximo ensureTor tenta de novo
+      }
+      throw error;
+    }
+
+    fs.rmSync(destino, { force: true });
+
+    // Garante permissao de execucao (o tar pode nao trazer).
+    try {
+      fs.chmodSync(exe, 0o755);
+    } catch {
+      // windows: chmod nao aplica
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 // Guardado fora da pasta do Discord de proposito: o settings.json que o bypass le vive dentro do
 // app.asar injetado, e esse some quando o bypass e desativado ou quando o Discord se atualiza.
 // A copia daqui e a configuracao da pessoa, e sobrevive aos dois.
@@ -959,6 +1498,86 @@ function saveProxy(proxy: string) {
     console.error("[settings] nao consegui salvar a proxy:", error);
   }
 }
+
+// Porta do Tor que o script standalone (Linux) deve usar. So chamada depois de garantirTor()
+// confirmar um tunel de verdade -- sem isto, torAddr no settings.json real fica preso na porta
+// de uma sessao anterior e o gateway trava esperando uma saida que nao existe mais.
+function saveTorAddr(addr: string) {
+  try {
+    const dir = settingsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...atual, torAddr: addr }, null, 4));
+  } catch (error) {
+    console.error("[settings] nao consegui salvar o endereco do Tor:", error);
+  }
+}
+
+// Modo de rede escolhido (persistido no settings.json junto da proxy): "auto" | "tor" | "free".
+// "auto" com proxy preenchida = personalizado (o bypass usa a proxy do campo). O PADRAO e
+// "tor": o app baixa e usa o Tor sempre, para nunca cair no IP brasileiro.
+function saveNetMode(mode: string) {
+  try {
+    const dir = settingsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...atual, routeMode: mode }, null, 4));
+  } catch (error) {
+    console.error("[settings] nao consegui salvar o modo de rede:", error);
+  }
+}
+
+function readNetMode(): string {
+  try {
+    const file = path.join(settingsDir(), "settings.json");
+    // Padrao "tor". Saida gratuita e instavel por natureza -- morre no meio da sessao, tem RTT
+    // alto e obriga o pool a ficar trocando -- enquanto o Tor entrega uma rota que fica de pe.
+    // O custo aparece so na primeira vez (o pacote de 22MB e o bootstrap), e o modo agora so e
+    // liberado depois de um tunel provado, entao o Discord nao nasce apontando para uma porta
+    // que ainda nao serve.
+    if (!fs.existsSync(file)) return "tor";
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    const m = typeof data.routeMode === "string" ? data.routeMode : "";
+    if (m === "tor" || m === "free" || m === "auto") return m;
+    return "tor";
+  } catch {
+    return "tor";
+  }
+}
+
+// Detecta Tor disponivel: o embutido (porta dedicada) ou um Tor do sistema (portas classicas).
+
+// IPC do modo de rede + Tor embutido.
+ipcMain.handle("get-net-mode", () => readNetMode());
+ipcMain.handle("set-net-mode", (_event, mode: unknown) => {
+  // A UI manda "auto" para o modo Personalizado (o campo de proxy define a saida).
+  const m = typeof mode === "string" && ["auto", "tor", "free"].includes(mode) ? mode : "tor";
+  saveNetMode(m);
+  return m;
+});
+ipcMain.handle("get-tor-status", async () => {
+  // "Presente" cobre os dois casos em que nao ha nada a baixar: o nosso ja extraido e um tor
+  // instalado no sistema.
+  //
+  // "Ativo" se apoia na flag: o garantirTor so a liga depois de abrir um tunel de verdade,
+  // entao aqui basta confirmar que a porta continua atendendo -- 400ms. Repetir o teste de
+  // tunel a cada atualizacao da tela custaria segundos e travaria a janela.
+  const ativo = torVerificado && (await portaViva(torPortaEmUso));
+  return {
+    presente: fs.existsSync(torExePath()) || torDoSistema() !== null,
+    ativo,
+    porta: torPortaEmUso,
+  };
+});
+ipcMain.handle("install-tor", async () => {
+  // Nao baixa nada quando ja ha um Tor de pe ou instalado: o garantirTor tenta, nessa ordem,
+  // reaproveitar quem ja atende, subir o nosso ja extraido, subir o do sistema e, so entao,
+  // baixar o pacote oficial.
+  const r = await garantirTor();
+  return r.ok ? { ok: true, porta: r.porta } : { ok: false, error: r.error };
+});
 
 ipcMain.handle("get-proxy", () => {
   const salva = readProxyFrom(path.join(settingsDir(), "settings.json"));

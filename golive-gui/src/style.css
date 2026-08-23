@@ -197,7 +197,7 @@ html[data-theme='dark'] .page-ambient::before {
 .status-card,
 .toggle-btn,
 .switch-row,
-.advanced,
+.net-mode-group,
 .warning-alert,
 .footer {
   animation: rise 600ms var(--ease) backwards;
@@ -207,7 +207,7 @@ html[data-theme='dark'] .page-ambient::before {
 .status-card { animation-delay: 60ms; }
 .toggle-btn { animation-delay: 120ms; }
 .switch-row { animation-delay: 180ms; }
-.advanced { animation-delay: 240ms; }
+.net-mode-group { animation-delay: 240ms; }
 .warning-alert { animation-delay: 300ms; }
 .footer { animation-delay: 360ms; }
 
@@ -632,85 +632,88 @@ html[data-theme='dark'] .switch-row input:checked + .switch-track .switch-thumb 
   outline-offset: 2px;
 }
 
-/* ------------------------------------------------------------
-   Acordeão — sem caixa, apenas hairlines e "+"/"-"
-   ------------------------------------------------------------ */
-.advanced {
-  border-top: 1px solid var(--line);
-}
-
-.advanced summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  list-style: none;
-  padding: 12px 2px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-  cursor: pointer;
-  transition: color 200ms ease;
-}
-
-.advanced summary::-webkit-details-marker { display: none; }
-
-.advanced summary:hover { color: var(--ink); }
-
-.plus {
-  position: relative;
-  flex-shrink: 0;
-  width: 13px;
-  height: 13px;
-}
-
-.plus-bar {
-  position: absolute;
-  background: var(--muted);
-  transition: transform 250ms var(--ease), background 200ms ease;
-}
-
-.bar-h {
-  left: 0;
-  top: 5.5px;
-  width: 13px;
-  height: 2px;
-  border-radius: 1px;
-}
-
-.bar-v {
-  left: 5.5px;
-  top: 0;
-  width: 2px;
-  height: 13px;
-  border-radius: 1px;
-}
-
-.advanced[open] .bar-v {
-  transform: scaleY(0);
-}
-
-.advanced[open] .plus-bar {
-  background: var(--ink);
-}
-
-.advanced[open] {
-  border-bottom: 1px solid var(--line);
-}
-
-.proxy-input-group {
+/* ============================================================
+   Rede de saida — 3 modos segmentados, sempre visiveis
+   ============================================================ */
+.net-mode-group {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 2px 2px 16px;
+  gap: 10px;
+  padding: 14px 2px 16px;
 }
 
-.proxy-input-group input {
+.segmented {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+}
+
+.seg-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 6px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+
+.seg-btn:hover {
+  color: var(--ink);
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.seg-btn--active {
+  background: var(--ink);
+  color: var(--canvas);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme='dark'] .seg-btn--active {
+  background: var(--ink-strong);
+  color: #101014;
+}
+
+.seg-label {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.seg-hint {
+  font-size: 9px;
+  opacity: 0.7;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.tor-status {
+  font-size: 11px;
+  color: var(--faint);
+  min-height: 13px;
+}
+
+.tor-status--ok { color: #2e9e5b; }
+
+/* Campo de proxy com label flutuante (so no modo Personalizado) */
+.float-field {
+  position: relative;
+}
+
+.float-field input {
   width: 100%;
   background: var(--surface);
   border: 1px solid var(--line-strong);
   color: var(--ink);
-  padding: 10px 12px;
+  padding: 14px 12px 6px;
   border-radius: var(--r-sm);
   font-family: var(--mono);
   font-size: 12px;
@@ -718,14 +721,33 @@ html[data-theme='dark'] .switch-row input:checked + .switch-track .switch-thumb 
   transition: border-color 200ms ease, box-shadow 200ms ease;
 }
 
-.proxy-input-group input::placeholder { color: var(--faint); }
+.float-field label {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--faint);
+  font-size: 12px;
+  font-family: var(--mono);
+  pointer-events: none;
+  transition: top 160ms ease, font-size 160ms ease, color 160ms ease;
+}
 
-.proxy-input-group input:focus {
+.float-field input:focus + label,
+.float-field input:not(:placeholder-shown) + label {
+  top: 7px;
+  font-size: 9px;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.float-field input:focus {
   border-color: var(--ink-strong);
   box-shadow: 0 0 0 3px rgba(17, 17, 17, 0.06);
 }
 
-html[data-theme='dark'] .proxy-input-group input:focus {
+html[data-theme='dark'] .float-field input:focus {
   box-shadow: 0 0 0 3px rgba(245, 245, 247, 0.1);
 }
 
@@ -844,7 +866,7 @@ kbd {
   .status-card,
   .toggle-btn,
   .switch-row,
-  .advanced,
+  .net-mode-group,
   .warning-alert,
   .footer {
     animation: none;
