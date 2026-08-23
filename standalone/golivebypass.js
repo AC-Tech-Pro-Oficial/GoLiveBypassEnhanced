@@ -52,6 +52,10 @@ const TOR_PORT_TIMEOUT_MS = 400;
 // Quanto uma conexao de gateway espera por uma saida antes de sair direta. Segurar para sempre
 // travaria o login; soltar na hora perderia a corrida em toda abertura fria.
 const HOLD_BUDGET_MS = 12_000;
+// No modo "tor" o bootstrap do daemon leva ~20s numa maquina fria, e neste modo estourar o
+// prazo nao vira saida direta (o serveSocks recusa), entao esperar mais e barato: o custo e
+// o gateway demorar a conectar, nao vazar.
+const TOR_HOLD_BUDGET_MS = 45_000;
 // O pool guardado vale por este tempo. A revalidacao acontece na abertura (probe real em
 // cada saida), entao uma idade longa e segura: o que importa e ter candidatas para revalidar
 // em vez de baixar a lista inteira (lenta) com o gateway ja conectando. 30min fazia o pool
@@ -695,11 +699,30 @@ async function detectTor() {
         }
 
         const country = await exitCountry(proxy);
-        if (country !== null && !excludedCountries.has(country)) {
-            log("Tor encontrado na porta " + port + ", saida em " + country);
-            return proxy;
+
+        // Pais conhecido e na lista de excluidos: recusa, em qualquer modo.
+        if (country !== null && excludedCountries.has(country)) {
+            log("Tor na porta " + port + " recusado: saida em " + country);
+            continue;
         }
-        log("Tor na porta " + port + " recusado: saida em " + (country || "pais desconhecido"));
+
+        // Pais desconhecido no modo "tor" NAO e motivo para recusar. A Cloudflare marca saida
+        // de Tor como "T1", que nao e pais, e os servicos de geo costumam recusar consulta
+        // vinda de um exit de Tor -- entao exigir um pais faz o modo depender de um terceiro
+        // responder atraves do Tor. Era o que acontecia aqui: o tunel abria, o probe passava,
+        // e o Tor era recusado como "pais desconhecido"; com a guarda anti-vazamento o gateway
+        // ficava segurado e o Discord nao conectava, com o Tor funcionando do lado.
+        //
+        // A troca: em Tor deixamos de saber o pais da saida. Vale a pena, porque quem escolhe
+        // Tor esta pedindo exatamente uma saida que nao se identifica -- e a regra que importa,
+        // nao sair pelo IP brasileiro, o proprio Tor ja garante.
+        if (country === null && routeMode !== "tor") {
+            log("Tor na porta " + port + " recusado: saida em pais desconhecido");
+            continue;
+        }
+
+        log("Tor encontrado na porta " + port + ", saida em " + (country || "pais nao identificado (normal em Tor)"));
+        return proxy;
     }
 
     return null;
@@ -1009,6 +1032,11 @@ function currentExit() {
     if (exitSettled) return Promise.resolve(chosenExit);
 
     return new Promise(resolve => {
+        // No modo "tor" o prazo e maior: o bootstrap do Tor leva ~20s, bem mais que o orcamento
+        // pensado para uma saida gratuita, e estourar o prazo aqui nao devolve conexao direta
+        // (o serveSocks recusa neste modo) -- devolve so uma reconexao a toa do gateway.
+        const prazo = routeMode === "tor" ? TOR_HOLD_BUDGET_MS : HOLD_BUDGET_MS;
+
         const timer = setTimeout(() => {
             const index = waitingForExit.indexOf(deliver);
             if (index >= 0) waitingForExit.splice(index, 1);
@@ -1016,7 +1044,7 @@ function currentExit() {
                 ? "a saida nao ficou pronta a tempo; no modo tor a conexao sera recusada, nao direta"
                 : "a saida nao ficou pronta a tempo, esta conexao vai sair direta");
             resolve(null);
-        }, HOLD_BUDGET_MS);
+        }, prazo);
 
         const deliver = proxy => {
             clearTimeout(timer);
