@@ -1236,8 +1236,16 @@ ipcMain.handle("get-proxy", () => {
 
   // Quem ativou antes desta versao so tem o settings.json dentro do app.asar injetado. Ler de
   // la evita que a proxy configurada suma na atualizacao do app.
+  //
+  // withNoAsar e obrigatorio: com o suporte a asar ligado, o Electron ABRE o app.asar para
+  // resolver o caminho de dentro dele e guarda o descritor em cache pelo resto do processo.
+  // Como isto roda na abertura da janela, o handle ficava preso e a ativacao seguinte
+  // falhava com EBUSY ao renomear app.asar -> _app.asar. Com noAsar o caminho e tratado como
+  // pasta comum: se a injecao existe, le o arquivo; se e um asar de verdade, so nao acha.
   for (const install of getDiscordInstalls()) {
-    const doAsar = readProxyFrom(path.join(install.resources, "app.asar", "settings.json"));
+    const doAsar = withNoAsar(() =>
+      readProxyFrom(path.join(install.resources, "app.asar", "settings.json")),
+    );
     if (doAsar !== "") return doAsar;
   }
 
