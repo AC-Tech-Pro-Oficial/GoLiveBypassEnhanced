@@ -431,22 +431,36 @@ JSON
     ok "Configuracao gravada em $INSTALL_DIR/settings.json"
 }
 
+# Devolve 1 em qualquer falha, sem matar o script (set -eu mataria o processo inteiro se
+# fosse chamada sem guarda -- e com varios Discords paralelos numa mesma rodada, um so falhar
+# em elevar (dialogo do polkit recusado, sem TTY, disco cheio) nao pode levar os outros junto.
+# Cada passo desfaz o anterior antes de devolver, para a pasta sair como entrou.
 install_injection() {
     local resources="$1"
     local patcher="$INSTALL_DIR/$PATCHER_NAME"
 
-    as_root "$resources" mv "$resources/app.asar" "$resources/_app.asar"
+    if ! as_root "$resources" mv "$resources/app.asar" "$resources/_app.asar"; then
+        warn "Nao consegui mover o app.asar em $resources."
+        return 1
+    fi
 
     if ! as_root "$resources" mkdir -p "$resources/app.asar"; then
-        as_root "$resources" mv "$resources/_app.asar" "$resources/app.asar"
-        fail "Nao consegui criar a pasta de injecao."
+        as_root "$resources" mv "$resources/_app.asar" "$resources/app.asar" || true
+        warn "Nao consegui criar a pasta de injecao em $resources."
+        return 1
     fi
 
     local tmp
     tmp="$(mktemp -d)"
     printf '%s' "$STUB_PACKAGE" > "$tmp/package.json"
     printf 'require(%s);\n' "\"$patcher\"" > "$tmp/index.js"
-    as_root "$resources" cp "$tmp/package.json" "$tmp/index.js" "$resources/app.asar/"
+    if ! as_root "$resources" cp "$tmp/package.json" "$tmp/index.js" "$resources/app.asar/"; then
+        rm -rf "$tmp"
+        as_root "$resources" rm -rf "$resources/app.asar" || true
+        as_root "$resources" mv "$resources/_app.asar" "$resources/app.asar" || true
+        warn "Nao consegui copiar o carregador em $resources."
+        return 1
+    fi
     rm -rf "$tmp"
 }
 
@@ -560,7 +574,10 @@ printf '%s\n' "$FOUND" | while IFS= read -r resources; do
         continue
     fi
 
-    install_injection "$resources"
+    if ! install_injection "$resources"; then
+        warn "Pulei $resources -- os outros Discords encontrados continuam."
+        continue
+    fi
     ok "$resources pronto."
 done
 
