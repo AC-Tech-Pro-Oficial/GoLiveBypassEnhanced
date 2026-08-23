@@ -467,17 +467,58 @@ function readOverTls(socket, host, path, timeoutMs) {
     });
 }
 
+// So o aperto de mao TLS, sem pedir pagina nenhuma. Serve para hosts que nao respondem HTTP --
+// o gateway e websocket -- e ainda assim prova o que importa: a saida alcanca o host e o
+// certificado fecha, entao ela nao esta sendo barrada por reputacao ali.
+function tlsHandshake(socket, host, timeoutMs) {
+    return new Promise(resolve => {
+        let settled = false;
+
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            tls.destroy();
+            resolve(value);
+        };
+
+        const timer = setTimeout(() => finish(false), timeoutMs || PROBE_TIMEOUT_MS);
+        const tls = connectTls({ socket, servername: host, host }, () => finish(true));
+
+        tls.on("error", () => finish(false));
+        // Um host que aceita a conexao e fecha limpo antes do handshake nao gera erro: sem
+        // isto o retorno so viria quando o prazo estourasse.
+        tls.on("close", () => finish(false));
+    });
+}
+
 // Prova o que interessa numa saida: o tunel negocia, o TLS fecha com certificado valido para o
 // Discord, e o Discord responde 200 por ela. Saida barrada por reputacao falha exatamente aqui,
 // que e o motivo de o teste nao ser contra um endereco qualquer.
 async function probe(proxy, timeoutMs) {
     const started = Date.now();
 
-    const socket = await openTunnel(proxy, DISCORD_HOST, 443, timeoutMs);
+    // No modo "tor" o teste e feito contra o host que a saida REALMENTE vai carregar. O
+    // discord.com fica atras da Cloudflare, que recusa o handshake TLS vindo de exit de Tor
+    // ("tls alert handshake failure", medido em 2026-08-23) -- e o roteador nunca manda
+    // discord.com pela saida, so *.discord.gg. Ou seja: a saida era reprovada por um host que
+    // ela nunca ia atender, e o modo tor ficava preso em "porta aberta mas nao respondeu como
+    // proxy" com o Tor de pe e o gateway alcancavel (TLS ate gateway.discord.gg em ~600ms).
+    //
+    // Aqui a prova e o handshake TLS ate o gateway: o /api/v9/gateway nao existe nesse host
+    // (ele e websocket), entao exigir HTTP 200 nao faria sentido. Um exit que fecha TLS com o
+    // gateway entrega o que precisamos.
+    const host = routeMode === "tor" ? ROUTED_HOSTS[0] : DISCORD_HOST;
+
+    const socket = await openTunnel(proxy, host, 443, timeoutMs);
     if (socket === null) return null;
 
-    const response = await readOverTls(socket, DISCORD_HOST, "/api/v9/gateway", timeoutMs);
-    if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
+    if (routeMode === "tor") {
+        if (!await tlsHandshake(socket, host, timeoutMs)) return null;
+    } else {
+        const response = await readOverTls(socket, host, "/api/v9/gateway", timeoutMs);
+        if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
+    }
 
     const ms = Date.now() - started;
     // Alimenta a EMA de RTT da saida: a troca proativa por lentidao le desta leitura.
@@ -1022,6 +1063,37 @@ let ativaEntregouEm = 0;
 // seguranca e avisar: a pessoa decide se vale reiniciar (Ctrl+R sai da call) ou nao.
 let gatewayConnCount = 0;
 
+// Quando vimos um websocket de voz/video pela ultima vez. O aviso de reconexao so faz sentido
+// com chamada ou transmissao em andamento: fora disso a reconexao do gateway nao quebra nada
+// visivel, e avisar so assustaria -- ainda por cima sugerindo um Ctrl+R que derruba a call.
+let ultimaMidiaEm = 0;
+const MIDIA_RECENTE_MS = 5 * 60_000;
+
+// Um Ctrl+R (ou a nossa propria recarga) comeca uma sessao NOVA: o gateway que nascer depois
+// dela e o primeiro dela, nao uma reconexao no meio de nada. Sem zerar aqui, o aviso voltava
+// justamente para quem seguiu o conselho dele -- recarregou por causa do aviso e levou o mesmo
+// aviso de novo, agora sem motivo.
+function watchReloads() {
+    const electron = require("electron");
+    electron.app.on("browser-window-created", (_evento, win) => {
+        win.webContents.on("did-start-loading", () => {
+            // A URL ainda e a de antes quando a recarga comeca: se era a do cliente, isto e um
+            // reload de verdade, e nao a splash abrindo.
+            let url = "";
+            try {
+                url = win.webContents.getURL();
+            } catch {
+                return; // janela morrendo
+            }
+            if (!CLIENT_URL_RE.test(url)) return;
+            if (gatewayConnCount === 0) return;
+
+            log("a janela do Discord recarregou: contagem de reconexao zerada");
+            gatewayConnCount = 0;
+        });
+    });
+}
+
 function markGatewayRouted() {
     lastRoutedAt = Date.now();
     ativaEntregouEm = Date.now();
@@ -1030,8 +1102,10 @@ function markGatewayRouted() {
 
     gatewayConnCount++;
     if (gatewayConnCount > 1) {
-        log("gateway reconectou no meio da sessao (recorrencia " + (gatewayConnCount - 1) + "): avisando na tela");
-        showReconnectWarning(gatewayConnCount - 1);
+        const comMidia = Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS;
+        log("gateway reconectou no meio da sessao (recorrencia " + (gatewayConnCount - 1) + ")"
+            + (comMidia ? ": avisando na tela" : ", sem chamada em andamento: nao avisa"));
+        if (comMidia) showReconnectWarning(gatewayConnCount - 1);
     }
 }
 
@@ -1757,9 +1831,29 @@ async function start() {
     // gateway (reconexao) e contado numa janela. Rajada de reconexoes = a saida nao esta
     // aguentando o trafego vivo, mesmo passando no probe. Acima do limite, troca forcada
     // para a reserva mais rapida — o sinal mais confiavel que temos.
+    // Zera a contagem de reconexao quando a janela recarrega: dali em diante e sessao nova.
+    try {
+        watchReloads();
+    } catch (error) {
+        log("nao consegui observar as recargas da janela: " + error.message);
+    }
+
     // O callback e obrigatorio (sem ele a request pendura para sempre); nao modificamos nada.
     try {
         session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+            // Os websockets de voz/video moram em *.discord.media e nao passam pela saida (so
+            // o gateway passa). Servem aqui como sinal de que existe chamada ou transmissao
+            // em andamento -- e so nesse caso uma reconexao de gateway tem o que estragar.
+            if (details.resourceType === "webSocket") {
+                try {
+                    if (new URL(details.url).hostname.endsWith(".discord.media")) {
+                        ultimaMidiaEm = Date.now();
+                    }
+                } catch {
+                    // url estranha; ignora
+                }
+            }
+
             if (details.resourceType === "webSocket" && isRoutedHost(new URL(details.url).hostname)) {
                 const saidaInfo = chosenExit === null
                     ? "sem saida ainda"

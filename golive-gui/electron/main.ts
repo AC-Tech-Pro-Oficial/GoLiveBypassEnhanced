@@ -432,6 +432,20 @@ if (!gotLock) {
   app.on("second-instance", () => showWindow());
 
   app.whenReady().then(() => {
+    // Se o modo salvo e Tor, comeca a subir o daemon JA na abertura. Sem isto ha um impasse:
+    // o botao de ativar so libera com o Tor verificado, e o Tor so subia ao ativar ou ao
+    // clicar no seletor -- mas quem abre o app com Tor ja selecionado nao clica em nada, e
+    // ficava olhando "Aguardando o Tor..." com ninguem tentando. Vale para toda instalacao
+    // nova, porque Tor e o padrao. Roda solto: o garantirTor ja insiste sozinho se falhar, e
+    // a tela libera o botao quando ficar pronto.
+    if (readNetMode() === "tor") {
+      garantirTor()
+        .then((r) => {
+          if (!r.ok) console.warn("[tor] nao subiu na abertura:", r.error);
+        })
+        .catch((error) => console.error("[tor] falha ao preparar na abertura:", error));
+    }
+
     // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
     if (!launchedHidden()) createWindow();
     // No KDE o watcher da bandeja (StatusNotifier) pode demorar a subir no login; esperar
@@ -1148,7 +1162,9 @@ function torDoSistema(): string | null {
 //   3. ha um tor instalado no sistema -> sobe esse, sem baixar 22MB
 //   4. so entao baixa o pacote oficial
 // Devolve a porta em uso, para o settings.json apontar para o Tor certo.
-async function garantirTor(): Promise<{ ok: boolean; porta?: number; error?: string }> {
+// Uma passada: usa o que ja existe, ou tenta subir, ou baixa. Sem repeticao -- quem repete e
+// o garantirTor.
+async function tentarTor(): Promise<{ ok: boolean; porta?: number; error?: string }> {
   const atendendo = await torJaAtendendo();
   if (atendendo !== null) {
     torPortaEmUso = atendendo;
@@ -1168,6 +1184,7 @@ async function garantirTor(): Promise<{ ok: boolean; porta?: number; error?: str
     console.log("[tor] usando o tor instalado no sistema:", doSistema);
     if (await spawnTor(doSistema)) {
       torPortaEmUso = TOR_PORTA;
+      torVerificado = true;
       return { ok: true, porta: TOR_PORTA };
     }
   }
@@ -1179,8 +1196,76 @@ async function garantirTor(): Promise<{ ok: boolean; porta?: number; error?: str
     torVerificado = true;
     return { ok: true, porta: TOR_PORTA };
   }
-  return { ok: false, error: "o Tor baixou mas nao completou o bootstrap" };
+  return { ok: false, error: "o Tor nao completou o bootstrap" };
 }
+
+// Espera entre as tentativas, crescendo: um bootstrap que falhou por rede ruim costuma dar
+// certo logo depois, e insistir de segundo em segundo so gastaria banda e CPU.
+const TOR_ESPERAS_MS = [3_000, 8_000, 20_000];
+let torTentandoEmFundo = false;
+
+// Continua tentando depois que as tentativas imediatas falharam. Roda sozinho, sem segurar a
+// janela: o status da tela consulta a cada 5s e passa a "pronto" quando isto der certo.
+function tentarTorEmFundo() {
+  if (torTentandoEmFundo) return;
+  torTentandoEmFundo = true;
+
+  const proxima = async (espera: number) => {
+    await new Promise((r) => setTimeout(r, espera));
+
+    // A pessoa pode ter trocado de modo enquanto esperavamos; ai nao ha mais o que insistir.
+    if (readNetMode() !== "tor") {
+      torTentandoEmFundo = false;
+      return;
+    }
+
+    const r = await tentarTor();
+    if (r.ok) {
+      console.log(`[tor] subiu na tentativa em segundo plano (porta ${r.porta})`);
+      torTentandoEmFundo = false;
+      return;
+    }
+
+    console.warn("[tor] ainda nao subiu:", r.error, "-- tentando de novo");
+    // O ultimo intervalo se repete: a insistencia nao acaba, so espaca. Um Tor que so vai
+    // subir quando a internet voltar precisa que alguem continue tentando.
+    void proxima(TOR_ESPERAS_MS[TOR_ESPERAS_MS.length - 1]);
+  };
+
+  void proxima(TOR_ESPERAS_MS[TOR_ESPERAS_MS.length - 1]);
+}
+
+// Deixa um Tor utilizavel de pe. Tenta algumas vezes seguidas antes de desistir da chamada, e
+// mesmo desistindo deixa uma insistencia rodando em segundo plano -- falhar uma vez costuma
+// ser rede ruim ou um bootstrap que demorou, nao uma maquina onde o Tor nunca vai funcionar.
+async function garantirTor(): Promise<{ ok: boolean; porta?: number; error?: string }> {
+  let ultimo: { ok: boolean; porta?: number; error?: string } = {
+    ok: false,
+    error: "nao consegui preparar o Tor",
+  };
+
+  for (let i = 0; i < TOR_ESPERAS_MS.length; i++) {
+    ultimo = await tentarTor();
+    if (ultimo.ok) return ultimo;
+
+    const espera = TOR_ESPERAS_MS[i];
+    console.warn(
+      `[tor] tentativa ${i + 1} de ${TOR_ESPERAS_MS.length} falhou (${ultimo.error}); ` +
+        `nova tentativa em ${Math.round(espera / 1000)}s`,
+    );
+    await new Promise((r) => setTimeout(r, espera));
+  }
+
+  const derradeira = await tentarTor();
+  if (derradeira.ok) return derradeira;
+
+  tentarTorEmFundo();
+  return {
+    ok: false,
+    error: (derradeira.error ?? ultimo.error) + " (continuo tentando em segundo plano)",
+  };
+}
+
 
 async function spawnTor(binario?: string): Promise<boolean> {
   // Um tor nosso pode ter sobrevivido a uma sessao anterior morta sem quit limpo: ele so morre
@@ -1329,22 +1414,23 @@ async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
 
     fs.writeFileSync(destino, buf);
 
-    // Extrai SO o que o modo Tor usa: o daemon e os geoip. O pacote traz tambem os pluggable
-    // transports (lyrebird, snowflake, conjure) e o tor-gencert, que nada aqui chama -- o torrc
-    // gerado nao tem bridge nenhuma. E eles sao justamente os que o Windows Defender poe em
-    // quarentena como HackTool/Tor: o tar terminava com codigo != 0 por nao conseguir grava-los,
-    // o codigo concluia "tar falhou" e a limpeza ainda batia num EPERM (o antivirus segurando os
-    // arquivos), que era o erro que aparecia para a pessoa. Medido nesta maquina: dos 10 arquivos
-    // do pacote, so 3 sobreviviam -- e os 3 eram exatamente estes.
-    const membros = [
-      "data/geoip",
-      "data/geoip6",
-      process.platform === "win32" ? "tor/tor.exe" : "tor/tor",
-    ];
+    // Deixa de fora o que o modo Tor nao usa, e leva o resto INTEIRO.
+    //
+    // Fora: os pluggable transports (lyrebird, snowflake, conjure), que nada aqui chama -- o
+    // torrc gerado nao tem bridge nenhuma -- e que sao justamente os que o Windows Defender
+    // poe em quarentena como HackTool/Tor. Com eles no meio, o tar terminava com codigo != 0
+    // por nao conseguir grava-los e a limpeza ainda mascarava o motivo com um EPERM. Fora
+    // tambem o debug/, que e uma copia com simbolos e so ocupa espaco.
+    //
+    // Dentro: tudo o que sobra de data/ e tor/. Listar os membros um a um (o que eu fiz antes)
+    // funcionava no Windows, onde o tor.exe e autossuficiente, mas quebrava no Linux e no
+    // macOS: ali o pacote traz libcrypto/libssl/libevent/libstdc++ ao lado do binario, e sem
+    // elas o daemon nao sobe -- exatamente o "o Tor baixou mas nao subiu".
+    const filtros = ["--exclude", "tor/pluggable_transports/*", "--exclude", "debug/*"];
 
     try {
       const code = await new Promise<number | null>((resolve, reject) => {
-        const p = spawn("tar", ["-xzf", destino, "-C", dir, ...membros]);
+        const p = spawn("tar", ["-xzf", destino, "-C", dir, ...filtros, "data", "tor"]);
         p.on("exit", resolve);
         p.on("error", reject);
       });

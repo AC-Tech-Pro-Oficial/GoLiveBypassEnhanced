@@ -14,7 +14,7 @@ declare global {
       getNetMode: () => Promise<string>;
       setNetMode: (mode: string) => Promise<string>;
       getTorStatus: () => Promise<{ presente: boolean; ativo: boolean; porta: number }>;
-      installTor: () => Promise<{ ok: boolean; error?: string }>;
+      installTor: () => Promise<{ ok: boolean; porta?: number; error?: string }>;
       onRefreshStartup: (callback: () => void) => void;
       onRefreshStatus: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
@@ -177,6 +177,9 @@ async function updateStatus() {
     statusTag.classList.add('tag--danger');
     statusCard.hidden = false;
   }
+  // O updateStatus acabou de reabilitar o botao; se o modo e Tor e o daemon nao esta de pe,
+  // a trava tem que valer por cima -- senao dava para injetar e ficar sem conectar.
+  aplicarTravaDoTor();
   // Depois de mudar o estado, ajusta a janela ao novo tamanho do conteudo.
   fitWindowToContent();
 }
@@ -245,7 +248,30 @@ const segBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.seg-bt
 const torStatusEl = document.getElementById('torStatus') as HTMLElement;
 const manualProxyGroup = document.getElementById('manualProxyGroup') as HTMLElement;
 
+// O modo escolhido e se o Tor ja foi verificado: juntos decidem se o botao de ativar pode ser
+// liberado. Injetar em modo Tor sem o daemon de pe deixa o Discord sem conectar -- o bypass
+// segura o gateway em vez de vazar pelo IP brasileiro, entao o Discord fica sem rede nenhuma.
+let modoAtual = 'tor';
+let torPronto = false;
+
+// Libera ou trava o botao conforme o Tor. Fora do modo Tor nao ha o que travar; o resto do
+// estado (Discord ausente, etc.) continua mandando no updateStatus.
+function aplicarTravaDoTor() {
+  if (currentState === 'NOT_FOUND') return;
+  if (modoAtual !== 'tor' || currentState === 'ACTIVE') return;
+
+  if (torPronto) {
+    toggleBtn.disabled = false;
+    btnText.innerText = currentState === 'OTHER_MOD' ? 'Sobrescrever e Ativar' : 'Ativar Bypass';
+    return;
+  }
+
+  toggleBtn.disabled = true;
+  btnText.innerText = 'Aguardando o Tor...';
+}
+
 function selectMode(mode: string) {
+  modoAtual = mode;
   for (const btn of segBtns) {
     const checked = btn.dataset.mode === mode;
     btn.setAttribute('aria-checked', String(checked));
@@ -274,11 +300,12 @@ async function refreshNetMode() {
 async function refreshTorStatus() {
   try {
     const st = await window.api.getTorStatus();
+    torPronto = st.ativo;
     if (st.ativo) {
       torStatusEl.textContent = `Tor pronto (porta ${st.porta})`;
       torStatusEl.classList.add('tor-status--ok');
     } else if (st.presente) {
-      torStatusEl.textContent = 'Tor baixado, aguardando ativacao...';
+      torStatusEl.textContent = 'Tor baixado, preparando... o botao libera quando ele subir.';
       torStatusEl.classList.remove('tor-status--ok');
     } else {
       torStatusEl.textContent = 'Tor sera baixado automaticamente ao ativar.';
@@ -287,6 +314,8 @@ async function refreshTorStatus() {
   } catch (err) {
     console.error(err);
   }
+  // O botao depende disto: em modo Tor ele so libera com o daemon verificado.
+  aplicarTravaDoTor();
 }
 
 for (const btn of segBtns) {
@@ -297,16 +326,29 @@ for (const btn of segBtns) {
     if (mode === 'tor') {
       // Prepara o Tor (baixa/sobe) — o padrao. Nao espera: o status atualiza.
       window.api.setNetMode('tor').catch(() => {});
+      // Trava o botao na hora: ate o Tor estar de pe, injetar so deixaria o Discord sem
+      // conectar. O refreshTorStatus (a cada 5s) libera quando ele subir.
+      torPronto = false;
+      aplicarTravaDoTor();
       window.api.installTor().then((r) => {
-        torStatusEl.textContent = r.ok ? 'Tor pronto (porta 9060)' : `Erro ao preparar Tor: ${r.error ?? ''}`;
+        torPronto = !!r.ok;
+        torStatusEl.textContent = r.ok
+          ? `Tor pronto (porta ${r.porta ?? 9060})`
+          : `${r.error ?? 'nao consegui preparar o Tor'}`;
         torStatusEl.classList.toggle('tor-status--ok', !!r.ok);
+        aplicarTravaDoTor();
       }).catch(() => {});
       fitWindowToContent();
     } else if (mode === 'free') {
       window.api.setNetMode('free').catch(() => {});
+      // Fora do modo Tor nao ha o que esperar: devolve o botao.
+      aplicarTravaDoTor();
+      updateStatus();
     } else {
       // Personalizado: volta ao auto com a proxy do campo.
       window.api.setNetMode('auto').catch(() => {});
+      aplicarTravaDoTor();
+      updateStatus();
       fitWindowToContent();
     }
   });
