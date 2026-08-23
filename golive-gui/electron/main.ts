@@ -908,6 +908,19 @@ async function linuxActivate(
   proxyAddress: string,
   onChunk: (c: string) => void,
 ) {
+  // No Windows/macOS quem injeta e o processo principal, entao activateBypass reconfere o Tor
+  // e grava a porta certa antes de mexer no Discord. No Linux quem injeta e o script standalone,
+  // que so copia o torAddr que JA estava salvo -- sem isto, o botao podia estar "liberado" (o
+  // Tor da Electron provado numa porta) e o script ainda injetar apontando para a porta antiga,
+  // travando o gateway para sempre com a UI dizendo "Tor pronto". E sem reconferir aqui, nada
+  // impede a ativacao de proceder com o Tor fora do ar: so o botao da tela travava, e um clique
+  // fora da tela (ou uma corrida de estado) passava direto.
+  if (readNetMode() === "tor") {
+    const tor = await garantirTor();
+    if (!tor.ok) throw new Error(`Nao consegui preparar o Tor: ${tor.error ?? "erro desconhecido"}`);
+    saveTorAddr(`127.0.0.1:${tor.porta}`);
+  }
+
   const args = ["--yes"];
   if (proxyAddress.trim() !== "") args.push("--proxy", proxyAddress.trim());
   const { code, stderr } = await runScript(args, onChunk);
@@ -1483,6 +1496,21 @@ function saveProxy(proxy: string) {
     fs.writeFileSync(file, JSON.stringify({ ...atual, proxy }, null, 4));
   } catch (error) {
     console.error("[settings] nao consegui salvar a proxy:", error);
+  }
+}
+
+// Porta do Tor que o script standalone (Linux) deve usar. So chamada depois de garantirTor()
+// confirmar um tunel de verdade -- sem isto, torAddr no settings.json real fica preso na porta
+// de uma sessao anterior e o gateway trava esperando uma saida que nao existe mais.
+function saveTorAddr(addr: string) {
+  try {
+    const dir = settingsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...atual, torAddr: addr }, null, 4));
+  } catch (error) {
+    console.error("[settings] nao consegui salvar o endereco do Tor:", error);
   }
 }
 
