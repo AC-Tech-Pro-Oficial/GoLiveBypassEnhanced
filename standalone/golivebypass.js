@@ -146,7 +146,20 @@ const CLIENT_URL_RE = /^https:\/\/(?:canary|ptb\.)?discord\.com\/(?:app|channels
 const HERE = __dirname;
 const SETTINGS_FILE = join(HERE, "settings.json");
 const STATE_FILE = join(HERE, "state.json");
-const LOG_FILE = join(HERE, "golivebypass.log");
+
+// O log vai para uma pasta ESTAVEL, nao para HERE. Quando a GUI injeta, HERE e a pasta do
+// app.asar do Discord: um lugar que ninguem adivinha e que some quando o Discord se atualiza
+// ou o bypass e desativado. A pasta abaixo e a mesma que o app e o plugin usam (%LOCALAPPDATA%
+// \GoLiveBypass no Windows, $XDG_DATA_HOME/GoLiveBypass no Linux/Mac) -- e onde a pessoa
+// naturalmente procura, e um arquivo so, que sobrevive a atualizacao do Discord.
+function logDir() {
+    const base = process.platform === "win32"
+        ? process.env.LOCALAPPDATA
+        : (process.env.XDG_DATA_HOME
+            || (process.env.HOME ? join(process.env.HOME, ".local", "share") : undefined));
+    return base ? join(base, "GoLiveBypass") : null;
+}
+const LOG_FILE = logDir() === null ? null : join(logDir(), "golivebypass.log");
 
 let socksPort = 0;
 let chosenExit = null;
@@ -220,11 +233,14 @@ let reloading = false;         // single-flight
 
 function log(line) {
     const stamp = new Date().toTimeString().slice(0, 8);
-    try {
+    if (LOG_FILE !== null) try {
         // Sem comando de diagnostico aqui, o arquivo e a unica forma de saber o que aconteceu.
         // Ele e cortado sozinho para nao crescer sem fim numa maquina que ninguem limpa.
         if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > MAX_LOG_BYTES) {
             fs.writeFileSync(LOG_FILE, fs.readFileSync(LOG_FILE, "utf8").slice(-MAX_LOG_BYTES / 2));
+        } else if (!fs.existsSync(LOG_FILE)) {
+            // A pasta pode nao existir ainda (injecao numa maquina que nunca rodou o app).
+            fs.mkdirSync(dirname(LOG_FILE), { recursive: true });
         }
         fs.appendFileSync(LOG_FILE, stamp + " " + line + "\n");
     } catch {
