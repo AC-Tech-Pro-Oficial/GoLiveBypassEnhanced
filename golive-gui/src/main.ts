@@ -260,16 +260,12 @@ async function refreshNetMode() {
     const saved = await window.api.getNetMode();
     const proxy = await window.api.getProxy();
     // Mapeia o estado salvo para a UI de 3 opcoes:
-    // - "tor" -> Tor (so quando a pessoa escolheu; nunca por padrao)
+    // - "free" -> Gratuitas (escolha explicita)
     // - "auto" com proxy preenchida -> Personalizado
-    // - o resto ("auto" sem proxy, "free", vazio) -> Gratuitas
-    //
-    // "auto" caia em Tor aqui, o que anulava o padrao do processo principal: a pessoa abria o
-    // app pela primeira vez ja em modo Tor, com o download de 22MB e o Discord sem conectar
-    // ate o daemon subir. Tor e uma escolha, e a escolha fica salva.
-    if (saved === 'tor') selectMode('tor');
+    // - o resto ("tor", "auto" sem proxy, vazio) -> Tor, que e o padrao
+    if (saved === 'free') selectMode('free');
     else if (saved === 'auto' && proxy) selectMode('manual');
-    else selectMode('free');
+    else selectMode('tor');
   } catch (err) {
     console.error(err);
   }

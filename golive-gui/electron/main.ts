@@ -1418,18 +1418,18 @@ function saveNetMode(mode: string) {
 function readNetMode(): string {
   try {
     const file = path.join(settingsDir(), "settings.json");
-    // Padrao "auto": tenta o Tor do sistema e cai para as gratuitas. O modo "tor" e uma
-    // escolha explicita, e nao o padrao, porque ele muda o comportamento de forma que a
-    // pessoa precisa entender: o Discord fica sem conectar enquanto o Tor nao subir, o RTT
-    // e de 1s+ num websocket de tempo real, e o Discord costuma marcar IP de saida do Tor.
-    // Quem quiser, seleciona -- e a escolha fica salva.
-    if (!fs.existsSync(file)) return "auto";
+    // Padrao "tor". Saida gratuita e instavel por natureza -- morre no meio da sessao, tem RTT
+    // alto e obriga o pool a ficar trocando -- enquanto o Tor entrega uma rota que fica de pe.
+    // O custo aparece so na primeira vez (o pacote de 22MB e o bootstrap), e o modo agora so e
+    // liberado depois de um tunel provado, entao o Discord nao nasce apontando para uma porta
+    // que ainda nao serve.
+    if (!fs.existsSync(file)) return "tor";
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
     const m = typeof data.routeMode === "string" ? data.routeMode : "";
     if (m === "tor" || m === "free" || m === "auto") return m;
-    return "auto";
+    return "tor";
   } catch {
-    return "auto";
+    return "tor";
   }
 }
 
