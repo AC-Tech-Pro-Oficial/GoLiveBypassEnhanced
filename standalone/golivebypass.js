@@ -785,6 +785,11 @@ async function pickFreeExit() {
 }
 
 async function cachedExit() {
+    // No modo "tor" saida guardada nao vale nada: o cache so guarda gratuitas, e deixar
+    // ele vencer a escolha fazia o gateway NASCER por proxy gratuita com o Tor de pe
+    // (reprovado em teste: cache quente + routeMode tor -> "reaproveitando 3 de 3" e
+    // saida gratuita usada sem o Tor ser consultado).
+    if (routeMode === "tor") return null;
     const state = readJson(STATE_FILE, null);
     if (state === null || typeof state.at !== "number") return null;
     if (Date.now() - state.at > CACHE_MAX_AGE_MS) return null;
@@ -1007,7 +1012,9 @@ function currentExit() {
         const timer = setTimeout(() => {
             const index = waitingForExit.indexOf(deliver);
             if (index >= 0) waitingForExit.splice(index, 1);
-            log("a saida nao ficou pronta a tempo, esta conexao vai sair direta");
+            log(routeMode === "tor"
+                ? "a saida nao ficou pronta a tempo; no modo tor a conexao sera recusada, nao direta"
+                : "a saida nao ficou pronta a tempo, esta conexao vai sair direta");
             resolve(null);
         }, HOLD_BUDGET_MS);
 
@@ -1031,7 +1038,10 @@ function refreshExit() {
     lastRefreshAt = Date.now();
     refreshingExit = (async () => {
         log("nenhuma saida do pool entregou, procurando uma saida nova");
-        const fresh = await pickFreeExit();
+        // Modo "tor": a reposicao tambem SO considera o Tor — cair para gratuita aqui
+        // trocaria a garantia escolhida pelo usuario por um IP qualquer. Sem Tor no ar,
+        // devolve null e o gateway fica segurado ate o Tor voltar.
+        const fresh = routeMode === "tor" ? await detectTor() : await pickFreeExit();
         if (fresh !== null) {
             settleExit(fresh);
             log("saida nova encontrada: " + safeProxy(fresh));
@@ -1059,6 +1069,18 @@ async function beat() {
     beating = true;
 
     try {
+        // Modo "tor" sem saida ativa (arranque sem Tor, ou Tor morreu antes de qualquer
+        // escolha): re-tenta o Tor AQUI. Sem isto ninguem mais chamaria detectTor — os
+        // caminhos do batimento so rodam com uma saida ativa — e a sessao ficaria presa
+        // para sempre recusando conexoes mesmo depois de o Tor voltar.
+        if (routeMode === "tor" && chosenExit === null) {
+            const tor = await detectTor();
+            if (tor !== null) {
+                settleExit(tor);
+                log("modo tor: Tor respondeu de novo em " + TOR_ADDR + ", religando a rota");
+            }
+            return;
+        }
         await checkPool();
     } catch (error) {
         // Batimento e rede de seguranca. Se ele falhar, o caminho antigo continua valendo:
@@ -1411,6 +1433,15 @@ function serveSocks(client) {
             let upstream = await openThroughPool(target);
 
             if (upstream === null) {
+                // No modo "tor" a promessa e outra: sem Tor nenhuma sessao presta (o gateway
+                // nasceria pelo IP brasileiro e o video nunca viria). Recusar a conexao faz
+                // o cliente do gateway re-tentar com backoff; o batimento religa a rota assim
+                // que um Tor responder. Nao marca gatewayWentDirectAt: recusa nao e vazo.
+                if (routeMode === "tor") {
+                    log("modo tor: nenhuma saida entregou " + target.host + ", recusando esta conexao (sem vazo direta)");
+                    client.destroy();
+                    return;
+                }
                 // Recusar aqui prendia o Discord em "conectando" para sempre: o PAC nao tem
                 // alternativa depois do ponto e virgula, entao uma recusa nao vira conexao
                 // direta, vira nada. Sair direto custa o bypass desta conexao; recusar custa o
@@ -1671,8 +1702,16 @@ async function start() {
     }
 
     const exit = await chooseExit();
-    settleExit(exit);
-    log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + safeProxy(exit));
+    if (exit === null && routeMode === "tor") {
+        // Modo "tor": sem Tor no arranque NAO libera as conexoes pendentes para o direct.
+        // Elas ficam seguradas ate o prazo delas; o batimento continua e quando um Tor
+        // responder settleExit(tor) religa a rota. Vazar direto aqui renasceria o gateway
+        // pelo IP brasileiro — exatamente o carregamento infinito que o projeto combate.
+        log("modo tor: sem Tor no arranque, conexoes ficam seguradas ate um Tor responder");
+    } else {
+        settleExit(exit);
+        log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + safeProxy(exit));
+    }
 
     // So depois da primeira escolha: batimento correndo junto da busca inicial disputaria banda
     // com ela, e e a busca inicial que segura o gateway.
