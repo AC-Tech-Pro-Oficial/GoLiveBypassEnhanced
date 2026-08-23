@@ -534,10 +534,14 @@ ensure_toolchain() {
     # execucao: as chaves de assinatura embutidas estao velhas e o atalho morre com
     # "Cannot find matching keyid", ou fica esperando resposta no stdin. O </dev/null do
     # have_pnpm corta essa espera, mas o atalho continua no PATH atrapalhando a instalacao
-    # e o uso do pnpm de verdade. Desligar o corepack tira esse atalho do caminho.
-    if have corepack; then
-        step "Desligando o corepack"
-        corepack disable >/dev/null 2>&1 || true
+    # e o uso do pnpm de verdade. Desligar tira esse atalho do caminho.
+    #
+    # So mexemos nisso quando o pnpm nao esta funcionando: se o corepack ja entrega um pnpm
+    # que roda, desligar seria estragar a maquina de quem estava bem. E "disable pnpm", nao
+    # "disable" seco, que tambem levaria o atalho do yarn junto -- nao e nosso para desligar.
+    if ! have_pnpm && have corepack; then
+        step "Desligando o atalho quebrado do pnpm no corepack"
+        corepack disable pnpm >/dev/null 2>&1 || true
         hash -r 2>/dev/null || true
     fi
 

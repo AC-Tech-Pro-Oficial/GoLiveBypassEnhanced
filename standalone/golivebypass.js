@@ -52,6 +52,10 @@ const TOR_PORT_TIMEOUT_MS = 400;
 // Quanto uma conexao de gateway espera por uma saida antes de sair direta. Segurar para sempre
 // travaria o login; soltar na hora perderia a corrida em toda abertura fria.
 const HOLD_BUDGET_MS = 12_000;
+// No modo "tor" o bootstrap do daemon leva ~20s numa maquina fria, e neste modo estourar o
+// prazo nao vira saida direta (o serveSocks recusa), entao esperar mais e barato: o custo e
+// o gateway demorar a conectar, nao vazar.
+const TOR_HOLD_BUDGET_MS = 45_000;
 // O pool guardado vale por este tempo. A revalidacao acontece na abertura (probe real em
 // cada saida), entao uma idade longa e segura: o que importa e ter candidatas para revalidar
 // em vez de baixar a lista inteira (lenta) com o gateway ja conectando. 30min fazia o pool
@@ -142,7 +146,20 @@ const CLIENT_URL_RE = /^https:\/\/(?:canary|ptb\.)?discord\.com\/(?:app|channels
 const HERE = __dirname;
 const SETTINGS_FILE = join(HERE, "settings.json");
 const STATE_FILE = join(HERE, "state.json");
-const LOG_FILE = join(HERE, "golivebypass.log");
+
+// O log vai para uma pasta ESTAVEL, nao para HERE. Quando a GUI injeta, HERE e a pasta do
+// app.asar do Discord: um lugar que ninguem adivinha e que some quando o Discord se atualiza
+// ou o bypass e desativado. A pasta abaixo e a mesma que o app e o plugin usam (%LOCALAPPDATA%
+// \GoLiveBypass no Windows, $XDG_DATA_HOME/GoLiveBypass no Linux/Mac) -- e onde a pessoa
+// naturalmente procura, e um arquivo so, que sobrevive a atualizacao do Discord.
+function logDir() {
+    const base = process.platform === "win32"
+        ? process.env.LOCALAPPDATA
+        : (process.env.XDG_DATA_HOME
+            || (process.env.HOME ? join(process.env.HOME, ".local", "share") : undefined));
+    return base ? join(base, "GoLiveBypass") : null;
+}
+const LOG_FILE = logDir() === null ? null : join(logDir(), "golivebypass.log");
 
 let socksPort = 0;
 let chosenExit = null;
@@ -216,11 +233,14 @@ let reloading = false;         // single-flight
 
 function log(line) {
     const stamp = new Date().toTimeString().slice(0, 8);
-    try {
+    if (LOG_FILE !== null) try {
         // Sem comando de diagnostico aqui, o arquivo e a unica forma de saber o que aconteceu.
         // Ele e cortado sozinho para nao crescer sem fim numa maquina que ninguem limpa.
         if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > MAX_LOG_BYTES) {
             fs.writeFileSync(LOG_FILE, fs.readFileSync(LOG_FILE, "utf8").slice(-MAX_LOG_BYTES / 2));
+        } else if (!fs.existsSync(LOG_FILE)) {
+            // A pasta pode nao existir ainda (injecao numa maquina que nunca rodou o app).
+            fs.mkdirSync(dirname(LOG_FILE), { recursive: true });
         }
         fs.appendFileSync(LOG_FILE, stamp + " " + line + "\n");
     } catch {
@@ -463,17 +483,58 @@ function readOverTls(socket, host, path, timeoutMs) {
     });
 }
 
+// So o aperto de mao TLS, sem pedir pagina nenhuma. Serve para hosts que nao respondem HTTP --
+// o gateway e websocket -- e ainda assim prova o que importa: a saida alcanca o host e o
+// certificado fecha, entao ela nao esta sendo barrada por reputacao ali.
+function tlsHandshake(socket, host, timeoutMs) {
+    return new Promise(resolve => {
+        let settled = false;
+
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            tls.destroy();
+            resolve(value);
+        };
+
+        const timer = setTimeout(() => finish(false), timeoutMs || PROBE_TIMEOUT_MS);
+        const tls = connectTls({ socket, servername: host, host }, () => finish(true));
+
+        tls.on("error", () => finish(false));
+        // Um host que aceita a conexao e fecha limpo antes do handshake nao gera erro: sem
+        // isto o retorno so viria quando o prazo estourasse.
+        tls.on("close", () => finish(false));
+    });
+}
+
 // Prova o que interessa numa saida: o tunel negocia, o TLS fecha com certificado valido para o
 // Discord, e o Discord responde 200 por ela. Saida barrada por reputacao falha exatamente aqui,
 // que e o motivo de o teste nao ser contra um endereco qualquer.
 async function probe(proxy, timeoutMs) {
     const started = Date.now();
 
-    const socket = await openTunnel(proxy, DISCORD_HOST, 443, timeoutMs);
+    // No modo "tor" o teste e feito contra o host que a saida REALMENTE vai carregar. O
+    // discord.com fica atras da Cloudflare, que recusa o handshake TLS vindo de exit de Tor
+    // ("tls alert handshake failure", medido em 2026-08-23) -- e o roteador nunca manda
+    // discord.com pela saida, so *.discord.gg. Ou seja: a saida era reprovada por um host que
+    // ela nunca ia atender, e o modo tor ficava preso em "porta aberta mas nao respondeu como
+    // proxy" com o Tor de pe e o gateway alcancavel (TLS ate gateway.discord.gg em ~600ms).
+    //
+    // Aqui a prova e o handshake TLS ate o gateway: o /api/v9/gateway nao existe nesse host
+    // (ele e websocket), entao exigir HTTP 200 nao faria sentido. Um exit que fecha TLS com o
+    // gateway entrega o que precisamos.
+    const host = routeMode === "tor" ? ROUTED_HOSTS[0] : DISCORD_HOST;
+
+    const socket = await openTunnel(proxy, host, 443, timeoutMs);
     if (socket === null) return null;
 
-    const response = await readOverTls(socket, DISCORD_HOST, "/api/v9/gateway", timeoutMs);
-    if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
+    if (routeMode === "tor") {
+        if (!await tlsHandshake(socket, host, timeoutMs)) return null;
+    } else {
+        const response = await readOverTls(socket, host, "/api/v9/gateway", timeoutMs);
+        if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
+    }
 
     const ms = Date.now() - started;
     // Alimenta a EMA de RTT da saida: a troca proativa por lentidao le desta leitura.
@@ -694,12 +755,34 @@ async function detectTor() {
             continue;
         }
 
-        const country = await exitCountry(proxy);
-        if (country !== null && !excludedCountries.has(country)) {
-            log("Tor encontrado na porta " + port + ", saida em " + country);
+        // No modo "tor" a checagem de geo nem roda: dos ~10.600 relays de saida do mundo,
+        // ~37 sao brasileiros (menos de 0.4%), e a checagem so pagava uma ida-e-volta pelo
+        // Tor (1-1.4s de RTT) para martelar um terceiro (ipwho.is) com IPs de saida do Tor
+        // compartilhados por milhares de usuarios -- cota que estoura sozinha e nao depende
+        // de nada que a gente fez. Quando estoura, a checagem falha pra sempre (sem TTL: o
+        // Tor troca de circuito a cada ~10min, entao um cache de horas descreveria uma saida
+        // que ja nao existe), e o modo tor ja aceitava pais desconhecido mesmo assim -- ou
+        // seja, a checagem quase nunca barra nada na pratica. Quem escolhe Tor esta pedindo
+        // uma saida que nao se identifica; nao sair pelo IP brasileiro o proprio Tor garante.
+        if (routeMode === "tor") {
+            log("Tor encontrado na porta " + port + " (geo nao verificada em modo tor)");
             return proxy;
         }
-        log("Tor na porta " + port + " recusado: saida em " + (country || "pais desconhecido"));
+
+        const country = await exitCountry(proxy);
+
+        if (country !== null && excludedCountries.has(country)) {
+            log("Tor na porta " + port + " recusado: saida em " + country);
+            continue;
+        }
+
+        if (country === null) {
+            log("Tor na porta " + port + " recusado: saida em pais desconhecido");
+            continue;
+        }
+
+        log("Tor encontrado na porta " + port + ", saida em " + country);
+        return proxy;
     }
 
     return null;
@@ -785,6 +868,11 @@ async function pickFreeExit() {
 }
 
 async function cachedExit() {
+    // No modo "tor" saida guardada nao vale nada: o cache so guarda gratuitas, e deixar
+    // ele vencer a escolha fazia o gateway NASCER por proxy gratuita com o Tor de pe
+    // (reprovado em teste: cache quente + routeMode tor -> "reaproveitando 3 de 3" e
+    // saida gratuita usada sem o Tor ser consultado).
+    if (routeMode === "tor") return null;
     const state = readJson(STATE_FILE, null);
     if (state === null || typeof state.at !== "number") return null;
     if (Date.now() - state.at > CACHE_MAX_AGE_MS) return null;
@@ -983,11 +1071,115 @@ let lastRoutedAt = 0;
 // concorre com a conexao do gateway e pode derruba-la. A morte real da ativa aparece no
 // trafego vivo (openThroughPool), nao precisa do probe para ser percebida.
 let ativaEntregouEm = 0;
+// Quantas vezes o gateway nasceu roteado nesta execucao. A primeira e so a abertura normal;
+// da segunda em diante e uma RECONEXAO de verdade no meio da sessao (confirmado ao vivo em
+// 2026-08-23, com CDP: mesmo uma troca limpa, sem vazar direto, sem trocar de saida visivel,
+// trava o video do Go Live so-audio — o motor de voz/video do Discord e WASM fechado, entao
+// nao da pra restartar so o stream por fora sem mexer no binario. O que da pra fazer com
+// seguranca e avisar: a pessoa decide se vale reiniciar (Ctrl+R sai da call) ou nao.
+let gatewayConnCount = 0;
+
+// Quando vimos um websocket de voz/video pela ultima vez. O aviso de reconexao so faz sentido
+// com chamada ou transmissao em andamento: fora disso a reconexao do gateway nao quebra nada
+// visivel, e avisar so assustaria -- ainda por cima sugerindo um Ctrl+R que derruba a call.
+let ultimaMidiaEm = 0;
+const MIDIA_RECENTE_MS = 5 * 60_000;
+
+// Um Ctrl+R (ou a nossa propria recarga) comeca uma sessao NOVA: o gateway que nascer depois
+// dela e o primeiro dela, nao uma reconexao no meio de nada. Sem zerar aqui, o aviso voltava
+// justamente para quem seguiu o conselho dele -- recarregou por causa do aviso e levou o mesmo
+// aviso de novo, agora sem motivo.
+function watchReloads() {
+    const electron = require("electron");
+    electron.app.on("browser-window-created", (_evento, win) => {
+        win.webContents.on("did-start-loading", () => {
+            // A URL ainda e a de antes quando a recarga comeca: se era a do cliente, isto e um
+            // reload de verdade, e nao a splash abrindo.
+            let url = "";
+            try {
+                url = win.webContents.getURL();
+            } catch {
+                return; // janela morrendo
+            }
+            if (!CLIENT_URL_RE.test(url)) return;
+            if (gatewayConnCount === 0) return;
+
+            log("a janela do Discord recarregou: contagem de reconexao zerada");
+            gatewayConnCount = 0;
+        });
+    });
+}
+
 function markGatewayRouted() {
     lastRoutedAt = Date.now();
     ativaEntregouEm = Date.now();
     if (reloadCount > 0) log("gateway voltou a passar pela saida, teto de recarga resetado");
     reloadCount = 0;
+
+    gatewayConnCount++;
+    if (gatewayConnCount > 1) {
+        const comMidia = Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS;
+        log("gateway reconectou no meio da sessao (recorrencia " + (gatewayConnCount - 1) + ")"
+            + (comMidia ? ": avisando na tela" : ", sem chamada em andamento: nao avisa"));
+        if (comMidia) showReconnectWarning(gatewayConnCount - 1);
+    }
+}
+
+// Aviso visual DENTRO do Discord (nao um dialogo do sistema): um elemento nosso, flutuante,
+// injetado via CDP. Nao mexe em nada do Discord, so soma um div — furtivo o bastante para nao
+// atrapalhar a transmissao, visivel o bastante para a pessoa perceber e decidir.
+const WARN_BANNER_TEXT = "GoLiveBypass: o gateway reconectou no meio da sessao. Se o video da " +
+    "sua transmissao travou (ficou so o audio), de Ctrl+R no Discord para corrigir " +
+    "-- isso sai da chamada de voz.";
+
+function showReconnectWarning(recorrencias) {
+    const win = clientWindow();
+    if (win === null) return;
+
+    // Um elemento so, sempre reaproveitado: se a pessoa nao fechar, a proxima reconexao
+    // atualiza o texto (com a contagem) em vez de empilhar um banner por cima do outro.
+    const script = "(function(){\n" +
+        "  var el = document.getElementById('golivebypass-warn');\n" +
+        "  if (!el) {\n" +
+        "    el = document.createElement('div');\n" +
+        "    el.id = 'golivebypass-warn';\n" +
+        "    el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;" +
+        "display:flex;align-items:flex-start;gap:10px;width:320px;" +
+        "background:#2b2d31;color:#f2f3f5;padding:14px 16px;border-radius:10px;" +
+        "border-left:4px solid #f0b232;" +
+        "font:13px/1.45 \"gg sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;" +
+        "box-shadow:0 8px 24px rgba(0,0,0,.45);" +
+        "opacity:0;transform:translateY(8px);transition:opacity .2s ease,transform .2s ease;'; \n" +
+        "    var icon = document.createElement('div');\n" +
+        "    icon.textContent = '\\u26A0\\uFE0F';\n" +
+        "    icon.style.cssText = 'font-size:18px;line-height:1;flex-shrink:0;margin-top:1px;';\n" +
+        "    var body = document.createElement('div');\n" +
+        "    body.style.cssText = 'flex:1;min-width:0;';\n" +
+        "    var title = document.createElement('div');\n" +
+        "    title.textContent = 'GoLiveBypass';\n" +
+        "    title.style.cssText = 'font-weight:600;margin-bottom:3px;color:#fff;';\n" +
+        "    var text = document.createElement('div');\n" +
+        "    text.id = 'golivebypass-warn-text';\n" +
+        "    text.style.cssText = 'color:#d8dadf;';\n" +
+        "    body.appendChild(title);\n" +
+        "    body.appendChild(text);\n" +
+        "    var closeBtn = document.createElement('div');\n" +
+        "    closeBtn.textContent = '\\u2715';\n" +
+        "    closeBtn.style.cssText = 'cursor:pointer;color:#949ba4;font-size:14px;flex-shrink:0;padding:2px;';\n" +
+        "    closeBtn.onmouseenter = function(){ closeBtn.style.color = '#f2f3f5'; };\n" +
+        "    closeBtn.onmouseleave = function(){ closeBtn.style.color = '#949ba4'; };\n" +
+        "    closeBtn.onclick = function(){ el.remove(); };\n" +
+        "    el.appendChild(icon);\n" +
+        "    el.appendChild(body);\n" +
+        "    el.appendChild(closeBtn);\n" +
+        "    document.body.appendChild(el);\n" +
+        "    requestAnimationFrame(function(){ el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });\n" +
+        "  }\n" +
+        "  document.getElementById('golivebypass-warn-text').textContent = " + JSON.stringify(WARN_BANNER_TEXT) + " + " +
+        "(" + recorrencias + " > 1 ? ' (aconteceu ' + " + recorrencias + " + ' vezes nesta sessao)' : '');\n" +
+        "})();";
+
+    win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso: " + error.message));
 }
 
 // Exposto para a bateria de testes (tests/test-exit-refresh.sh) marcar o sinal sem depender
@@ -1004,12 +1196,19 @@ function currentExit() {
     if (exitSettled) return Promise.resolve(chosenExit);
 
     return new Promise(resolve => {
+        // No modo "tor" o prazo e maior: o bootstrap do Tor leva ~20s, bem mais que o orcamento
+        // pensado para uma saida gratuita, e estourar o prazo aqui nao devolve conexao direta
+        // (o serveSocks recusa neste modo) -- devolve so uma reconexao a toa do gateway.
+        const prazo = routeMode === "tor" ? TOR_HOLD_BUDGET_MS : HOLD_BUDGET_MS;
+
         const timer = setTimeout(() => {
             const index = waitingForExit.indexOf(deliver);
             if (index >= 0) waitingForExit.splice(index, 1);
-            log("a saida nao ficou pronta a tempo, esta conexao vai sair direta");
+            log(routeMode === "tor"
+                ? "a saida nao ficou pronta a tempo; no modo tor a conexao sera recusada, nao direta"
+                : "a saida nao ficou pronta a tempo, esta conexao vai sair direta");
             resolve(null);
-        }, HOLD_BUDGET_MS);
+        }, prazo);
 
         const deliver = proxy => {
             clearTimeout(timer);
@@ -1031,7 +1230,10 @@ function refreshExit() {
     lastRefreshAt = Date.now();
     refreshingExit = (async () => {
         log("nenhuma saida do pool entregou, procurando uma saida nova");
-        const fresh = await pickFreeExit();
+        // Modo "tor": a reposicao tambem SO considera o Tor — cair para gratuita aqui
+        // trocaria a garantia escolhida pelo usuario por um IP qualquer. Sem Tor no ar,
+        // devolve null e o gateway fica segurado ate o Tor voltar.
+        const fresh = routeMode === "tor" ? await detectTor() : await pickFreeExit();
         if (fresh !== null) {
             settleExit(fresh);
             log("saida nova encontrada: " + safeProxy(fresh));
@@ -1059,6 +1261,18 @@ async function beat() {
     beating = true;
 
     try {
+        // Modo "tor" sem saida ativa (arranque sem Tor, ou Tor morreu antes de qualquer
+        // escolha): re-tenta o Tor AQUI. Sem isto ninguem mais chamaria detectTor — os
+        // caminhos do batimento so rodam com uma saida ativa — e a sessao ficaria presa
+        // para sempre recusando conexoes mesmo depois de o Tor voltar.
+        if (routeMode === "tor" && chosenExit === null) {
+            const tor = await detectTor();
+            if (tor !== null) {
+                settleExit(tor);
+                log("modo tor: Tor respondeu de novo em " + TOR_ADDR + ", religando a rota");
+            }
+            return;
+        }
         await checkPool();
     } catch (error) {
         // Batimento e rede de seguranca. Se ele falhar, o caminho antigo continua valendo:
@@ -1210,6 +1424,10 @@ function trySwapByRtt(active, live) {
 // de IP com a ativa saudavel pediria uma reavaliacao do servidor a toa. Aqui o pote enche por
 // baixo e quem esta entregando continua entregando.
 function stockReserves(liveReserves) {
+    // No modo "tor" nao existe reserva legitima: encher o pote com gratuitas violava a
+    // escolha da pessoa e um dia essas gratuitas venciam o fallback do openThroughPool,
+    // trocando a sessao pra fora do Tor sem ninguem pedir (visto ao vivo em 2026-08-23).
+    if (routeMode === "tor") return;
     if (liveReserves >= MIN_LIVE_RESERVES || stocking !== null) return;
 
     // Relogio proprio, separado do refreshExit de proposito. Compartilhar os dois fazia a
@@ -1411,6 +1629,15 @@ function serveSocks(client) {
             let upstream = await openThroughPool(target);
 
             if (upstream === null) {
+                // No modo "tor" a promessa e outra: sem Tor nenhuma sessao presta (o gateway
+                // nasceria pelo IP brasileiro e o video nunca viria). Recusar a conexao faz
+                // o cliente do gateway re-tentar com backoff; o batimento religa a rota assim
+                // que um Tor responder. Nao marca gatewayWentDirectAt: recusa nao e vazo.
+                if (routeMode === "tor") {
+                    log("modo tor: nenhuma saida entregou " + target.host + ", recusando esta conexao (sem vazo direta)");
+                    client.destroy();
+                    return;
+                }
                 // Recusar aqui prendia o Discord em "conectando" para sempre: o PAC nao tem
                 // alternativa depois do ponto e virgula, entao uma recusa nao vira conexao
                 // direta, vira nada. Sair direto custa o bypass desta conexao; recusar custa o
@@ -1620,9 +1847,29 @@ async function start() {
     // gateway (reconexao) e contado numa janela. Rajada de reconexoes = a saida nao esta
     // aguentando o trafego vivo, mesmo passando no probe. Acima do limite, troca forcada
     // para a reserva mais rapida — o sinal mais confiavel que temos.
+    // Zera a contagem de reconexao quando a janela recarrega: dali em diante e sessao nova.
+    try {
+        watchReloads();
+    } catch (error) {
+        log("nao consegui observar as recargas da janela: " + error.message);
+    }
+
     // O callback e obrigatorio (sem ele a request pendura para sempre); nao modificamos nada.
     try {
         session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+            // Os websockets de voz/video moram em *.discord.media e nao passam pela saida (so
+            // o gateway passa). Servem aqui como sinal de que existe chamada ou transmissao
+            // em andamento -- e so nesse caso uma reconexao de gateway tem o que estragar.
+            if (details.resourceType === "webSocket") {
+                try {
+                    if (new URL(details.url).hostname.endsWith(".discord.media")) {
+                        ultimaMidiaEm = Date.now();
+                    }
+                } catch {
+                    // url estranha; ignora
+                }
+            }
+
             if (details.resourceType === "webSocket" && isRoutedHost(new URL(details.url).hostname)) {
                 const saidaInfo = chosenExit === null
                     ? "sem saida ainda"
@@ -1671,8 +1918,16 @@ async function start() {
     }
 
     const exit = await chooseExit();
-    settleExit(exit);
-    log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + safeProxy(exit));
+    if (exit === null && routeMode === "tor") {
+        // Modo "tor": sem Tor no arranque NAO libera as conexoes pendentes para o direct.
+        // Elas ficam seguradas ate o prazo delas; o batimento continua e quando um Tor
+        // responder settleExit(tor) religa a rota. Vazar direto aqui renasceria o gateway
+        // pelo IP brasileiro — exatamente o carregamento infinito que o projeto combate.
+        log("modo tor: sem Tor no arranque, conexoes ficam seguradas ate um Tor responder");
+    } else {
+        settleExit(exit);
+        log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + safeProxy(exit));
+    }
 
     // So depois da primeira escolha: batimento correndo junto da busca inicial disputaria banda
     // com ela, e e a busca inicial que segura o gateway.

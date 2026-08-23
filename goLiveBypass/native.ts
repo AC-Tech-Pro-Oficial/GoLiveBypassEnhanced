@@ -28,6 +28,15 @@ const TRACE_PATH = "/cdn-cgi/trace";
 const GATEWAY_HOSTS = ["gateway.discord.gg", "remote-auth-gateway.discord.gg"];
 const LOGIN_HOSTS = ["discord.com", "canary.discord.com", "ptb.discord.com"];
 
+// Todo o dominio do gateway entra na rota, nao so os dois nomes acima: o Discord conecta em
+// subdominios regionais (gateway-us-east1-b.discord.gg) que a lista exata deixava escapar.
+// Os CDN de midia sao discordapp.com, outro dominio, e continuam fora daqui.
+const ROUTE_SUFFIX = ".discord.gg";
+
+function isGatewayHost(host: string): boolean {
+    return host === "discord.gg" || host.endsWith(ROUTE_SUFFIX);
+}
+
 const MAX_LIST_BYTES = 1024 * 1024;
 const PROBE_TIMEOUT_MS = 6000;
 
@@ -967,7 +976,13 @@ async function serveRequest(client: Socket, request: Buffer | null) {
     // O roteador so aceita os hosts que o PAC manda para ele. Sem esta linha ele seria um
     // SOCKS aberto no loopback: qualquer processo da maquina usaria a sua saida para qualquer
     // destino, com a identidade do Discord no firewall.
-    if (!routedHosts().includes(target.host)) {
+    //
+    // A regra acompanha a do PAC: todo o dominio do gateway, mais os hosts exatos do escopo.
+    // Se so o PAC casasse por sufixo, o roteador recusaria justamente as conexoes regionais
+    // que ele acabou de receber -- e o gateway continuaria sem rota.
+    const aceito =
+        (scope !== "off" && isGatewayHost(target.host)) || routedHosts().includes(target.host);
+    if (!aceito) {
         log(`recusando destino fora da lista: ${target.host}`);
         return refuse(client);
     }
@@ -1035,8 +1050,19 @@ function pacScript(socksPort: number, routed: string[]) {
     // roteador de pe, e nenhuma conexao passando. A rede de seguranca fica dentro do
     // roteador, que cai para direto sozinho e registra isso. Quem nao esta na lista mantem a
     // regra que o sistema ja usava (proxy corporativo, PAC, VPN).
+    // O casamento e por SUFIXO de dominio para o gateway. O Discord conecta em subdominios
+    // regionais (gateway-us-east1-b.discord.gg -- o "-us-east1-b" vem ANTES de discord.gg), e
+    // com igualdade exata essas conexoes ficavam de fora do roteador: nasciam pelo IP
+    // brasileiro e o servidor bloqueava a sessao, o "carregando infinitamente". E o mesmo
+    // conserto que o standalone recebeu na v1.1.6; aqui tinha ficado para tras.
+    //
+    // endsWith("." + dominio) e nao indexOf: aquele casaria discord.gg.evil.com. Os hosts de
+    // login (quando o escopo os inclui) seguem por igualdade exata -- ali subdominio nao
+    // aparece, e abrir para *.discord.com pegaria muito mais do que precisamos.
     return `var routed = [${list}];\n`
+        + `var sufixo = ${JSON.stringify(ROUTE_SUFFIX)};\n`
         + "function FindProxyForURL(url, host) {\n"
+        + `    if (host === "discord.gg" || host.endsWith(sufixo)) return "SOCKS5 127.0.0.1:${socksPort}";\n`
         + "    for (var i = 0; i < routed.length; i++)\n"
         + `        if (host === routed[i]) return "SOCKS5 127.0.0.1:${socksPort}";\n`
         + `    return ${JSON.stringify(fallbackRule)};\n`
@@ -1068,8 +1094,13 @@ async function installPac(redial: boolean) {
         // ignorado) pode conter os mesmos digitos da porta por coincidencia. E conferir em
         // vez de supor: se a regra nao pegou, melhor saber agora do que pelo usuario dizendo
         // que nao funciona.
-        const route = await session.defaultSession.resolveProxy(`https://${GATEWAY_HOSTS[0]}`);
-        if (typeof route !== "string" || !route.includes(`127.0.0.1:${socksPort}`)) {
+        // Um subdominio regional entra no teste junto com o canonico: e ele que o gateway usa
+        // de verdade, e uma regra que so cobrisse o canonico passaria aqui estando quebrada
+        // para o que importa.
+        const alvos = [`https://${GATEWAY_HOSTS[0]}`, "https://gateway-us-east1-b.discord.gg"];
+        const rotas = await Promise.all(alvos.map(alvo => session.defaultSession.resolveProxy(alvo)));
+        const route = rotas.find((r: unknown) => typeof r !== "string" || !r.includes(`127.0.0.1:${socksPort}`));
+        if (route !== undefined) {
             log("o Chromium ignorou o PAC, voltando para a regra do sistema");
 
             // "system", nao "direct": arrancaria o proxy de quem esta atras de VPN/corporativo.
