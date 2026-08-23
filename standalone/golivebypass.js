@@ -1014,11 +1014,82 @@ let lastRoutedAt = 0;
 // concorre com a conexao do gateway e pode derruba-la. A morte real da ativa aparece no
 // trafego vivo (openThroughPool), nao precisa do probe para ser percebida.
 let ativaEntregouEm = 0;
+// Quantas vezes o gateway nasceu roteado nesta execucao. A primeira e so a abertura normal;
+// da segunda em diante e uma RECONEXAO de verdade no meio da sessao (confirmado ao vivo em
+// 2026-08-23, com CDP: mesmo uma troca limpa, sem vazar direto, sem trocar de saida visivel,
+// trava o video do Go Live so-audio — o motor de voz/video do Discord e WASM fechado, entao
+// nao da pra restartar so o stream por fora sem mexer no binario. O que da pra fazer com
+// seguranca e avisar: a pessoa decide se vale reiniciar (Ctrl+R sai da call) ou nao.
+let gatewayConnCount = 0;
+
 function markGatewayRouted() {
     lastRoutedAt = Date.now();
     ativaEntregouEm = Date.now();
     if (reloadCount > 0) log("gateway voltou a passar pela saida, teto de recarga resetado");
     reloadCount = 0;
+
+    gatewayConnCount++;
+    if (gatewayConnCount > 1) {
+        log("gateway reconectou no meio da sessao (recorrencia " + (gatewayConnCount - 1) + "): avisando na tela");
+        showReconnectWarning(gatewayConnCount - 1);
+    }
+}
+
+// Aviso visual DENTRO do Discord (nao um dialogo do sistema): um elemento nosso, flutuante,
+// injetado via CDP. Nao mexe em nada do Discord, so soma um div — furtivo o bastante para nao
+// atrapalhar a transmissao, visivel o bastante para a pessoa perceber e decidir.
+const WARN_BANNER_TEXT = "GoLiveBypass: o gateway reconectou no meio da sessao. Se o video da " +
+    "sua transmissao travou (ficou so o audio), de Ctrl+R no Discord para corrigir " +
+    "-- isso sai da chamada de voz.";
+
+function showReconnectWarning(recorrencias) {
+    const win = clientWindow();
+    if (win === null) return;
+
+    // Um elemento so, sempre reaproveitado: se a pessoa nao fechar, a proxima reconexao
+    // atualiza o texto (com a contagem) em vez de empilhar um banner por cima do outro.
+    const script = "(function(){\n" +
+        "  var el = document.getElementById('golivebypass-warn');\n" +
+        "  if (!el) {\n" +
+        "    el = document.createElement('div');\n" +
+        "    el.id = 'golivebypass-warn';\n" +
+        "    el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;" +
+        "display:flex;align-items:flex-start;gap:10px;width:320px;" +
+        "background:#2b2d31;color:#f2f3f5;padding:14px 16px;border-radius:10px;" +
+        "border-left:4px solid #f0b232;" +
+        "font:13px/1.45 \"gg sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;" +
+        "box-shadow:0 8px 24px rgba(0,0,0,.45);" +
+        "opacity:0;transform:translateY(8px);transition:opacity .2s ease,transform .2s ease;'; \n" +
+        "    var icon = document.createElement('div');\n" +
+        "    icon.textContent = '\\u26A0\\uFE0F';\n" +
+        "    icon.style.cssText = 'font-size:18px;line-height:1;flex-shrink:0;margin-top:1px;';\n" +
+        "    var body = document.createElement('div');\n" +
+        "    body.style.cssText = 'flex:1;min-width:0;';\n" +
+        "    var title = document.createElement('div');\n" +
+        "    title.textContent = 'GoLiveBypass';\n" +
+        "    title.style.cssText = 'font-weight:600;margin-bottom:3px;color:#fff;';\n" +
+        "    var text = document.createElement('div');\n" +
+        "    text.id = 'golivebypass-warn-text';\n" +
+        "    text.style.cssText = 'color:#d8dadf;';\n" +
+        "    body.appendChild(title);\n" +
+        "    body.appendChild(text);\n" +
+        "    var closeBtn = document.createElement('div');\n" +
+        "    closeBtn.textContent = '\\u2715';\n" +
+        "    closeBtn.style.cssText = 'cursor:pointer;color:#949ba4;font-size:14px;flex-shrink:0;padding:2px;';\n" +
+        "    closeBtn.onmouseenter = function(){ closeBtn.style.color = '#f2f3f5'; };\n" +
+        "    closeBtn.onmouseleave = function(){ closeBtn.style.color = '#949ba4'; };\n" +
+        "    closeBtn.onclick = function(){ el.remove(); };\n" +
+        "    el.appendChild(icon);\n" +
+        "    el.appendChild(body);\n" +
+        "    el.appendChild(closeBtn);\n" +
+        "    document.body.appendChild(el);\n" +
+        "    requestAnimationFrame(function(){ el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });\n" +
+        "  }\n" +
+        "  document.getElementById('golivebypass-warn-text').textContent = " + JSON.stringify(WARN_BANNER_TEXT) + " + " +
+        "(" + recorrencias + " > 1 ? ' (aconteceu ' + " + recorrencias + " + ' vezes nesta sessao)' : '');\n" +
+        "})();";
+
+    win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso: " + error.message));
 }
 
 // Exposto para a bateria de testes (tests/test-exit-refresh.sh) marcar o sinal sem depender
@@ -1263,6 +1334,10 @@ function trySwapByRtt(active, live) {
 // de IP com a ativa saudavel pediria uma reavaliacao do servidor a toa. Aqui o pote enche por
 // baixo e quem esta entregando continua entregando.
 function stockReserves(liveReserves) {
+    // No modo "tor" nao existe reserva legitima: encher o pote com gratuitas violava a
+    // escolha da pessoa e um dia essas gratuitas venciam o fallback do openThroughPool,
+    // trocando a sessao pra fora do Tor sem ninguem pedir (visto ao vivo em 2026-08-23).
+    if (routeMode === "tor") return;
     if (liveReserves >= MIN_LIVE_RESERVES || stocking !== null) return;
 
     // Relogio proprio, separado do refreshExit de proposito. Compartilhar os dois fazia a
