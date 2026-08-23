@@ -200,6 +200,9 @@ toggleBtn.addEventListener('click', async () => {
   }
 
   await updateStatus();
+  // O Tor sobe durante a ativacao, entao o texto lido na abertura da janela ja nasceu velho:
+  // ficava em "aguardando ativacao" com o Tor de pe e o bypass funcionando.
+  refreshTorStatus();
 });
 
 // Inicialização
@@ -210,6 +213,9 @@ refreshStartup();
 refreshProxy();
 refreshNetMode();
 refreshTorStatus();
+// O Tor pode subir depois (durante a ativacao) ou cair no meio; sem reconferir, o texto
+// congela no que era verdade quando a janela abriu. A checagem custa um connect no loopback.
+setInterval(refreshTorStatus, 5000);
 fitWindowToContent();
 
 async function refreshStartup() {
@@ -254,12 +260,16 @@ async function refreshNetMode() {
     const saved = await window.api.getNetMode();
     const proxy = await window.api.getProxy();
     // Mapeia o estado salvo para a UI de 3 opcoes:
-    // - "free" -> Gratuitas
+    // - "tor" -> Tor (so quando a pessoa escolheu; nunca por padrao)
     // - "auto" com proxy preenchida -> Personalizado
-    // - "auto" sem proxy (e "tor") -> Tor (o padrao)
-    if (saved === 'free') selectMode('free');
+    // - o resto ("auto" sem proxy, "free", vazio) -> Gratuitas
+    //
+    // "auto" caia em Tor aqui, o que anulava o padrao do processo principal: a pessoa abria o
+    // app pela primeira vez ja em modo Tor, com o download de 22MB e o Discord sem conectar
+    // ate o daemon subir. Tor e uma escolha, e a escolha fica salva.
+    if (saved === 'tor') selectMode('tor');
     else if (saved === 'auto' && proxy) selectMode('manual');
-    else selectMode('tor');
+    else selectMode('free');
   } catch (err) {
     console.error(err);
   }
