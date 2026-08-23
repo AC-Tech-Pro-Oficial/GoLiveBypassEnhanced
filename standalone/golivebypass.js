@@ -698,30 +698,33 @@ async function detectTor() {
             continue;
         }
 
+        // No modo "tor" a checagem de geo nem roda: dos ~10.600 relays de saida do mundo,
+        // ~37 sao brasileiros (menos de 0.4%), e a checagem so pagava uma ida-e-volta pelo
+        // Tor (1-1.4s de RTT) para martelar um terceiro (ipwho.is) com IPs de saida do Tor
+        // compartilhados por milhares de usuarios -- cota que estoura sozinha e nao depende
+        // de nada que a gente fez. Quando estoura, a checagem falha pra sempre (sem TTL: o
+        // Tor troca de circuito a cada ~10min, entao um cache de horas descreveria uma saida
+        // que ja nao existe), e o modo tor ja aceitava pais desconhecido mesmo assim -- ou
+        // seja, a checagem quase nunca barra nada na pratica. Quem escolhe Tor esta pedindo
+        // uma saida que nao se identifica; nao sair pelo IP brasileiro o proprio Tor garante.
+        if (routeMode === "tor") {
+            log("Tor encontrado na porta " + port + " (geo nao verificada em modo tor)");
+            return proxy;
+        }
+
         const country = await exitCountry(proxy);
 
-        // Pais conhecido e na lista de excluidos: recusa, em qualquer modo.
         if (country !== null && excludedCountries.has(country)) {
             log("Tor na porta " + port + " recusado: saida em " + country);
             continue;
         }
 
-        // Pais desconhecido no modo "tor" NAO e motivo para recusar. A Cloudflare marca saida
-        // de Tor como "T1", que nao e pais, e os servicos de geo costumam recusar consulta
-        // vinda de um exit de Tor -- entao exigir um pais faz o modo depender de um terceiro
-        // responder atraves do Tor. Era o que acontecia aqui: o tunel abria, o probe passava,
-        // e o Tor era recusado como "pais desconhecido"; com a guarda anti-vazamento o gateway
-        // ficava segurado e o Discord nao conectava, com o Tor funcionando do lado.
-        //
-        // A troca: em Tor deixamos de saber o pais da saida. Vale a pena, porque quem escolhe
-        // Tor esta pedindo exatamente uma saida que nao se identifica -- e a regra que importa,
-        // nao sair pelo IP brasileiro, o proprio Tor ja garante.
-        if (country === null && routeMode !== "tor") {
+        if (country === null) {
             log("Tor na porta " + port + " recusado: saida em pais desconhecido");
             continue;
         }
 
-        log("Tor encontrado na porta " + port + ", saida em " + (country || "pais nao identificado (normal em Tor)"));
+        log("Tor encontrado na porta " + port + ", saida em " + country);
         return proxy;
     }
 
