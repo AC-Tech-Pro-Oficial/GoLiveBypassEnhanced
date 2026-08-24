@@ -145,9 +145,11 @@ Cobertura: validação do payload e montagem do markdown (`internal/bugreport`),
 cliente GitHub contra um fake HTTP (`internal/gh`), e os endpoints completos
 com auth, rate limit, body limit e erros (`internal/server`).
 
-## Integração futura (fora deste escopo)
+## Integração (GUI)
 
-A GUI (Electron) e o standalone ganharão um botão **"Reportar bug"** que
-monta o relato — com o `golivebypass.log` e os metadados do sistema — e chama
-`POST /v1/reports` com o `API_TOKEN` embutido. A resposta traz a URL da issue
-para mostrar ao usuário.
+A GUI Electron já usa esta API: o botão **"Reportar bug"** (`golive-gui/`) coleta
+`gui.log` + `golivebypass.log` + ring buffer, redige em camadas (L1 regex,
+L2 segredos literais da proxy, L3 varredura final com bloqueio) e chama
+`POST /v1/reports` com o `API_TOKEN` embutido (`electron/bugreport.ts`). A
+resposta traz a URL da issue para mostrar ao usuário. Logs são cortados para
+256 KB, corpo total limitado a 512 KB, rate limit 60/min por IP.

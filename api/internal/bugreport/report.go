@@ -9,7 +9,11 @@ import (
 const (
 	MaxTitleLen       = 200
 	MaxDescriptionLen = 8 * 1024
-	logFence          = "````"
+	// O GitHub recusa issues com body > 64KB (limite da API REST). O body montado
+	// aqui (meta + descricao + log) precisa caber — corta-se o LOG por ultimo,
+	// preservando meta e descricao que sao o diagnostico essencial.
+	MaxIssueBodyLen = 64 * 1024
+	logFence        = "````"
 )
 
 type Report struct {
@@ -60,10 +64,40 @@ func BuildIssueBody(r Report) string {
 	}
 
 	if l := r.Log; l != "" {
+		log := strings.ReplaceAll(l, logFence, "```")
+		prefixo := b.String()
+		const fenceBloco = "\n" + logFence + "\n"
+		const marcador = "\n[... log truncado no meio ...]\n"
+		// "**Log:**\n\n" + fence aberto + log + fence fechado — inclui o \n inicial
+		// e reserva espaco para o marcador de truncamento.
+		baseLen := len(prefixo) + len("\n**Log:**\n\n") + len(logFence) + len(fenceBloco) + len(marcador)
+		sobra := MaxIssueBodyLen - baseLen
+		if sobra < 0 {
+			sobra = 0
+		}
+		if len(log) > sobra {
+			// Truncamento head+tail: preserva o INICIO (secoes de deteccao/installs,
+			// o trace da GUI) e o FIM (eventos recentes do gateway), cortando o meio.
+			// Cortar so o fim perdia exatamente o diagnostico de "nao achou o Vesktop".
+			cabeca := sobra / 2
+			cauda := sobra - cabeca
+
+			// Cabeca: ate a ultima quebra de linha dentro da cota.
+			if nova := strings.LastIndexByte(log[:cabeca], '\n'); nova > 0 {
+				cabeca = nova + 1
+			}
+			// Cauda: a partir da primeira quebra de linha dentro da cota (nao
+			// comeca no meio de uma linha).
+			inicioCauda := len(log) - cauda
+			if nova := strings.IndexByte(log[inicioCauda:], '\n'); nova >= 0 {
+				inicioCauda += nova + 1
+			}
+			log = log[:cabeca] + marcador + log[inicioCauda:]
+		}
 		b.WriteString("**Log:**\n\n")
 		b.WriteString(logFence + "\n")
-		b.WriteString(strings.ReplaceAll(l, logFence, "```"))
-		b.WriteString("\n" + logFence + "\n")
+		b.WriteString(log)
+		b.WriteString(fenceBloco)
 	}
 	return b.String()
 }
