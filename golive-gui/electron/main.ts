@@ -753,7 +753,7 @@ function writeInjection(asar: string, proxyAddress: string) {
     diskFs.mkdirSync(asar);
     diskFs.writeFileSync(
       path.join(asar, "package.json"),
-      JSON.stringify({ name: "discord", main: "index.js" }),
+      JSON.stringify({ name: "discord", main: "index.js", version: "1.0.0" }),
     );
     diskFs.writeFileSync(path.join(asar, "golivebypass.js"), bypassCode);
     // O modo de rede e a porta do Tor embutido vao junto: o bypass le routeMode e torAddr.

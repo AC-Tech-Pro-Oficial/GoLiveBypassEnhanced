@@ -40,7 +40,7 @@ if ($Proxy -ne '' -and $Proxy -notmatch '^(socks5|socks4|https?)://(?:.+@)?[^:/@
 $InstallDir = Join-Path $env:LOCALAPPDATA 'GoLiveBypass'
 $PatcherName = 'golivebypass.js'
 $DiscordFlavours = @('Discord', 'DiscordPTB', 'DiscordCanary')
-$StubPackage = '{"name":"discord","main":"index.js"}'
+$StubPackage = '{"name":"discord","main":"index.js","version":"1.0.0"}'
 
 function Write-Step($m) { Write-Host "  [*] $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }

@@ -44,7 +44,7 @@ unset -f _local_probe 2>/dev/null || true
 
 PATCHER_NAME="golivebypass.js"
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass"
-STUB_PACKAGE='{"name":"discord","main":"index.js"}'
+STUB_PACKAGE='{"name":"discord","main":"index.js","version":"1.0.0"}'
 # Clientes do Discord por flatpak: os oficiais e os paralelos publicados no Flathub —
 # Vesktop (dev.vencord.Vesktop), Legcord (app.legcord.Legcord) e Equibop
 # (org.equicord.equibop).
@@ -559,6 +559,15 @@ printf '%s\n' "$FOUND" | while IFS= read -r resources; do
         printf '      %sO standalone ocupa o mesmo lugar, entao instalar aqui desliga o outro mod.%s\n' "$C_DIM" "$C_OFF" >&2
         printf '      %sSe voce usa Equicord ou Vencord, prefira o plugin: ele convive com o resto.%s\n' "$C_DIM" "$C_OFF" >&2
         confirm "Substituir o mod em $resources pelo standalone?" || { warn "Deixei como estava."; continue; }
+    fi
+
+    # Vesktop, Equibop e Legcord de flatpak usam Electron 18 com zypak, que tenta ler o
+    # app.asar como arquivo no bootstrap: a pasta de injecao faz o app nem abrir. O Discord
+    # oficial de flatpak (Electron antigo) nao tem esse problema.
+    if id="$(flatpak_app_id "$resources")" && case "$id" in dev.vencord.*|app.legcord.*|org.equicord.*) true ;; *) false ;; esac; then
+        warn "Flatpak do $id: a injecao por pasta app.asar nao abre este cliente (Electron 18/zypak)."
+        printf '      %sPrefira a versao nativa (pacote da distro, AUR, deb/rpm) deste cliente.%s\n' "$C_DIM" "$C_OFF" >&2
+        confirm "Mesmo assim injetar em $id?" || { warn "Deixei como estava."; continue; }
     fi
 
     install_patcher

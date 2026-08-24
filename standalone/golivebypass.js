@@ -1527,7 +1527,7 @@ async function installPac() {
 
 // ------------------------------------------------------------------ sobreviver a atualizacao
 
-const STUB_PACKAGE = JSON.stringify({ name: "discord", main: "index.js" });
+const STUB_PACKAGE = JSON.stringify({ name: "discord", main: "index.js", version: "1.0.0" });
 
 function patchResources(resources, patcherPath) {
     const asar = join(resources, "app.asar");
@@ -1576,8 +1576,13 @@ function patchNewerSiblings(currentResources) {
 
 // ------------------------------------------------------------------ entrada
 
-const injectorPath = require.main.filename;
-const resourcesDir = join(dirname(injectorPath), "..");
+// O Discord oficial carrega o app com require.main.filename apontando para o index.js do stub.
+// Os clientes paralelos (Vesktop, Equibop, Legcord) passam o app como argumento e o
+// require.main.filename vira "electron" — o argv[1] e o caminho confiavel nos dois casos.
+// argv[1] aponta para o diretorio app.asar; require.main.filename para o index.js dentro dele.
+const injectorPath = process.argv[1] || require.main.filename;
+const stubDir = fs.existsSync(injectorPath) && fs.statSync(injectorPath).isDirectory() ? injectorPath : dirname(injectorPath);
+const resourcesDir = join(stubDir, "..");
 const asarPath = join(resourcesDir, "_app.asar");
 
 async function start() {
@@ -1703,4 +1708,17 @@ app.whenReady().then(() => {
 });
 
 log("carregando o Discord original");
-require(require.main.filename);
+try {
+    require(require.main.filename);
+} catch (error) {
+    // O Legcord (e quem mais empacotar o app como ESM com top-level await) nao carrega por
+    // require — o import() dinamico cobre os dois mundos.
+    if (error && (error.code === "ERR_REQUIRE_ASYNC_MODULE" || error.code === "ERR_REQUIRE_ESM")) {
+        import(require.main.filename).catch((importError) => {
+            console.error("[GoLiveBypass] nao consegui carregar o Discord original por import: " + importError.message);
+            throw importError;
+        });
+    } else {
+        throw error;
+    }
+}
