@@ -200,7 +200,10 @@ discord_dirs() {
     for raiz in /var/lib/flatpak/app "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app"; do
         [ -d "$raiz" ] || continue
         for id in $FLATPAK_IDS; do
-            for sub in "$raiz/$id"/current/active/files/*/resources; do
+            # O Discord oficial cai em files/<app>/resources; Vesktop, Equibop e Legcord
+            # empacotam o Electron em files/bin/<app>/resources.
+            for sub in "$raiz/$id"/current/active/files/*/resources \
+                       "$raiz/$id"/current/active/files/bin/*/resources; do
                 if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                     printf '%s\n' "$sub"
                 fi
