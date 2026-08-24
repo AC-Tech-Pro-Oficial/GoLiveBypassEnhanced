@@ -727,7 +727,7 @@ function Select-Proxy {
             $manual = (Read-Host '  Endereco da proxy').Trim()
             # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
             # : codificados. Recusar isso aqui deixaria o suporte a login existindo so no plugin.
-            if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}$') {
+            if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
                 throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
             }
             return $manual

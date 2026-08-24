@@ -198,6 +198,10 @@ const quarentena = new Map();     // proxy -> ate quando fica evitada
 
 function quarentenar(proxy, motivo) {
     if (proxy === null) return;
+    if (proxy === manualProxy()) {
+        log(safeProxy(proxy) + " poupada da quarentena por ser a saida configurada (" + motivo + ")");
+        return;
+    }
     const ate = Date.now() + QUARENTENA_MS;
     const ja = quarentena.get(proxy);
     if (ja === undefined || ate > ja) quarentena.set(proxy, ate);
@@ -282,14 +286,24 @@ const TOR_ADDR = typeof settings.torAddr === "string" && settings.torAddr !== ""
 
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
-const PROXY_RE = /^(socks5|socks4|http|https):\/\/(?:(.+)@)?([^:/?#\s@]+):(\d{1,5})$/;
+// Agora suporta RANGE de portas para proxies multiplexados, ex: 10000-10050
+const PROXY_RE = /^(socks5|socks4|http|https):\/\/(?:(.+)@)?([^:/?#\s@]+):(\d{1,5})(?:-(\d{1,5}))?$/;
 
 function parseProxy(value) {
     const match = PROXY_RE.exec(String(value).trim());
     if (match === null) return null;
 
-    const port = Number(match[4]);
-    if (port < 1 || port > 65535) return null;
+    const portStart = Number(match[4]);
+    if (portStart < 1 || portStart > 65535) return null;
+    let finalPort = portStart;
+
+    // Se tiver range, sorteia uma porta do range
+    if (match[5] !== undefined) {
+        const portEnd = Number(match[5]);
+        if (portEnd >= portStart && portEnd <= 65535) {
+            finalPort = Math.floor(Math.random() * (portEnd - portStart + 1)) + portStart;
+        }
+    }
 
     // Dividido no primeiro dois-pontos, entao a senha pode ter quantos quiser.
     const credentials = match[2] === undefined ? "" : match[2];
@@ -308,7 +322,7 @@ function parseProxy(value) {
         user: credentials === "" ? "" : decode(split < 0 ? credentials : credentials.slice(0, split)),
         pass: credentials === "" || split < 0 ? "" : decode(credentials.slice(split + 1)),
         host: match[3],
-        port: port
+        port: finalPort
     };
 }
 
@@ -325,8 +339,20 @@ function manualProxy() {
     const raw = settings.proxy;
     if (typeof raw !== "string" || raw.trim() === "") return "";
 
-    return parseProxy(raw) === null ? null : raw.trim();
+    const parsed = parseProxy(raw);
+    if (parsed === null) return null;
+
+    // Retorna a string ja renderizada com a porta sorteada (se houver range)
+    return parsed.scheme + "://" +
+           (parsed.user !== "" ? parsed.user + ":" + parsed.pass + "@" : "") +
+           parsed.host + ":" + parsed.port;
 }
+
+// Saida manual/privada configurada (com ou sem range multiplexado). Usada para desligar a
+// reposicao de reserva e a troca proativa por RTT: sao mecanismos pensados para saida
+// GRATUITA, que morre sem avisar e precisa de troca em segundo plano. Numa saida privada,
+// entrar neles so custa (ver trySwapByRtt e stockReserves).
+const usingManualProxy = typeof settings.proxy === "string" && settings.proxy.trim() !== "" && parseProxy(settings.proxy) !== null;
 
 // ------------------------------------------------------------------ falar com uma saida
 
@@ -533,7 +559,7 @@ async function probe(proxy, timeoutMs) {
         if (!await tlsHandshake(socket, host, timeoutMs)) return null;
     } else {
         const response = await readOverTls(socket, host, "/api/v9/gateway", timeoutMs);
-        if (response === null || !response.startsWith("HTTP/1.1 200")) return null;
+        if (response === null || (!response.startsWith("HTTP/1.1 200") && !response.startsWith("HTTP/1.1 404"))) return null;
     }
 
     const ms = Date.now() - started;
@@ -666,6 +692,26 @@ function parseProxyScrape(body) {
 }
 
 async function fetchFreeProxies() {
+    // Se o usuario configurou um range multiplexado, usamos ele como nosso "pool publico" privado.
+    // Isso impede que ao falhar a porta principal o app vaze para uma proxy publica aleatoria.
+    const raw = settings.proxy;
+    if (typeof raw === "string" && raw.trim() !== "") {
+        const match = PROXY_RE.exec(raw.trim());
+        if (match !== null && match[5] !== undefined) {
+            const portStart = Number(match[4]);
+            const portEnd = Number(match[5]);
+            if (portEnd >= portStart && portEnd <= 65535) {
+                const poolManual = [];
+                for (let p = portStart; p <= portEnd; p++) {
+                    const str = `${match[1]}://${match[2] ? match[2] + '@' : ''}${match[3]}:${p}`;
+                    poolManual.push({ proxy: str, country: "BR" });
+                }
+                log("usando " + poolManual.length + " portas do pool multiplexado ao inves de proxies publicas");
+                return poolManual;
+            }
+        }
+    }
+
     const porFonte = await Promise.all(FREE_PROXY_FONTES.map(async fonte => {
         try {
             const body = await downloadText(fonte.url, FONTES_TIMEOUT_MS);
@@ -1375,6 +1421,13 @@ function trySwapByRtt(active, live) {
     // (1-1.4s medido) e trocar para gratuita violaria a escolha. Soh troca se o Tor morrer.
     if (routeMode === "tor") return null;
 
+    // Saida manual/privada: as "reservas" no range multiplexado sao portas do MESMO servidor,
+    // com RTT praticamente identico -- entao SWAP_RESERVA_RAZAO quase sempre deixa passar, e
+    // qualquer chacoalhada de rede vira troca. Toda troca reconecta o gateway, e o motor de
+    // voz/video do Discord (WASM) nao sobrevive a isso com a Live no ar: o video cai pra
+    // sempre (so audio) mesmo trocando para uma saida boa. Nao vale o risco por causa de RTT.
+    if (usingManualProxy) return null;
+
     const ema = rttEma.get(active);
     if (ema === undefined || ema < RTT_TROCA_MS) {
         rttLentoSeguidas.delete(active);
@@ -1428,6 +1481,14 @@ function stockReserves(liveReserves) {
     // escolha da pessoa e um dia essas gratuitas venciam o fallback do openThroughPool,
     // trocando a sessao pra fora do Tor sem ninguem pedir (visto ao vivo em 2026-08-23).
     if (routeMode === "tor") return;
+
+    // Saida manual/privada (com ou sem range): nao ha ganho em manter reserva quente. O pote
+    // so serve para a troca proativa por RTT (desligada para manual, ver trySwapByRtt) e para
+    // o fallback de trafego morto no openThroughPool -- que ja tem seu proprio caminho via
+    // refreshExit/huntExits quando a ativa falha de verdade. Manter isto vazio evita testar o
+    // range inteiro (ate 51 portas em paralelo) a cada poucos minutos so para guardar reserva
+    // que nunca vai ser usada.
+    if (usingManualProxy) return;
     if (liveReserves >= MIN_LIVE_RESERVES || stocking !== null) return;
 
     // Relogio proprio, separado do refreshExit de proposito. Compartilhar os dois fazia a

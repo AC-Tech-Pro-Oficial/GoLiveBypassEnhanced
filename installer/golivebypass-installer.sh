@@ -959,7 +959,7 @@ select_proxy() {
             # O mesmo casamento do =~ do bash, com case. O trecho antes do @ e opcional.
             case "$manual" in
                 socks5://*|https://*|http://*)
-                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
                     ;;
                 *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
             esac
