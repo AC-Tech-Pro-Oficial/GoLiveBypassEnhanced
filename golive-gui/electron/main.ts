@@ -505,6 +505,29 @@ interface DiscordInstall {
   bundlePath?: string;
 }
 
+function winAppHasDiscordResources(resourcesPath: string): boolean {
+  const asar = path.join(resourcesPath, "app.asar");
+  const originalAsar = path.join(resourcesPath, "_app.asar");
+  return diskFs.existsSync(asar) || diskFs.existsSync(originalAsar);
+}
+
+// O Squirrel baixa updates numa pasta app-VERSAO nova antes de terminar; enquanto isso ela
+// pode existir sem app.asar/_app.asar. Pegar so a "mais nova" cega falha com NOT_FOUND.
+function findLatestValidWinAppDir(rootPath: string): string | null {
+  let dirs: string[];
+  try {
+    dirs = diskFs.readdirSync(rootPath).filter((d) => d.startsWith("app-"));
+  } catch {
+    return null;
+  }
+  dirs.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  for (const dir of dirs) {
+    const resourcesPath = path.join(rootPath, dir, "resources");
+    if (winAppHasDiscordResources(resourcesPath)) return dir;
+  }
+  return null;
+}
+
 function getWinDiscordInstalls(): DiscordInstall[] {
   const localAppData = process.env.LOCALAPPDATA;
   if (!localAppData) return [];
@@ -514,20 +537,12 @@ function getWinDiscordInstalls(): DiscordInstall[] {
     const rootPath = path.join(localAppData, flavour);
     if (!diskFs.existsSync(rootPath)) continue;
 
-    const dirs = diskFs
-      .readdirSync(rootPath)
-      .filter((d) => d.startsWith("app-"));
-    if (dirs.length === 0) continue;
+    const latestApp = findLatestValidWinAppDir(rootPath);
+    if (!latestApp) continue;
 
-    dirs.sort();
-    const latestApp = dirs[dirs.length - 1];
     const resourcesPath = path.join(rootPath, latestApp, "resources");
     const exePath = path.join(rootPath, latestApp, `${flavour}.exe`);
-    const asar = path.join(resourcesPath, "app.asar");
-    const originalAsar = path.join(resourcesPath, "_app.asar");
-    if (diskFs.existsSync(asar) || diskFs.existsSync(originalAsar)) {
-      installs.push({ flavour, resources: resourcesPath, exePath });
-    }
+    installs.push({ flavour, resources: resourcesPath, exePath });
   }
   return installs;
 }

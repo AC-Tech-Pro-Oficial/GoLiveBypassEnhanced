@@ -54,8 +54,14 @@ function Confirm-Action($question) {
     return $answer -match '^[sSyY]'
 }
 
-# Cada versao do Discord vive numa pasta app-VERSAO propria. A que importa e a mais nova, que
-# e a que o atalho abre.
+function Test-DiscordResourcesReady($resources) {
+    $asar = Join-Path $resources 'app.asar'
+    $original = Join-Path $resources '_app.asar'
+    return (Test-Path -LiteralPath $asar) -or (Test-Path -LiteralPath $original)
+}
+
+# Cada versao do Discord vive numa pasta app-VERSAO propria. A que importa e a mais nova
+# completa: durante um update o Squirrel cria a pasta nova antes de copiar app.asar.
 function Get-DiscordResources {
     $found = @()
     foreach ($flavour in $DiscordFlavours) {
@@ -63,11 +69,18 @@ function Get-DiscordResources {
         if (-not (Test-Path -LiteralPath $root)) { continue }
 
         $versions = Get-ChildItem -LiteralPath $root -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
-            Sort-Object { [Version]($_.Name -replace '^app-', '') } -ErrorAction SilentlyContinue
+            Sort-Object { [Version]($_.Name -replace '^app-', '') } -Descending -ErrorAction SilentlyContinue
         if (-not $versions) { continue }
 
-        $resources = Join-Path $versions[-1].FullName 'resources'
-        if (Test-Path -LiteralPath (Join-Path $resources 'app.asar')) {
+        $resources = $null
+        foreach ($ver in $versions) {
+            $candidate = Join-Path $ver.FullName 'resources'
+            if (Test-DiscordResourcesReady $candidate) {
+                $resources = $candidate
+                break
+            }
+        }
+        if ($resources) {
             $found += [pscustomobject]@{ Flavour = $flavour; Resources = $resources }
         }
     }
