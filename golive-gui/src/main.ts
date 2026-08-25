@@ -15,6 +15,38 @@ declare global {
       setNetMode: (mode: string) => Promise<string>;
       getTorStatus: () => Promise<{ presente: boolean; ativo: boolean; porta: number }>;
       installTor: () => Promise<{ ok: boolean; porta?: number; error?: string }>;
+      testProxy: (proxy: string) => Promise<{
+        ok: boolean;
+        ms?: number;
+        host?: string;
+        port?: number;
+        country?: string;
+        error?: string;
+      }>;
+      startLogWatch: () => Promise<{ path: string }>;
+      stopLogWatch: () => Promise<boolean>;
+      getDiagnostic: (payload: { status: string; note?: string }) => Promise<{
+        text: string;
+        logPath: string;
+        apiConfigured?: boolean;
+      }>;
+      openBugReport: (payload: {
+        status: string;
+        note?: string;
+        title?: string;
+      }) => Promise<{
+        ok: boolean;
+        via?: "api" | "github";
+        url: string;
+        issueNumber?: number;
+        copied: boolean;
+        truncated: boolean;
+        apiError?: string;
+      }>;
+      openLogFolder: () => Promise<string>;
+      setDevLogWindow: (open: boolean) => Promise<boolean>;
+      onLogChunk: (callback: (chunk: string) => void) => void;
+      onDevLogWindowClosed: (callback: () => void) => void;
       onRefreshStartup: (callback: () => void) => void;
       onRefreshStatus: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
@@ -128,11 +160,16 @@ themeBtn.addEventListener('click', () => {
 // O warning do bypass ativo faz o conteudo crescer; a janela e fixa, entao reportamos a altura
 // necessaria para o main process redimensionar e nada ficar cortado.
 function fitWindowToContent() {
-  const container = document.querySelector('.container');
-  if (!container) return;
-  // +1 px de folga: sem isto a ultima linha as vezes ficava cortada por causa do arredondamento.
-  const height = Math.ceil(container.getBoundingClientRect().height + 1);
-  window.api.resizeWindow(height);
+  // Espera o layout apos hidden/details: sem rAF a medicao ainda ve a altura antiga
+  // (Personalizado expandia e a janela nunca encolhia ao voltar para Tor/Gratuitas).
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const container = document.querySelector('.container') as HTMLElement | null;
+      if (!container) return;
+      const height = Math.ceil(container.getBoundingClientRect().height + 1);
+      window.api.resizeWindow(height);
+    });
+  });
 }
 
 async function updateStatus() {
@@ -281,6 +318,13 @@ function selectMode(mode: string) {
     btn.classList.toggle('seg-btn--active', checked);
   }
   manualProxyGroup.hidden = mode !== 'manual';
+  // O status do Tor so faz sentido no modo Tor; nos outros ele so confunde.
+  torStatusEl.hidden = mode !== 'tor';
+  // Fecha o guia VPS ao sair do Personalizado: se ficar aberto, a proxima visita ja nasce alta.
+  if (mode !== 'manual') {
+    const guide = manualProxyGroup.querySelector('details.vps-guide');
+    if (guide) (guide as HTMLDetailsElement).open = false;
+  }
   fitWindowToContent();
 }
 
@@ -357,9 +401,90 @@ for (const btn of segBtns) {
   });
 }
 
+const proxyTestBtn = document.getElementById('proxyTestBtn') as HTMLButtonElement;
+const proxyTestStatus = document.getElementById('proxyTestStatus') as HTMLElement;
+
+proxyTestBtn.addEventListener('click', async () => {
+  const proxy = proxyInput.value.trim();
+  proxyTestBtn.disabled = true;
+  proxyTestStatus.classList.remove('proxy-test-status--ok', 'proxy-test-status--bad');
+  proxyTestStatus.textContent = 'Testando túnel até o gateway...';
+  fitWindowToContent();
+
+  try {
+    const r = await window.api.testProxy(proxy);
+    if (r.ok) {
+      proxyTestStatus.classList.add('proxy-test-status--ok');
+      const geo = r.country ? ` · saída ${r.country}` : '';
+      proxyTestStatus.textContent = `OK — túnel em ${r.ms ?? '?'}ms (${r.host}:${r.port})${geo}`;
+    } else {
+      proxyTestStatus.classList.add('proxy-test-status--bad');
+      const geo = r.country ? ` [${r.country}]` : '';
+      proxyTestStatus.textContent = `${r.error ?? 'Falha no teste'}${geo}`;
+    }
+  } catch (err) {
+    proxyTestStatus.classList.add('proxy-test-status--bad');
+    proxyTestStatus.textContent = err instanceof Error ? err.message : String(err);
+  } finally {
+    proxyTestBtn.disabled = false;
+    fitWindowToContent();
+  }
+});
+
+const vpsGuide = document.querySelector('.vps-guide');
+if (vpsGuide) {
+  vpsGuide.addEventListener('toggle', () => fitWindowToContent());
+}
+
 startupToggle.addEventListener('change', async () => {
   await window.api.setStartup(startupToggle.checked);
 });
+
+// ---------------------------------------------------------------------------
+// Modo desenvolvedor: so o toggle aqui. Logs e report ficam numa janela aparte.
+// ---------------------------------------------------------------------------
+const DEV_KEY = 'golivebypass-dev-mode';
+const devModeToggle = document.getElementById('devModeToggle') as HTMLInputElement;
+const devModeHint = document.getElementById('devModeHint') as HTMLElement;
+
+async function setDevMode(on: boolean) {
+  try {
+    localStorage.setItem(DEV_KEY, on ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+  try {
+    await window.api.setDevLogWindow(on);
+  } catch (err) {
+    console.error(err);
+  }
+  devModeHint.hidden = !on;
+  fitWindowToContent();
+}
+
+devModeToggle.addEventListener('change', () => {
+  void setDevMode(devModeToggle.checked);
+});
+
+window.api.onDevLogWindowClosed?.(() => {
+  devModeToggle.checked = false;
+  devModeHint.hidden = true;
+  try {
+    localStorage.setItem(DEV_KEY, '0');
+  } catch {
+    /* ignore */
+  }
+  fitWindowToContent();
+});
+
+try {
+  if (localStorage.getItem(DEV_KEY) === '1') {
+    devModeToggle.checked = true;
+    void setDevMode(true);
+  }
+} catch {
+  /* ignore */
+}
 
 // A bandeja tambem tem esses controles; sem os avisos, os dois ficariam dessincronizados.
 window.api.onRefreshStartup(refreshStartup);
