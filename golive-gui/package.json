@@ -1,7 +1,9 @@
 {
   "name": "golive-gui",
   "private": true,
-  "version": "1.1.6",
+  "version": "1.1.8",
+  "description": "Devolve o Go Live e a camera do Discord para contas que cairam no bloqueio regional brasileiro",
+  "author": "bezumiya",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {

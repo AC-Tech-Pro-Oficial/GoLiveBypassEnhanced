@@ -115,7 +115,7 @@ os_field() {
 # codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
 # bypass cairia para a lista gratuita sem dizer por que.
 if [ -n "$PROXY" ]; then
-    if ! printf '%s' "$PROXY" | grep -Eq '^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}$'; then
+    if ! printf '%s' "$PROXY" | grep -Eq '^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}(-[0-9]{1,5})?$'; then
         printf '\n  %s[X]%s Endereco de proxy invalido.\n' "$C_RED" "$C_OFF" >&2
         printf '      %sUse socks5://host:porta, ou socks5://usuario:senha@host:porta.%s\n' "$C_DIM" "$C_OFF" >&2
         printf '      %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A).%s\n\n' "$C_DIM" "$C_OFF" >&2
@@ -421,11 +421,29 @@ install_patcher() {
     local proxy_json
     proxy_json="$(printf '%s' "$proxy_value" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 
+    # O modo de rede (routeMode/torAddr) e escolhido no seletor da GUI e vive no mesmo
+    # arquivo. Regravar sem essas chaves apagava a escolha A CADA ativacao: o runtime
+    # voltava ao "auto" em silencio enquanto a GUI seguia mostrando Tor.
+    local route_mode="" tor_addr=""
+    if [ -f "$INSTALL_DIR/settings.json" ]; then
+        route_mode="$(sed -n 's/.*"routeMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
+        tor_addr="$(sed -n 's/.*"torAddr"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
+    fi
+    local net_keys=""
+    if [ -n "$route_mode" ]; then
+        net_keys="$net_keys,
+    \"routeMode\": \"$route_mode\""
+    fi
+    if [ -n "$tor_addr" ]; then
+        net_keys="$net_keys,
+    \"torAddr\": \"$tor_addr\""
+    fi
+
     cat > "$INSTALL_DIR/settings.json" <<JSON
 {
     "enabled": true,
     "proxy": "$proxy_json",
-    "excludedCountries": "$EXCLUDED"
+    "excludedCountries": "$EXCLUDED"$net_keys
 }
 JSON
 

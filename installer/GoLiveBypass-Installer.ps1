@@ -311,9 +311,12 @@ function Install-Pnpm {
     # keyid") ou ele pergunta "Corepack is about to download..." e, sem quem responder,
     # derruba o instalador. Desligar o corepack tira esse atalho do caminho; quem ja tiver
     # o pnpm de verdade instalado passa a ser encontrado de novo.
+    # "disable pnpm", e nao "disable" seco: o segundo leva o atalho do yarn junto, e o yarn
+    # nao e nosso para desligar. Esta funcao so roda com o pnpm ja reprovado no Test-Pnpm,
+    # entao quem tem um corepack que funciona nunca passa por aqui.
     if (Test-Tool 'corepack') {
-        Write-Step 'Desligando o corepack'
-        & corepack disable 2>$null | Out-Null
+        Write-Step 'Desligando o atalho quebrado do pnpm no corepack'
+        & corepack disable pnpm 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { Update-PathFromEnvironment }
     }
 
@@ -724,7 +727,7 @@ function Select-Proxy {
             $manual = (Read-Host '  Endereco da proxy').Trim()
             # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
             # : codificados. Recusar isso aqui deixaria o suporte a login existindo so no plugin.
-            if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}$') {
+            if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
                 throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
             }
             return $manual
