@@ -39,7 +39,7 @@ func Load() (*Config, error) {
 	if !strings.Contains(cfg.GitHubRepo, "/") {
 		return nil, fmt.Errorf("GITHUB_REPO deve estar no formato owner/repo (recebido %q)", cfg.GitHubRepo)
 	}
-	cfg.Labels = splitCSV(getenv("ISSUE_LABELS", "bug"))
+	cfg.Labels = splitCSV(getenv("ISSUE_LABELS", "bug,gui"))
 	return cfg, nil
 }
 

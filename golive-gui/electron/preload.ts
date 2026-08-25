@@ -13,6 +13,21 @@ import { ipcRenderer } from 'electron';
   setNetMode: (mode: string) => ipcRenderer.invoke('set-net-mode', mode),
   getTorStatus: () => ipcRenderer.invoke('get-tor-status'),
   installTor: () => ipcRenderer.invoke('install-tor'),
+  testProxy: (proxy: string) => ipcRenderer.invoke('test-proxy', proxy),
+  startLogWatch: () => ipcRenderer.invoke('start-log-watch'),
+  stopLogWatch: () => ipcRenderer.invoke('stop-log-watch'),
+  getDiagnostic: (payload: { status: string; note?: string }) =>
+    ipcRenderer.invoke('get-diagnostic', payload),
+  openBugReport: (payload: { status: string; note?: string; title?: string }) =>
+    ipcRenderer.invoke('open-bug-report', payload),
+  openLogFolder: () => ipcRenderer.invoke('open-log-folder'),
+  setDevLogWindow: (open: boolean) => ipcRenderer.invoke('set-dev-log-window', open),
+  onLogChunk: (callback: (chunk: string) => void) => {
+    ipcRenderer.on('log-chunk', (_event, chunk: string) => callback(chunk));
+  },
+  onDevLogWindowClosed: (callback: () => void) => {
+    ipcRenderer.on('dev-log-window-closed', () => callback());
+  },
   onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
   onRefreshStatus: (callback: () => void) => ipcRenderer.on('refresh-status', callback),
   resizeWindow: (height: number) => ipcRenderer.send('resize-window', height),

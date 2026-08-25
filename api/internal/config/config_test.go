@@ -8,6 +8,7 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("ISSUE_LABELS", "") // forca o default
 
 	cfg, err := Load()
 	if err != nil {
@@ -25,8 +26,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.MaxLogBytes != 262144 {
 		t.Errorf("MaxLogBytes = %d, want 262144", cfg.MaxLogBytes)
 	}
-	if !reflect.DeepEqual(cfg.Labels, []string{"bug"}) {
-		t.Errorf("Labels = %v, want [bug]", cfg.Labels)
+	if !reflect.DeepEqual(cfg.Labels, []string{"bug", "gui"}) {
+		t.Errorf("Labels = %v, want [bug gui]", cfg.Labels)
 	}
 }
 
@@ -88,7 +89,7 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadEmptyLabelsFallsBackToBug(t *testing.T) {
+func TestLoadEmptyLabelsFallsBackToBugGui(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 	t.Setenv("ISSUE_LABELS", "")
@@ -97,7 +98,7 @@ func TestLoadEmptyLabelsFallsBackToBug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if !reflect.DeepEqual(cfg.Labels, []string{"bug"}) {
-		t.Errorf("Labels = %v, want [bug]", cfg.Labels)
+	if !reflect.DeepEqual(cfg.Labels, []string{"bug", "gui"}) {
+		t.Errorf("Labels = %v, want [bug gui]", cfg.Labels)
 	}
 }
