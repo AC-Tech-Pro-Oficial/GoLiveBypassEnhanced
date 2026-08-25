@@ -138,6 +138,12 @@ function Test-ModCheckout($path) {
     return Test-Path -LiteralPath (Join-Path $path 'src\utils\types.ts')
 }
 
+function Test-DiscordResourcesReady($resources) {
+    $asar = Join-Path $resources 'app.asar'
+    $original = Join-Path $resources '_app.asar'
+    return (Test-Path -LiteralPath $asar) -or (Test-Path -LiteralPath $original)
+}
+
 function Get-DiscordResources {
     $found = @()
     foreach ($name in $DiscordNames) {
@@ -145,15 +151,17 @@ function Get-DiscordResources {
         if (-not (Test-Path -LiteralPath $root)) { continue }
 
         $apps = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Name -match '^app-[0-9]' -and
-                (Test-Path -LiteralPath (Join-Path $_.FullName 'resources'))
-            } |
+            Where-Object { $_.Name -match '^app-[0-9]' } |
             Sort-Object -Descending -Property @{ Expression = {
                 try { [version]($_.Name -replace '^app-', '') } catch { [version]'0.0.0' }
             } }
 
-        foreach ($app in $apps) { $found += (Join-Path $app.FullName 'resources') }
+        foreach ($app in $apps) {
+            $resources = Join-Path $app.FullName 'resources'
+            if (Test-DiscordResourcesReady $resources) {
+                $found += $resources
+            }
+        }
     }
     return $found
 }
