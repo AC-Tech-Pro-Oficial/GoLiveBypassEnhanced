@@ -18,6 +18,7 @@ type IssueCreator interface {
 type handler struct {
 	cfg    *config.Config
 	issues IssueCreator
+	store  *blockStore
 }
 
 func (h *handler) createReport(c *echo.Context) error {
@@ -43,6 +44,17 @@ func (h *handler) createReport(c *echo.Context) error {
 		"issue_number": res.Number,
 		"issue_url":    res.URL,
 	})
+}
+
+func (h *handler) blockStatus(c *echo.Context) error {
+	blocked, retryAfter, remaining := h.store.blockStatus(c.RealIP())
+	resp := map[string]any{"blocked": blocked}
+	if blocked {
+		resp["retry_after"] = retryAfter
+	} else {
+		resp["remaining"] = remaining
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *handler) health(c *echo.Context) error {

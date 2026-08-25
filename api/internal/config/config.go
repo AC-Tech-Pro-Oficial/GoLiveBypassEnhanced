@@ -14,18 +14,23 @@ type Config struct {
 	GitHubRepo  string
 	Labels      []string
 	Port        string
-	RateLimit   float64
-	MaxLogBytes int64
-	LogLevel    string
+	BasePath    string
+	// Rate limit agressivo por IP: quantos requests cabem na janela de 1min.
+	// Estourar a janela bloqueia o IP por BlockSeconds.
+	RateLimitPerMin float64
+	BlockSeconds    int
+	MaxLogBytes     int64
+	LogLevel        string
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		GitHubRepo:  getenv("GITHUB_REPO", "bezumiya/GoLiveBypass"),
-		Port:        getenv("PORT", "8080"),
-		RateLimit:   getenvFloat("RATE_LIMIT", 60) / 60,
-		MaxLogBytes: getenvInt64("MAX_LOG_BYTES", 262144),
-		LogLevel:    getenv("LOG_LEVEL", "info"),
+		GitHubRepo:      getenv("GITHUB_REPO", "bezumiya/GoLiveBypass"),
+		Port:            getenv("PORT", "8080"),
+		RateLimitPerMin: getenvFloat("RATE_LIMIT", 10),
+		BlockSeconds:    getenvInt("BLOCK_SECONDS", 300),
+		MaxLogBytes:     getenvInt64("MAX_LOG_BYTES", 262144),
+		LogLevel:        getenv("LOG_LEVEL", "info"),
 	}
 
 	cfg.APIToken = os.Getenv("API_TOKEN")
@@ -40,7 +45,26 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("GITHUB_REPO deve estar no formato owner/repo (recebido %q)", cfg.GitHubRepo)
 	}
 	cfg.Labels = splitCSV(getenv("ISSUE_LABELS", "bug"))
+
+	cfg.BasePath = strings.Trim(getenv("BASE_PATH", ""), "/")
+	if cfg.BasePath != "" && !isValidBasePath(cfg.BasePath) {
+		return nil, fmt.Errorf("BASE_PATH invalida: %q (use um segmento de path, ex.: bugs)", cfg.BasePath)
+	}
 	return cfg, nil
+}
+
+func isValidBasePath(s string) bool {
+	if len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func getenv(key, def string) string {
@@ -52,6 +76,14 @@ func getenv(key, def string) string {
 
 func getenvInt64(key string, def int64) int64 {
 	v, err := strconv.ParseInt(os.Getenv(key), 10, 64)
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func getenvInt(key string, def int) int {
+	v, err := strconv.Atoi(os.Getenv(key))
 	if err != nil {
 		return def
 	}

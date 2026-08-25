@@ -225,8 +225,17 @@ function trocarPara(nova, motivo) {
     gatewayReconexoes.length = 0;
     missedBeats.delete(nova);
     rttLentoSeguidas.delete(nova);
-    log(safeProxy(chosenExit) + " -> " + safeProxy(nova) + " (" + motivo + ")");
+    const antiga = chosenExit;
+    const vida = antiga === null || lastExitAt === 0 ? "?" : Math.round((Date.now() - lastExitAt) / 1000) + "s";
+    log("saida.trocada | de=" + (antiga === null ? "nenhuma" : safeProxy(antiga)) +
+        " para=" + safeProxy(nova) +
+        " motivo=" + motivo +
+        " vida_da_antiga=" + vida);
     chosenExit = nova;
+    // Corrige o "saida pronta ha Ns" mentindo: sem isto, trocas em runtime
+    // (openThroughPool) nao atualizavam e o log do gateway mostrava a idade
+    // da saida ORIGINAL.
+    lastExitAt = Date.now();
 }
 
 // Estado da recarga pos-gateway-direto.
@@ -234,6 +243,22 @@ let gatewayWentDirectAt = 0;   // quando o roteador abriu direto para um host de
 let reloadCount = 0;           // recargas nesta execucao (reseta quando a sessao volta roteada)
 let lastReloadAt = 0;          // cooldown
 let reloading = false;         // single-flight
+
+// Pasta estavel onde a GUI le os logs (sobrevive a updates do Discord e a
+// desativacao). Espelhar aqui e o que permite o report de bug pegar o log do
+// bypass mesmo depois de o app.asar injetado ser apagado.
+const MIRROR_DIR = (() => {
+    try {
+        if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+            return join(process.env.LOCALAPPDATA, "GoLiveBypass", "logs");
+        }
+        const base = process.env.XDG_DATA_HOME || join(require("os").homedir(), ".local", "share");
+        return join(base, "GoLiveBypass", "logs");
+    } catch {
+        return "";
+    }
+})();
+const MIRROR_MAX_BYTES = 2 * 1024 * 1024;
 
 function log(line) {
     const stamp = new Date().toTimeString().slice(0, 8);
@@ -250,6 +275,21 @@ function log(line) {
     } catch {
         // Ficar sem registro e ruim; derrubar o Discord por causa do registro e pior.
     }
+
+    // Espelho para a pasta estavel (falha silenciosa: nunca derruba o Discord).
+    if (MIRROR_DIR !== "") {
+        try {
+            const alvo = join(MIRROR_DIR, "bypass.log");
+            fs.mkdirSync(MIRROR_DIR, { recursive: true });
+            if (fs.existsSync(alvo) && fs.statSync(alvo).size > MIRROR_MAX_BYTES) {
+                fs.renameSync(alvo, join(MIRROR_DIR, "bypass.1.log"));
+            }
+            fs.appendFileSync(alvo, stamp + " " + line + "\n");
+        } catch {
+            // silencioso
+        }
+    }
+
     console.log("[GoLiveBypass]", line);
 }
 
@@ -394,17 +434,17 @@ function negotiateSocks5(socket, host, port, credentials, done) {
     socket.write(credentials.user === "" ? Buffer.from([5, 1, 0]) : Buffer.from([5, 2, 0, 2]));
 
     readReply(socket, buffer => (buffer.length < 2 ? -1 : 2), greeting => {
-        if (greeting === null || greeting[0] !== 5) return done(false);
+        if (greeting === null || greeting[0] !== 5) return done(false, "etapa=greeting motivo=sem_resposta");
 
         // 0 = sem autenticacao, 2 = usuario e senha (RFC 1929). Qualquer outra coisa, inclusive
         // 0xFF, significa que o proxy nao aceita nada que a gente sabe fazer.
         if (greeting[1] === 2) {
             const user = Buffer.from(credentials.user, "utf8");
             const pass = Buffer.from(credentials.pass, "utf8");
-            if (user.length > 255 || pass.length > 255) return done(false);
+            if (user.length > 255 || pass.length > 255) return done(false, "etapa=auth motivo=credencial_longa");
 
             readReply(socket, buffer => (buffer.length < 2 ? -1 : 2), reply => {
-                if (reply === null || reply[1] !== 0) return done(false);
+                if (reply === null || reply[1] !== 0) return done(false, "etapa=auth motivo=recusada code=socks5:0x" + (reply && reply[1] !== undefined ? reply[1].toString(16) : "??"));
                 sendTarget();
             });
 
@@ -415,7 +455,7 @@ function negotiateSocks5(socket, host, port, credentials, done) {
             return;
         }
 
-        if (greeting[1] !== 0) return done(false);
+        if (greeting[1] !== 0) return done(false, "etapa=greeting code=socks5:0x" + greeting[1].toString(16));
         sendTarget();
     });
 
@@ -437,7 +477,11 @@ function negotiateSocks5(socket, host, port, credentials, done) {
             if (buffer[3] === 4) return 22;
             if (buffer[3] === 3) return 7 + buffer[4];
             return -1;
-        }, reply => done(reply !== null && reply[1] === 0));
+        }, reply => {
+            if (reply !== null && reply[1] === 0) return done(true);
+            const code = reply === null ? "??" : "0x" + reply[1].toString(16);
+            done(false, "etapa=connect code=socks5:" + code);
+        });
     }
 }
 
@@ -453,7 +497,13 @@ function negotiateConnect(socket, host, port, credentials, done) {
     readReply(socket, buffer => {
         const end = buffer.indexOf("\r\n\r\n");
         return end < 0 ? -1 : end + 4;
-    }, reply => done(reply !== null && / 200 /.test(reply.toString("latin1").split("\r\n")[0])));
+    }, reply => {
+        if (reply === null) return done(false, "etapa=http motivo=sem_resposta");
+        const linha = reply.toString("latin1").split("\r\n")[0];
+        if (/ 200 /.test(linha)) return done(true);
+        const status = (linha.match(/^HTTP\/\d\.\d (\d{3})/) || [])[1] || "??";
+        done(false, "etapa=http code=" + status);
+    });
 }
 
 function openTunnel(proxy, host, port, timeoutMs) {
@@ -462,19 +512,26 @@ function openTunnel(proxy, host, port, timeoutMs) {
         if (parsed === null) return resolve(null);
 
         let settled = false;
-        const finish = value => {
+        const inicio = Date.now();
+        const finish = (value, motivo) => {
             if (settled) return;
             settled = true;
             if (value === null) socket.destroy();
             else socket.setTimeout(0);
+            // Log da causa da falha do tunel — o diagnostico que hoje some:
+            // etapa (tcp/greeting/auth/connect/tls), errno (ECONNREFUSED/ETIMEDOUT)
+            // e code (rep SOCKS / status HTTP do CONNECT).
+            if (value === null && motivo) {
+                log("[net] tunel.falha | alvo=" + host + ":" + port + " saida=" + safeProxy(proxy) + " " + motivo + " ms=" + (Date.now() - inicio));
+            }
             resolve(value);
         };
 
         const socket = connect({ host: parsed.host, port: parsed.port });
-        socket.setTimeout(timeoutMs || PROBE_TIMEOUT_MS, () => finish(null));
-        socket.on("error", () => finish(null));
+        socket.setTimeout(timeoutMs || PROBE_TIMEOUT_MS, () => finish(null, "etapa=tcp motivo=timeout"));
+        socket.on("error", e => finish(null, "etapa=tcp errno=" + (e && e.code ? e.code : "desconhecido")));
         socket.once("connect", () => {
-            const done = ok => finish(ok ? socket : null);
+            const done = (ok, motivo) => finish(ok ? socket : null, ok ? undefined : motivo);
             if (parsed.scheme === "socks5") negotiateSocks5(socket, host, port, parsed, done);
             else negotiateConnect(socket, host, port, parsed, done);
         });
@@ -715,10 +772,12 @@ async function fetchFreeProxies() {
     const porFonte = await Promise.all(FREE_PROXY_FONTES.map(async fonte => {
         try {
             const body = await downloadText(fonte.url, FONTES_TIMEOUT_MS);
+            log("fonte " + fonte.tipo + ": ok (" + body.length + " bytes)");
             if (fonte.tipo === "plain") return parsePlain(body);
             if (fonte.tipo === "geonode") return parseGeonode(body);
             return parseProxyScrape(body);
-        } catch {
+        } catch (e) {
+            log("fonte " + fonte.tipo + ": falhou (" + (e && e.message ? e.message : "erro") + ")");
             return [];
         }
     }));
@@ -1156,19 +1215,56 @@ function watchReloads() {
     });
 }
 
+// Telemetria de sessao para o log: contagens acumuladas (a rotacao do arquivo
+// apaga historia — uma linha resumida a cada janela preserva o quadro geral).
+let sessaoRoteadas = 0;
+let sessaoDiretas = 0;
+let sessaoReloads = 0;
+let ultimoVistoAt = 0;      // quando o gateway foi visto pela ultima vez (gw.visto)
+let ultimoRoteadoAt = 0;    // quando o gateway roteou pela ultima vez (gw.roteado)
+let sessaoInicio = Date.now();
+let estatTimer = null;
+
+function emitirEstat() {
+    estatTimer = null;
+    log("estat.sessao | uptime=" + Math.round((Date.now() - sessaoInicio) / 1000) + "s" +
+        " roteadas=" + sessaoRoteadas + " diretas=" + sessaoDiretas +
+        " reloads=" + sessaoReloads +
+        " reconexoes_janela=" + (typeof gatewayReconexoes !== "undefined" ? gatewayReconexoes.length : "?") +
+        " saida_atual=" + (chosenExit === null ? "nenhuma" : safeProxy(chosenExit)));
+}
+function agendarEstat() {
+    if (estatTimer === null) {
+        estatTimer = setTimeout(emitirEstat, 180_000);
+    }
+}
+
 function markGatewayRouted() {
     lastRoutedAt = Date.now();
     ativaEntregouEm = Date.now();
-    if (reloadCount > 0) log("gateway voltou a passar pela saida, teto de recarga resetado");
+    sessaoRoteadas++;
+    if (reloadCount > 0) {
+        // A recarga que foi disparada (maybeReloadAfterDirect) acabou de renascer:
+        // mede o tempo entre o disparo (lastReloadAt) e este roteado.
+        const levou = lastReloadAt === 0 ? "?" : (Date.now() - lastReloadAt) + "ms";
+        log("recarga.renasceu | levou=" + levou +
+            " saida=" + (chosenExit === null ? "nenhuma" : safeProxy(chosenExit)));
+        sessaoReloads++;
+    }
     reloadCount = 0;
 
     gatewayConnCount++;
+    const vistoHa = ultimoVistoAt === 0 ? -1 : Date.now() - ultimoVistoAt;
+    log("gw.roteado | n_sessao=" + gatewayConnCount +
+        " visto_ha=" + (vistoHa < 0 ? "?" : vistoHa + "ms") +
+        " saida=" + (chosenExit === null ? "nenhuma" : safeProxy(chosenExit)));
     if (gatewayConnCount > 1) {
         const comMidia = Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS;
         log("gateway reconectou no meio da sessao (recorrencia " + (gatewayConnCount - 1) + ")"
             + (comMidia ? ": avisando na tela" : ", sem chamada em andamento: nao avisa"));
         if (comMidia) showReconnectWarning(gatewayConnCount - 1);
     }
+    agendarEstat();
 }
 
 // Aviso visual DENTRO do Discord (nao um dialogo do sistema): um elemento nosso, flutuante,
@@ -1594,10 +1690,11 @@ async function openThroughPool(target) {
 
     // A ativa sozinha primeiro: ela e o IP que o servidor ja viu nesta sessao, e trocar sem
     // precisar seria pedir uma reavaliacao a toa.
+    const tAtiva = Date.now();
     const direto = await openTunnel(active, target.host, target.port, RELAY_TIMEOUT_MS);
     if (direto !== null) {
         markGatewayRouted();
-        log("roteado: " + target.host + " pela ativa " + safeProxy(active));
+        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(active) + " via=ativa latencia=" + (Date.now() - tAtiva) + "ms");
         return direto;
     }
 
@@ -1609,11 +1706,12 @@ async function openThroughPool(target) {
     if (won !== null) {
         log("a saida " + safeProxy(active) + " parou de entregar, troquei para " + safeProxy(won.proxy));
         chosenExit = won.proxy;
+        lastExitAt = Date.now();
         missedBeats.delete(active);
         pool = pool.filter(entry => entry.proxy !== active);
         savePool();
         markGatewayRouted();
-        log("roteado: " + target.host + " pela reserva " + safeProxy(won.proxy));
+        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(won.proxy) + " via=reserva latencia=" + (Date.now() - tAtiva) + "ms");
         return won.socket;
     }
 
@@ -1626,8 +1724,9 @@ async function openThroughPool(target) {
         const socket = await openTunnel(cached, target.host, target.port, PROBE_TIMEOUT_MS);
         if (socket !== null) {
             chosenExit = cached;
+            lastExitAt = Date.now();
             markGatewayRouted();
-            log("roteado: " + target.host + " pela saida do cache " + safeProxy(cached));
+            log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(cached) + " via=cache latencia=" + (Date.now() - tAtiva) + "ms");
             return socket;
         }
         log(safeProxy(cached) + " do cache nao entregou " + target.host);
@@ -1637,8 +1736,10 @@ async function openThroughPool(target) {
     if (fresh !== null) {
         const socket = await openTunnel(fresh, target.host, target.port, PROBE_TIMEOUT_MS);
         if (socket !== null) {
+            chosenExit = fresh;
+            lastExitAt = Date.now();
             markGatewayRouted();
-            log("roteado: " + target.host + " pela saida nova " + safeProxy(fresh));
+            log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(fresh) + " via=nova latencia=" + (Date.now() - tAtiva) + "ms");
             return socket;
         }
         log(safeProxy(fresh) + " nao entregou " + target.host + " logo depois de escolhida");
@@ -1708,17 +1809,32 @@ function serveSocks(client) {
                 // gateway — a sessao nasceu (ou vai nascer) pelo IP brasileiro, e o servidor
                 // provavelmente bloqueou. So o roteador sabe disto; e o gatilho confiavel.
                 gatewayWentDirectAt = Date.now();
+                sessaoDiretas++;
+                log("saida.direta | alvo=" + target.host +
+                    " saida_atual=" + (chosenExit === null ? "nenhuma" : safeProxy(chosenExit)));
+                const tDireto = Date.now();
                 upstream = await openDirect(target);
                 // A saida pode ter estado de pe e falhado so nesta conexao (congestionamento,
                 // giro de IP): com saida viva, a recarga repara a sessao na hora, em vez de
                 // esperar o Ctrl+R da pessoa. Sem saida, o settleExit futuro chama isto.
-                if (upstream !== null) maybeReloadAfterDirect();
+                if (upstream !== null) {
+                    log("direto.aberto | alvo=" + target.host + " levou=" + (Date.now() - tDireto) + "ms");
+                    maybeReloadAfterDirect();
+                } else {
+                    log("direto: " + target.host + " falhou (sem rota local?)");
+                }
             }
 
             if (upstream === null) return client.destroy();
             if (client.destroyed) return upstream.destroy();
 
-            upstream.on("error", () => client.destroy());
+            const saidaInfo = typeof chosenExit === "string" && chosenExit ? safeProxy(chosenExit) : "direta";
+            const tTunel = Date.now();
+            upstream.on("error", e => log("[net] tunel.caiu | alvo=" + target.host +
+                " saida=" + saidaInfo +
+                " errno=" + (e && e.code ? e.code : "desconhecido") +
+                " vida=" + Math.round((Date.now() - tTunel) / 1000) + "s"));
+            client.on("error", e => log("[net] cliente.falha | alvo=" + target.host + " errno=" + (e && e.code ? e.code : "desconhecido")));
             client.on("close", () => upstream.destroy());
             upstream.on("close", () => client.destroy());
             upstream.pipe(client);
@@ -1937,13 +2053,23 @@ async function start() {
             }
 
             if (details.resourceType === "webSocket" && isRoutedHost(new URL(details.url).hostname)) {
+                // NUNCA logar a URL: a query do handshake autenticado carrega o token
+                // do Discord. So o hostname + contagem da janela — o suficiente para
+                // diagnosticar reconexoes sem vazar credencial.
+                const agora = Date.now();
+                const host = new URL(details.url).hostname;
                 const saidaInfo = chosenExit === null
                     ? "sem saida ainda"
                     : "saida pronta ha " + Math.round((Date.now() - lastExitAt) / 1000) + "s";
-                log("gateway visto: " + details.url.slice(0, 80) + " | " + saidaInfo);
+                const ultimoVistoHa = ultimoVistoAt === 0 ? "?" : (agora - ultimoVistoAt) + "ms";
+                ultimoVistoAt = agora;
+                log("gw.visto | host=" + host +
+                    " n_janela=" + gatewayReconexoes.length + "/180s" +
+                    " n_sessao=" + (gatewayConnCount + 1) +
+                    " ultimo_visto_ha=" + ultimoVistoHa +
+                    " | " + saidaInfo);
 
                 // Reconexao em rajada (ignora a primeira conexao da sessao, que nao e sinal).
-                const agora = Date.now();
                 if (chosenExit !== null) {
                     gatewayReconexoes.push(agora);
                     while (gatewayReconexoes.length > 0 && gatewayReconexoes[0] < agora - RECONEXAO_JANELA_MS) gatewayReconexoes.shift();
@@ -1952,10 +2078,17 @@ async function start() {
                     // refresh em segundo plano — quando a rajada fechar (3+), ha candidato
                     // novo para trocar em vez de so a sauda velha do pool.
                     if (gatewayReconexoes.length === RECONEXAO_LIMITE - 1) {
+                        log("gw.rajada_antecipada | n=" + gatewayReconexoes.length + "/180s");
                         refreshExit().catch(error => log("a busca antecipada falhou: " + error.message));
                     }
 
                     if (gatewayReconexoes.length >= RECONEXAO_LIMITE) {
+                        // Intervalos entre as reconexoes da rajada (para o log).
+                        const deltas = [];
+                        for (let i = 1; i < gatewayReconexoes.length; i++) deltas.push(gatewayReconexoes[i] - gatewayReconexoes[i - 1]);
+                        const minD = deltas.length ? Math.min(...deltas) : 0;
+                        const medD = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length) : 0;
+
                         const emaAtual = rttEma.get(chosenExit) ?? Infinity;
                         // Cooldown + reserva que preste: trocar entre saidas ruins em cascata
                         // so renasce o gateway a toa; sem reserva melhor, a atual vai para a
@@ -1965,7 +2098,14 @@ async function start() {
                             .filter(proxy => proxy !== chosenExit)
                             .sort((a, b) => (rttEma.get(a) ?? Infinity) - (rttEma.get(b) ?? Infinity))[0];
                         const emaAlvo = alvo === undefined ? Infinity : (rttEma.get(alvo) ?? Infinity);
-                        if (alvo !== undefined && trocaProativaPode() && emaAlvo <= emaAtual * SWAP_RESERVA_RAZAO) {
+                        const podeTrocar = alvo !== undefined && trocaProativaPode() && emaAlvo <= emaAtual * SWAP_RESERVA_RAZAO;
+                        log("gw.rajada_limite | n=" + gatewayReconexoes.length + "/180s" +
+                            " intervalo_min=" + minD + "ms intervalo_med=" + medD + "ms" +
+                            " ema_atual=" + (emaAtual === Infinity ? "?" : Math.round(emaAtual) + "ms") +
+                            " ema_alvo=" + (emaAlvo === Infinity ? "?" : Math.round(emaAlvo) + "ms") +
+                            " troca=" + (podeTrocar ? "sim" : "nao") +
+                            " motivo=" + (alvo === undefined ? "sem_reserva" : !trocaProativaPode() ? "cooldown" : "reserva_pior"));
+                        if (podeTrocar) {
                             const antiga = chosenExit;
                             trocarPara(alvo, RECONEXAO_LIMITE + "+ reconexoes do gateway na janela");
                             quarentenar(antiga, "rajada de reconexoes");

@@ -443,6 +443,30 @@ o servidor liberou video nesta sessao, gateway por socks5://...
 
 A linha que importa é `atribuicao do video guard: null`. **`null` significa que o servidor nem tentou te bloquear** — foi o que a proxy comprou. Se aparecer `variantId: 2`, o gateway subiu pelo seu IP real, e o plugin vai recarregar para tentar de novo.
 
+## Reportar um bug (GUI)
+
+O app gráfico tem um botão **Reportar bug** no rodapé. Ele abre um diálogo onde você descreve o problema e envia um pacote de diagnóstico que vira uma issue no GitHub — sem precisar copiar logs na mão.
+
+**O que é enviado:**
+- **Resumo e descrição** que você digita (até 200 e 8 KB).
+- **Logs da sessão** — cauda do `gui.log`, do `golivebypass.log` (do Discord injetado) e o ring buffer em memória — cortados para 256 KB, mantendo o fim (o mais recente importa mais).
+- **Metadados técnicos** — versão do app, plataforma, modo de roteamento (Tor/gratuitas/personalizado), status do bypass, se o Tor embutido está ativo e em qual porta, uptime.
+
+Depois do envio o app mostra o link da **issue criada** (ex.: `https://github.com/bezumiya/GoLiveBypass/issues/123`). Se preferir, abra direto em `https://github.com/bezumiya/GoLiveBypass/issues`.
+
+**Privacidade — o que NUNCA sai da sua máquina:**
+Sua proxy personalizada (`socks5://usuario:senha@host:porta`) é tratada como segredo. Antes de enviar, o app passa o pacote por três camadas:
+
+- **L1 — padrões conhecidos:** credenciais embutidas em URL (`usuario:***@host`), cabeçalhos `authorization`, tokens do Discord (`mfa.*`) e query string do gateway.
+- **L2 — segredos literais:** qualquer ocorrência exata de usuário, senha, `host:porta` e da URL inteira configurada em `settings.json` vira `<proxy-pessoal>` — mesmo fora de um padrão.
+- **L3 — varredura final:** se algum segredo sobreviveu, **nada é enviado** e o app avisa “proxy apareceu nos logs”. O token da API (`api.skyplaceia.com`) também sai por L2 e trava em L3 se ficar.
+
+Hosts do Discord (`gateway.discord.gg`) e do país de saída podem aparecer — são necessários para diagnosticar rota e latência. Senha e `host:porta` da sua proxy nunca.
+
+**Operação:** o botão chama `POST https://api.skyplaceia.com/bugs/v1/reports` com `Authorization: Bearer <token>` embutido no app (escopo: só criar issue, com rate limit). Rate limit: **1 issue/min por IP** — o 2º envio no mesmo minuto recebe `429` e bloqueia o IP por **300s** (`Retry-After` + `GET /v1/block-status` informam o tempo restante; a GUI mostra a mensagem de bloqueio com contagem regressiva). O corpo é limitado a 512 KB; o campo `log` é cortado em 256 KB. Logs locais nunca excedem 2 MB por arquivo nem 128 KB em memória.
+
+Sem GUI, compartilhe o arquivo de [O registro](#o-registro-o-que-o-plugin-anotou) manualmente numa issue.
+
 ---
 
 ---
