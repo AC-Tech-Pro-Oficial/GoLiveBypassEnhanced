@@ -230,7 +230,16 @@ toggleBtn.addEventListener('click', async () => {
 
   try {
     if (currentState === 'ACTIVE') {
-      await window.api.deactivate();
+      try {
+        await window.api.deactivate();
+      } catch (err) {
+        // O script pode falhar (elevacao/sudo) DEPOIS de fechar o Discord. Em vez de
+        // simplesmente alertar, deixa o botao travado e o status dirá "Desativar Bypass"
+        // enquanto o disco continuar "nosso" — a pessoa sabe que a desinstalacao nao
+        // aconteceu e pode fechar o cliente pra tentar de novo (o boot limpa a orfã).
+        updateStatus();
+        throw err;
+      }
     } else {
       const proxy = proxyInput.value.trim();
       await window.api.activate(proxy);
@@ -442,10 +451,21 @@ startupToggle.addEventListener('change', async () => {
 
 // ---------------------------------------------------------------------------
 // Modo desenvolvedor: so o toggle aqui. Logs e report ficam numa janela aparte.
+// So existe no modo npm run dev: em producao o toggle some e a janela de logs
+// nem abre (o main recusa o pedido quando empacotado).
 // ---------------------------------------------------------------------------
+const IS_DEV = import.meta.env.DEV;
 const DEV_KEY = 'golivebypass-dev-mode';
 const devModeToggle = document.getElementById('devModeToggle') as HTMLInputElement;
 const devModeHint = document.getElementById('devModeHint') as HTMLElement;
+
+if (!IS_DEV) {
+  // Producao nao tem modo dev: a linha inteira (switch + texto) some.
+  const devModeRow = document.getElementById('devModeRow');
+  if (devModeRow) devModeRow.hidden = true;
+  devModeToggle.hidden = true;
+  devModeHint.hidden = true;
+}
 
 async function setDevMode(on: boolean) {
   try {
@@ -478,7 +498,7 @@ window.api.onDevLogWindowClosed?.(() => {
 });
 
 try {
-  if (localStorage.getItem(DEV_KEY) === '1') {
+  if (IS_DEV && localStorage.getItem(DEV_KEY) === '1') {
     devModeToggle.checked = true;
     void setDevMode(true);
   }

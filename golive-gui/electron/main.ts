@@ -1107,10 +1107,19 @@ function linuxStatus(): Promise<string> {
         const anyOurs = discords.some(
           (d: { state: string }) => d.state === "nosso",
         );
+        const anyOursRunning = discords.some(
+          (d: { state: string; running?: string }) => d.state === "nosso" && d.running === "sim",
+        );
         const anyMod = discords.some(
           (d: { state: string }) => d.state === "outromod",
         );
-        if (anyOurs) return "ACTIVE";
+        // O bypass so esta "ativo" de verdade com o cliente aberto: injecao no disco com
+        // nenhum processo vivo e orfa (o boot a reverte), nao um estado ativo.
+        if (anyOursRunning) return "ACTIVE";
+        if (anyOurs && !anyOursRunning) {
+          discordscan.scriptTrace("injeção no disco mas nenhum cliente aberto — considerando inativo");
+          return "INACTIVE";
+        }
         if (anyMod) return "OTHER_MOD";
         return "INACTIVE";
       } catch {
@@ -1182,9 +1191,12 @@ async function linuxActivate(
 async function linuxDeactivate(onChunk: (c: string) => void) {
   const { code, stderr } = await runScript(["--uninstall"], onChunk);
   if (code !== 0) {
+    // Sem manter o marker: o disco continua "nosso"; o boot seguinte reverte a orfa assim
+    // que o cliente estiver fechado. O erro vai inteiro para a UI (stderr cortado no fim da
+    // linha), em vez dos ultimos 3 fragmentos que sumiam com altas linhas longas.
     throw new Error(
-      stderr.split("\n").filter(Boolean).slice(-3).join("\n") ||
-        "Falha ao desativar",
+      stderr.split("\n").map((l) => l.trim()).filter(Boolean).slice(-6).join("\n") ||
+        "Falha ao desativar (a elevacao provavelmente falhou)",
     );
   }
   clearSessionMarker();
@@ -1289,13 +1301,22 @@ async function revertOrphanedInjection() {
   try {
     data = JSON.parse(fs.readFileSync(markerFile(), "utf8"));
   } catch {
-    return; // sem marcador: nada orfao
+    // Sem marker nao ha sessao registrada — no Linux ainda conferimos o status abaixo,
+    // porque a ativacao pode ter vindo do script standalone (fora da GUI).
+    data = null;
   }
 
   // No Linux a injecao vive no script (com permissoes flatpak/sudo); o --restore reverte
   // sem reabrir o Discord no login.
   if (IS_LINUX) {
     clearSessionMarker();
+    if (data === null) {
+      // A ativacao pode ter vindo do script standalone (fora da GUI), sem marker nenhum.
+      // O status e a fonte da verdade: "nosso" parado no disco (nenhum cliente aberto) e
+      // orfa e o boot limpa; com cliente aberto (ACTIVE) ou outro mod no lugar, nao mexe.
+      const status = await linuxStatus().catch(() => "NOT_FOUND");
+      if (status === "ACTIVE" || status === "OTHER_MOD" || status === "NOT_FOUND") return;
+    }
     const { code, stderr } = await runScript(["--restore"]);
     if (code !== 0) {
       console.error("[restore] falha ao reverter injecao orfa:", stderr);
@@ -2581,6 +2602,8 @@ ipcMain.handle("open-log-folder", async () => {
 });
 
 ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
+  // Janela de logs e ferramenta de desenvolvimento: so existe em npm run dev.
+  if (open === true && app.isPackaged) return false;
   if (open === true) {
     openLogWindow();
     return true;
