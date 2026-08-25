@@ -45,58 +45,36 @@
           </p>
         </header>
 
-        <!-- Acoes fixas nos cantos da janela (fora do fluxo do container) -->
-        <div class="warning-anchor corner corner--bl">
-          <button
-            class="icon-btn warn-btn"
-            id="warnBtn"
-            type="button"
-            aria-label="Ver aviso"
-            aria-expanded="false"
-            aria-controls="warningAlert"
-            data-tip="Aviso"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path
-                d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"
-              />
-              <path d="M12 9v4" />
-              <path d="M12 17h.01" />
-            </svg>
-          </button>
-
-          <div id="warningAlert" class="warning-alert" role="status">
-            <svg
-              class="warn-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path
-                d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"
-              />
-              <path d="M12 9v4" />
-              <path d="M12 17h.01" />
-            </svg>
-            <p>
-              <strong>Aviso:</strong> Se a transmiss&atilde;o ficar preta ou
-              n&atilde;o carregar, aperte <kbd id="reloadKeys">Ctrl + R</kbd> no
-              Discord.
-            </p>
-          </div>
+<!-- Toast de aviso — canto superior direito -->
+        <div id="warningToast" class="toast" role="status" hidden>
+          <svg class="warn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/>
+            <path d="M12 9v4"/>
+            <path d="M12 17h.01"/>
+          </svg>
+          <p>
+            <strong>Aviso:</strong> Se a transmiss&atilde;o ficar preta ou n&atilde;o carregar,
+            aperte <kbd id="reloadKeys">Ctrl + R</kbd> no Discord.
+          </p>
+          <button id="toastClose" class="toast-close" type="button" aria-label="Fechar aviso">×</button>
         </div>
+
+        <button
+          class="icon-btn report-btn corner corner--bl"
+          id="bugBtn"
+          type="button"
+          aria-label="Reportar bug"
+          data-tip="Reportar bug"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 8a4 4 0 0 1 8 0v1a3 3 0 0 1-3 3h-2a3 3 0 0 1-3-3V8Z" />
+            <path d="M9 11.7c-.1-.9.3-1.7 1.3-1.9.6-.1 1 .3 1 .9 0 1-.4 1.6-1.2 2.1l-.6.4" />
+            <path d="M4.5 9.5H8M16 9.5h3.5" />
+            <path d="M5 15l3.2-.6M19 15l-3.2-.6" />
+            <path d="M8.8 17.5 8 19a1.5 1.5 0 0 0 1.3 2.1h5.4A1.5 1.5 0 0 0 16 19l-.8-1.5" />
+            <path d="M12 12v4" />
+          </svg>
+        </button>
 
         <a
           href="https://discord.gg/ZeNs47vE4R"
@@ -286,7 +264,7 @@
           </div>
         </div>
 
-        <label class="switch-row">
+        <label class="switch-row" id="devModeRow">
           <input type="checkbox" id="devModeToggle" />
           <span class="switch-track" aria-hidden="true">
             <span class="switch-thumb"></span>
@@ -317,6 +295,52 @@
             >.
           </p>
         </footer>
+
+        <div id="bugDialog" class="bug-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="bugDialogTitle">
+          <div class="bug-dialog__backdrop" id="bugBackdrop"></div>
+          <div class="bug-dialog__panel" role="document">
+            <h2 id="bugDialogTitle" class="bug-dialog__title">Reportar bug</h2>
+            <p class="bug-dialog__hint">Descreva o problema. Logs da sessão são incluídos automaticamente — sua proxy é removida antes de enviar.</p>
+            <div id="bugForm">
+              <label class="bug-field">
+                <span>Resumo *</span>
+                <input id="bugTitle" type="text" maxlength="200" placeholder="Ex: Go Live ainda bloqueado com Tor ativo" />
+              </label>
+              <label class="bug-field">
+                <span>Detalhes</span>
+                <textarea id="bugDesc" rows="4" maxlength="8192" placeholder="O que aconteceu? O que esperava? Passos para reproduzir..."></textarea>
+              </label>
+              <label class="bug-check">
+                <input id="bugIncludeLogs" type="checkbox" checked />
+                <span>Incluir logs da sessão (recomendado)</span>
+              </label>
+            </div>
+            <div id="bugSkeleton" class="bug-skeleton" hidden aria-hidden="true">
+              <div class="skeleton-line skeleton-line--short"></div>
+              <div class="skeleton-line skeleton-line--medium"></div>
+              <div class="skeleton-line skeleton-line--full"></div>
+              <div class="skeleton-field"></div>
+            </div>
+            <div id="bugSuccess" class="bug-success" hidden>
+              <div class="bug-success__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4.5 12.5 9.5 17.5 19.5 7" />
+                </svg>
+              </div>
+              <h3>Obrigado por ajudar!</h3>
+              <p>Seu report foi enviado com sucesso e já ajuda a melhorar o GoLiveBypass para toda a comunidade.</p>
+              <p id="bugSuccessLink" class="bug-success__link"></p>
+            </div>
+            <p id="bugStatus" class="bug-status" role="status"></p>
+            <div class="bug-dialog__actions">
+              <button id="bugCancel" type="button" class="bug-btn bug-btn--ghost">Cancelar</button>
+              <button id="bugSubmit" type="button" class="bug-btn bug-btn--primary">
+                <span class="bug-btn__text">Enviar</span>
+                <span class="bug-btn__spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

@@ -18,6 +18,11 @@ import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { bypassCode } from "./bypass";
 import { runScript } from "./linux-helper";
 import { setupUpdater, isQuittingForUpdate } from "./updater";
+import * as logger from "./logger";
+import * as discordscan from "./discordscan";
+import * as netevents from "./netevents";
+import * as logsDir from "./logsDir";
+import { submitBugReport } from "./bugreport";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -61,6 +66,13 @@ const diskFs: typeof fs = (() => {
 
 const FLAVOURS = ["Discord", "DiscordPTB", "DiscordCanary"];
 
+// Clientes paralelos do Discord (mods standalone) com a MESMA estrutura Electron: pasta
+// <LOCALAPPDATA>/<Nome>/app-<versao>/resources com app.asar. O bypass injeta igual — o
+// que diferencia e o nome da pasta/do executavel. O "Vencord" citado pelos usuarios e o
+// Vesktop (o desktop do Vencord); Vencord/Equicord em si sao builds que usam o plugin.
+const PARALLEL_APPS = ["Vesktop", "Equibop", "Legcord"];
+const ALL_APPS = [...FLAVOURS, ...PARALLEL_APPS];
+
 const MAC_APPS = [
   { flavour: "Discord", appName: "Discord.app", processName: "Discord" },
   {
@@ -73,6 +85,9 @@ const MAC_APPS = [
     appName: "Discord Canary.app",
     processName: "Discord Canary",
   },
+  { flavour: "Vesktop", appName: "Vesktop.app", processName: "Vesktop" },
+  { flavour: "Equibop", appName: "Equibop.app", processName: "Equibop" },
+  { flavour: "Legcord", appName: "Legcord.app", processName: "Legcord" },
 ] as const;
 
 const MAC_HELPER_PROCESSES = [
@@ -80,6 +95,18 @@ const MAC_HELPER_PROCESSES = [
   "Discord Helper (GPU)",
   "Discord Helper (Renderer)",
   "Discord Helper (Plugin)",
+  "Vesktop Helper",
+  "Vesktop Helper (GPU)",
+  "Vesktop Helper (Renderer)",
+  "Vesktop Helper (Plugin)",
+  "Equibop Helper",
+  "Equibop Helper (GPU)",
+  "Equibop Helper (Renderer)",
+  "Equibop Helper (Plugin)",
+  "Legcord Helper",
+  "Legcord Helper (GPU)",
+  "Legcord Helper (Renderer)",
+  "Legcord Helper (Plugin)",
 ];
 
 let mainWindow: BrowserWindow | null = null;
@@ -519,6 +546,19 @@ if (!gotLock) {
   app.on("second-instance", () => showWindow());
 
   app.whenReady().then(() => {
+    // Logger proprio: arquivo + ring buffer, captura console do main process.
+    // O gui.log mora em <settingsDir>/logs/ — pasta estavel, sobrevive a updates.
+    try {
+      const logs = logsDir.garantirLogsDir(app.getPath("home"), process.platform);
+      logger.initLogger(logs);
+      logger.patchConsole();
+      logger.info("app", "iniciado", { versao: app.getVersion(), plataforma: process.platform });
+    } catch {}
+    // Se uma sessao anterior morreu sem o quit limpo (PC desligado, crash), a injecao
+    // ficou orfa: reverte agora para o status nao mentir (bug: "Ativo" sem ter ativado).
+    revertOrphanedInjection().catch((error) =>
+      console.error("[restore] falha na reversao de boot:", error),
+    );
     // Se o modo salvo e Tor, comeca a subir o daemon JA na abertura. Sem isto ha um impasse:
     // o botao de ativar so libera com o Tor verificado, e o Tor so subia ao ativar ou ao
     // clicar no seletor -- mas quem abre o app com Tor ja selecionado nao clica em nada, e
@@ -560,6 +600,9 @@ app.on("before-quit", (event) => {
   cleaningUp = true;
   // O Tor embutido morre junto com o app (e o Discord restaurado nao fica dependente dele).
   stopTor();
+  // O quit e limpo: o marcador de sessao morre aqui, para o boot seguinte nao tentar
+  // reverter nada (a reversao abaixo e a que vale).
+  clearSessionMarker();
   closeLogWindow();
   stopLogWatch();
   // Reversao em background: o runScript roda detached/unref, entao o filho sobrevive ao
@@ -619,20 +662,29 @@ function findLatestValidWinAppDir(rootPath: string): string | null {
 
 function getWinDiscordInstalls(): DiscordInstall[] {
   const localAppData = process.env.LOCALAPPDATA;
+  discordscan.scanInicio("win32", localAppData);
   if (!localAppData) return [];
 
   const installs: DiscordInstall[] = [];
-  for (const flavour of FLAVOURS) {
+  for (const flavour of ALL_APPS) {
     const rootPath = path.join(localAppData, flavour);
-    if (!diskFs.existsSync(rootPath)) continue;
+    const existe = diskFs.existsSync(rootPath);
+    discordscan.scanRaiz(rootPath, existe, flavour);
+    if (!existe) continue;
 
     const latestApp = findLatestValidWinAppDir(rootPath);
     if (!latestApp) continue;
 
     const resourcesPath = path.join(rootPath, latestApp, "resources");
     const exePath = path.join(rootPath, latestApp, `${flavour}.exe`);
+    const asar = path.join(resourcesPath, "app.asar");
+    const originalAsar = path.join(resourcesPath, "_app.asar");
+    if (diskFs.existsSync(asar) || diskFs.existsSync(originalAsar)) {
+      discordscan.scanInstall(resourcesPath, flavour);
+    }
     installs.push({ flavour, resources: resourcesPath, exePath });
   }
+  discordscan.scanResultado(installs.length);
   return installs;
 }
 
@@ -640,6 +692,7 @@ function getMacDiscordInstalls(): DiscordInstall[] {
   const roots = ["/Applications", path.join(homedir(), "Applications")];
   const installs: DiscordInstall[] = [];
   const seen = new Set<string>();
+  discordscan.scanInicio("darwin");
 
   for (const root of roots) {
     for (const { flavour, appName } of MAC_APPS) {
@@ -648,16 +701,24 @@ function getMacDiscordInstalls(): DiscordInstall[] {
       const resources = path.join(bundlePath, "Contents", "Resources");
       const asar = path.join(resources, "app.asar");
       const originalAsar = path.join(resources, "_app.asar");
-      if (diskFs.existsSync(asar) || diskFs.existsSync(originalAsar)) {
+      const existe = diskFs.existsSync(asar) || diskFs.existsSync(originalAsar);
+      discordscan.scanRaiz(bundlePath, existe, flavour);
+      if (existe) {
         installs.push({ flavour, resources, exePath: "", bundlePath });
+        discordscan.scanInstall(resources, flavour);
         seen.add(flavour);
       }
     }
   }
+  discordscan.scanResultado(installs.length);
   return installs;
 }
 
 function getDiscordInstalls(): DiscordInstall[] {
+  // No Linux quem decide e o script standalone (--status/--yes); a varredura
+  // win32/mac aqui so vale nos outros SOs — e logar o scan win no Linux so
+  // confundiria o diagnostico ("localappdata=ausente" sem sentido).
+  if (IS_LINUX) return [];
   return withNoAsar(() =>
     isMac ? getMacDiscordInstalls() : getWinDiscordInstalls(),
   );
@@ -668,21 +729,29 @@ function discordIsRunning(): boolean {
     for (const { processName } of MAC_APPS) {
       try {
         execFileSync("pgrep", ["-x", processName], { stdio: "ignore" });
+        discordscan.runningPgrep(processName, true);
         return true;
-      } catch {}
+      } catch (e) {
+        discordscan.runningPgrep(processName, false, (e as Error)?.message);
+      }
     }
     return false;
   }
 
-  for (const flavour of FLAVOURS) {
+  for (const flavour of ALL_APPS) {
     try {
       const out = execSync(`tasklist /FI "IMAGENAME eq ${flavour}.exe" /NH`, {
         encoding: "utf8",
         stdio: ["pipe", "pipe", "ignore"],
       });
-      if (out.toLowerCase().includes(`${flavour}.exe`.toLowerCase()))
+      if (out.toLowerCase().includes(`${flavour}.exe`.toLowerCase())) {
+        discordscan.runningTasklist(flavour, true);
         return true;
-    } catch {}
+      }
+      discordscan.runningTasklist(flavour, false);
+    } catch (e) {
+      discordscan.runningTasklist(flavour, false, (e as Error)?.message);
+    }
   }
   return false;
 }
@@ -718,7 +787,7 @@ async function killDiscord() {
     return;
   }
 
-  for (const flavour of FLAVOURS) {
+  for (const flavour of ALL_APPS) {
     try {
       execSync(`taskkill /F /T /IM ${flavour}.exe`, { stdio: "ignore" });
     } catch {}
@@ -850,7 +919,7 @@ function writeInjection(asar: string, proxyAddress: string) {
     diskFs.mkdirSync(asar);
     diskFs.writeFileSync(
       path.join(asar, "package.json"),
-      JSON.stringify({ name: "discord", main: "index.js" }),
+      JSON.stringify({ name: "discord", main: "index.js", version: "1.0.0" }),
     );
     diskFs.writeFileSync(path.join(asar, "golivebypass.js"), bypassCode);
     // O modo de rede e a porta do Tor embutido vao junto: o bypass le routeMode e torAddr.
@@ -873,7 +942,11 @@ function writeInjection(asar: string, proxyAddress: string) {
 
 async function activateBypass(event: any, proxyAddress: string = "") {
   const installs = getDiscordInstalls();
-  if (installs.length === 0) throw new Error("Nenhum Discord encontrado.");
+  if (installs.length === 0) {
+    discordscan.ativacaoSemDiscord("nenhum install encontrado na varredura");
+    throw new Error("Nenhum Discord encontrado.");
+  }
+  netevents.gatewayConectando("gateway.discord.gg", "desconhecida");
 
   // Salvo antes de mexer no Discord: mesmo que a injecao falhe, o que a pessoa digitou nao se
   // perde, e o campo continua preenchido na proxima abertura.
@@ -924,6 +997,9 @@ async function activateBypass(event: any, proxyAddress: string = "") {
     startDiscord(install);
   }
 
+  // Registra a sessao: o bypass so se desfaz no quit limpo; se o PC desligar no meio, o
+  // boot seguinte encontra este marcador e reverte a injecao orfa.
+  writeSessionMarker(installs);
 }
 
 async function deactivateAll() {
@@ -956,6 +1032,8 @@ async function deactivateAll() {
     startDiscord(install);
   }
 
+  // Reverteu (de verdade): a sessao terminou, o marcador nao vale mais.
+  clearSessionMarker();
 }
 
 function getStatus(): string {
@@ -984,28 +1062,76 @@ function getStatus(): string {
 // tudo (deteccao, flatpak, sudo, injecao) e o script, e a GUI mostra o progresso.
 // ---------------------------------------------------------------------------
 
+// Flavours (discord/vesktop/equibop/legcord) achados na ultima varredura Linux —
+// exposto no report para mostrar na hora se um cliente paralelo foi visto.
+let ultimosFlavoursLinux = "";
+
 function linuxStatus(): Promise<string> {
   return runScript(["--status", "--json"])
-    .then(({ code, stdout }) => {
-      if (code !== 0) return "NOT_FOUND";
+    .then(({ code, stdout, stderr }) => {
+      // Loga o resultado do script (code) — o stderr de aviso vira trace legivel.
+      if (code !== 0) {
+        discordscan.scriptStatus(code, false);
+        discordscan.scriptTrace(`script falhou com code ${code}`);
+        return "NOT_FOUND";
+      }
       try {
         const data = JSON.parse(stdout);
+        // O script manda banner + avisos pro stderr; extrai so as linhas de
+        // trace/aviso (as que tem conteudo) e loga cada uma como evento.
+        // O banner (nome do app, subtitulo, distro) e ruido — filtra.
+        const stderrLimpo = (stderr ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+        for (const linha of stderrLimpo.split("\n")) {
+          const t = linha.replace(/^[[:space:]]*\[\!\]\s*/, "").trim();
+          if (!t) continue;
+          if (/^(GoLiveBypass standalone|Go Live e camera de volta|CachyOS|Ubuntu|Arch|Fedora|Debian)/.test(t)) continue;
+          discordscan.scriptTrace(t);
+        }
+        discordscan.scriptStatus(code, true);
         const discords = data.discords ?? [];
+        const flavours = new Set<string>();
+        for (const d of discords) {
+          if (typeof d?.path === "string") {
+            const extras: { flavour?: string; detected_by?: string; flatpak_id?: string } = {};
+            if (typeof d.flavour === "string") {
+              extras.flavour = d.flavour;
+              flavours.add(d.flavour);
+            }
+            if (typeof d.detected_by === "string") extras.detected_by = d.detected_by;
+            if (typeof d.flatpak_id === "string") extras.flatpak_id = d.flatpak_id;
+            discordscan.scriptInstall(d.path, String(d.state ?? "?"), extras);
+          }
+        }
+        ultimosFlavoursLinux = [...flavours].join(",");
         if (discords.length === 0) return "NOT_FOUND";
         const anyOurs = discords.some(
           (d: { state: string }) => d.state === "nosso",
         );
+        const anyOursRunning = discords.some(
+          (d: { state: string; running?: string }) => d.state === "nosso" && d.running === "sim",
+        );
         const anyMod = discords.some(
           (d: { state: string }) => d.state === "outromod",
         );
-        if (anyOurs) return "ACTIVE";
+        // O bypass so esta "ativo" de verdade com o cliente aberto: injecao no disco com
+        // nenhum processo vivo e orfa (o boot a reverte), nao um estado ativo.
+        if (anyOursRunning) return "ACTIVE";
+        if (anyOurs && !anyOursRunning) {
+          discordscan.scriptTrace("injeção no disco mas nenhum cliente aberto — considerando inativo");
+          return "INACTIVE";
+        }
         if (anyMod) return "OTHER_MOD";
         return "INACTIVE";
       } catch {
+        discordscan.scriptJsonInvalido(stdout);
         return "NOT_FOUND";
       }
     })
-    .catch(() => "NOT_FOUND");
+    .catch((e) => {
+      discordscan.scriptStatus(-1, false);
+      discordscan.scriptTrace(`script nao executou: ${(e as Error)?.message ?? ""}`);
+      return "NOT_FOUND";
+    });
 }
 
 async function linuxActivate(
@@ -1035,16 +1161,45 @@ async function linuxActivate(
     );
   }
 
+  // Marca a sessao: se o PC desligar sem o quit limpo, o boot seguinte reverte a injecao
+  // que ficou orfa. Os resources sao lidos do --status --json (a injecao no Linux e do
+  // script, nao do getDiscordInstalls).
+  try {
+    const estado = await runScript(["--status", "--json"]);
+    const data = JSON.parse(estado.stdout || "{}");
+    const nossos = Array.isArray(data?.discords)
+      ? data.discords
+          .filter((d: { state?: string }) => d?.state === "nosso")
+          .map((d: { path?: string }) => d?.path)
+          .filter((p: unknown): p is string => typeof p === "string")
+      : [];
+    if (nossos.length > 0) {
+      writeSessionMarker(
+        nossos.map((resources) => ({
+          flavour: "",
+          resources,
+          exePath: "",
+          bundlePath: undefined,
+        } as DiscordInstall)),
+      );
+    }
+  } catch {
+    // sem marcador o boot seguinte nao consegue reverter; a injecao orfa fica para a mao
+  }
 }
 
 async function linuxDeactivate(onChunk: (c: string) => void) {
   const { code, stderr } = await runScript(["--uninstall"], onChunk);
   if (code !== 0) {
+    // Sem manter o marker: o disco continua "nosso"; o boot seguinte reverte a orfa assim
+    // que o cliente estiver fechado. O erro vai inteiro para a UI (stderr cortado no fim da
+    // linha), em vez dos ultimos 3 fragmentos que sumiam com altas linhas longas.
     throw new Error(
-      stderr.split("\n").filter(Boolean).slice(-3).join("\n") ||
-        "Falha ao desativar",
+      stderr.split("\n").map((l) => l.trim()).filter(Boolean).slice(-6).join("\n") ||
+        "Falha ao desativar (a elevacao provavelmente falhou)",
     );
   }
+  clearSessionMarker();
 }
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
@@ -1096,6 +1251,119 @@ function readProxyFrom(file: string) {
     return typeof data.proxy === "string" ? data.proxy : "";
   } catch {
     return "";
+  }
+}
+
+// ======================================================== reversao de injecao orfa
+// O bypass e persistente no disco (app.asar -> _app.asar + pasta-stub) e so volta ao
+// normal no quit limpo da GUI. Se o PC desligar no meio (sem o before-quit rodar), a
+// injecao fica orfa: o Discord abre injetado e a GUI mostra "Ativo" por engano. Este
+// marcador registra o que a sessao injetou; no boot seguinte a GUI reverte o resto.
+function markerFile() {
+  return path.join(settingsDir(), "session.json");
+}
+
+function writeSessionMarker(installs: DiscordInstall[]) {
+  try {
+    fs.mkdirSync(settingsDir(), { recursive: true });
+    fs.writeFileSync(
+      markerFile(),
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: Date.now(),
+        installs: installs.map((i) => i.resources),
+      }),
+    );
+    // Espelha o log do bypass injetado para a pasta estavel (sobrevive a
+    // updates do Discord e a desativacao).
+    for (const install of installs) {
+      const origem = path.join(install.resources, "app.asar", "golivebypass.log");
+      logsDir.espelharLogBypass(origem, app.getPath("home"), process.platform);
+    }
+  } catch {
+    // sem marcador, um desligamento no meio deixaria a injecao orfa; o boot seguinte limpa
+  }
+}
+
+function clearSessionMarker() {
+  try {
+    fs.rmSync(markerFile(), { force: true });
+  } catch {
+    // inofensivo
+  }
+}
+
+// Reverte injecoes deixadas por uma sessao anterior que morreu sem o quit limpo (PC
+// desligado, crash). So mexe onde a injecao e NOSSA, e nao inicia o Discord a toa: se ele
+// ja estava aberto (o caso do status falso ativo), fecha, restaura e reabre.
+async function revertOrphanedInjection() {
+  let data: { installs?: unknown } | null = null;
+  try {
+    data = JSON.parse(fs.readFileSync(markerFile(), "utf8"));
+  } catch {
+    // Sem marker nao ha sessao registrada — no Linux ainda conferimos o status abaixo,
+    // porque a ativacao pode ter vindo do script standalone (fora da GUI).
+    data = null;
+  }
+
+  // No Linux a injecao vive no script (com permissoes flatpak/sudo); o --restore reverte
+  // sem reabrir o Discord no login.
+  if (IS_LINUX) {
+    clearSessionMarker();
+    if (data === null) {
+      // A ativacao pode ter vindo do script standalone (fora da GUI), sem marker nenhum.
+      // O status e a fonte da verdade: "nosso" parado no disco (nenhum cliente aberto) e
+      // orfa e o boot limpa; com cliente aberto (ACTIVE) ou outro mod no lugar, nao mexe.
+      const status = await linuxStatus().catch(() => "NOT_FOUND");
+      if (status === "ACTIVE" || status === "OTHER_MOD" || status === "NOT_FOUND") return;
+    }
+    const { code, stderr } = await runScript(["--restore"]);
+    if (code !== 0) {
+      console.error("[restore] falha ao reverter injecao orfa:", stderr);
+    }
+    return;
+  }
+
+  if (!Array.isArray(data?.installs) || data.installs.length === 0) return;
+
+  const resourcesList = data.installs.filter((r): r is string => typeof r === "string");
+  if (resourcesList.length === 0) return;
+
+  const atuais = getDiscordInstalls();
+  const alvos: DiscordInstall[] = [];
+  for (const resources of resourcesList) {
+    const install =
+      atuais.find((a) => a.resources === resources) ??
+      ({ flavour: "", resources, exePath: "", bundlePath: undefined } as DiscordInstall);
+    // So age onde a injecao ainda e a nossa (outro mod tomou o lugar = nao mexe).
+    const temOriginal = withNoAsar(() => diskFs.existsSync(path.join(resources, "_app.asar")));
+    if (temOriginal && isOurInjection(resources)) alvos.push(install);
+  }
+
+  if (alvos.length === 0) {
+    clearSessionMarker();
+    return;
+  }
+
+  const estavaRodando = discordIsRunning();
+  if (estavaRodando) await killDiscord();
+
+  for (const install of alvos) {
+    const asar = path.join(install.resources, "app.asar");
+    const originalAsar = path.join(install.resources, "_app.asar");
+    try {
+      await safeRemove(asar);
+      await safeRename(originalAsar, asar);
+      clearBundleQuarantine(install.bundlePath);
+      console.log("[restore] injecao orfa revertida:", install.resources);
+    } catch (error) {
+      console.error("[restore] nao consegui reverter:", install.resources, error);
+    }
+  }
+
+  clearSessionMarker();
+  if (estavaRodando) {
+    for (const install of alvos) startDiscord(install);
   }
 }
 
@@ -1186,18 +1454,21 @@ function torEntregando(porta: number, timeoutMs = 20_000): Promise<boolean> {
     const s = require("net").connect({ host: "127.0.0.1", port: porta });
     let etapa: "saudacao" | "conexao" = "saudacao";
     let buf = Buffer.alloc(0);
+    const inicio = Date.now();
 
-    const fim = (v: boolean) => {
+    const fim = (v: boolean, motivo?: string) => {
       s.removeAllListeners();
       s.destroy();
+      if (v) netevents.torTunelVerificado(Date.now() - inicio, porta);
+      else netevents.tunelRecusado(porta, 0, 0, motivo);
       resolve(v);
     };
 
-    s.setTimeout(timeoutMs, () => fim(false));
-    s.on("error", () => fim(false));
+    s.setTimeout(timeoutMs, () => fim(false, `timeout (${timeoutMs}ms)`));
+    s.on("error", (e) => fim(false, (e as Error & { code?: string })?.code ?? (e as Error)?.message));
     // Uma saida que aceita e fecha limpo no meio nao gera erro: FIN nao e erro. Sem isto o
     // retorno so viria quando o prazo estourasse.
-    s.on("close", () => fim(false));
+    s.on("close", () => fim(false, "fechou antes do veredito"));
 
     s.on("connect", () => {
       // SOCKS5, uma unica forma de autenticacao: nenhuma.
@@ -1210,7 +1481,9 @@ function torEntregando(porta: number, timeoutMs = 20_000): Promise<boolean> {
       if (etapa === "saudacao") {
         if (buf.length < 2) return;
         // 0x05 0x00 = SOCKS5 e sem autenticacao. Qualquer outra coisa nao e um Tor utilizavel.
-        if (buf[0] !== 0x05 || buf[1] !== 0x00) return fim(false);
+        if (buf[0] !== 0x05 || buf[1] !== 0x00) {
+          return fim(false, `saudacao invalida (0x${buf[1].toString(16)})`);
+        }
 
         etapa = "conexao";
         buf = buf.subarray(2);
@@ -1229,7 +1502,10 @@ function torEntregando(porta: number, timeoutMs = 20_000): Promise<boolean> {
       // ainda nao tem circuito responde aqui com falha, que e exatamente o caso que queremos
       // pegar antes de dizer que o modo Tor esta pronto.
       if (buf.length < 2) return;
-      fim(buf[0] === 0x05 && buf[1] === 0x00);
+      fim(
+        buf[0] === 0x05 && buf[1] === 0x00,
+        buf[1] === 0x00 ? undefined : `CONNECT recusado (0x${buf[1].toString(16)})`,
+      );
     });
   });
 }
@@ -1512,9 +1788,11 @@ async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
       return { ok: false, error: `sem sha256 conhecido para ${nome}` };
     }
 
-    // Baixa com fetch (Node 18+/Electron tem fetch nativo).
-    const res = await fetch(url);
+    // Baixa com fetch (Node 18+/Electron tem fetch nativo). Erros de rede do
+    // download sao a causa n.1 de "modo Tor nao sobe" — logs com errno/code.
+    const res = await netevents.comLogRede("tor.download", () => fetch(url));
     if (!res.ok) {
+      netevents.socksFalha(`download do Tor falhou (HTTP ${res.status})`);
       return { ok: false, error: `falha no download (HTTP ${res.status})` };
     }
     const buf = Buffer.from(await res.arrayBuffer());
@@ -2324,6 +2602,8 @@ ipcMain.handle("open-log-folder", async () => {
 });
 
 ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
+  // Janela de logs e ferramenta de desenvolvimento: so existe em npm run dev.
+  if (open === true && app.isPackaged) return false;
   if (open === true) {
     openLogWindow();
     return true;
@@ -2353,6 +2633,25 @@ ipcMain.handle("get-proxy", () => {
   }
 
   return "";
+});
+
+ipcMain.handle("report-bug", async (_event, payload: unknown) => {
+  const p = (payload ?? {}) as { title?: string; description?: string; includeLogs?: boolean };
+  const netMode = readNetMode();
+  let statusBypass = "INACTIVE";
+  try {
+    statusBypass = IS_LINUX ? await linuxStatus() : getStatus();
+  } catch {}
+  let torAtivo = false;
+  let torPorta: number | null = null;
+  try {
+    torAtivo = torVerificado && (await portaViva(torPortaEmUso));
+    torPorta = torPortaEmUso;
+  } catch {}
+  return submitBugReport(
+    { title: String(p.title ?? ""), description: String(p.description ?? ""), includeLogs: !!p.includeLogs },
+    { netMode, statusBypass, torAtivo, torPorta, installsFlavours: ultimosFlavoursLinux },
+  );
 });
 
 // A pagina reporta a ALTURA DO CONTEUDO. Com titleBarOverlay, setSize (janela externa)

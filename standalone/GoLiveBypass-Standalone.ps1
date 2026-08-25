@@ -28,7 +28,7 @@ try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch 
 # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e :
 # codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
 # bypass cairia para a lista gratuita sem dizer por que.
-if ($Proxy -ne '' -and $Proxy -notmatch '^(socks5|socks4|https?)://(?:.+@)?[^:/@\s]+:\d{1,5}$') {
+if ($Proxy -ne '' -and $Proxy -notmatch '^(socks5|socks4|https?)://(?:.+@)?[^:/@\s]+:\d{1,5}(?:-\d{1,5})?$') {
     Write-Host ''
     Write-Host '  [X] Endereco de proxy invalido.' -ForegroundColor Red
     Write-Host '      Use socks5://host:porta, ou socks5://usuario:senha@host:porta.' -ForegroundColor DarkGray
@@ -40,7 +40,7 @@ if ($Proxy -ne '' -and $Proxy -notmatch '^(socks5|socks4|https?)://(?:.+@)?[^:/@
 $InstallDir = Join-Path $env:LOCALAPPDATA 'GoLiveBypass'
 $PatcherName = 'golivebypass.js'
 $DiscordFlavours = @('Discord', 'DiscordPTB', 'DiscordCanary')
-$StubPackage = '{"name":"discord","main":"index.js"}'
+$StubPackage = '{"name":"discord","main":"index.js","version":"1.0.0"}'
 
 function Write-Step($m) { Write-Host "  [*] $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }

@@ -51,6 +51,14 @@ declare global {
       onRefreshStatus: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
       setTheme: (theme: string) => void;
+      reportBug: (payload: { title: string; description: string; includeLogs: boolean }) => Promise<{
+        ok: boolean;
+        issueUrl?: string;
+        issueNumber?: number;
+        error?: string;
+        blocked?: boolean;
+        retryAfter?: number;
+      }>;
     }
   }
 }
@@ -114,8 +122,8 @@ const statusTag = document.getElementById('statusTag')!;
 const statusCard = document.getElementById('statusCard')!;
 const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
 const btnText = document.getElementById('btnText')!;
-const warningAlert = document.getElementById('warningAlert')!;
-const warnBtn = document.getElementById('warnBtn') as HTMLButtonElement;
+const warningToast = document.getElementById('warningToast') as HTMLElement | null;
+const toastClose = document.getElementById('toastClose') as HTMLButtonElement | null;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const themeBtn = document.getElementById('themeBtn') as HTMLButtonElement;
@@ -123,26 +131,21 @@ const themeBtn = document.getElementById('themeBtn') as HTMLButtonElement;
 let currentState = 'INACTIVE';
 
 // ---------------------------------------------------------------------------
-// Popover do aviso: abre/fecha no clique do botao "!", e fecha ao clicar fora.
+// Toast de aviso — canto superior direito. Persistente: so fecha quando o
+// usuario clica no "x" (sem auto-close). Reaparece ao ativar o bypass.
 // ---------------------------------------------------------------------------
 function setWarningOpen(open: boolean) {
-  warningAlert.classList.toggle('open', open);
-  warnBtn.setAttribute('aria-expanded', String(open));
-  // O popover flutua sobre o conteudo, entao a altura da janela nao muda.
-  fitWindowToContent();
+  if (!warningToast) return;
+  warningToast.hidden = !open;
 }
 
-warnBtn.addEventListener('click', (event) => {
-  event.stopPropagation();
-  setWarningOpen(!warningAlert.classList.contains('open'));
-});
+toastClose?.addEventListener('click', () => setWarningOpen(false));
 
-document.addEventListener('click', (event) => {
-  const target = event.target as Node;
-  if (!warningAlert.contains(target) && target !== warnBtn) {
-    setWarningOpen(false);
-  }
-});
+// Em dev mostra o toast automaticamente para validar layout sem precisar ativar
+// @ts-ignore - import.meta.env vem do Vite
+if ((import.meta as any).env?.DEV) {
+  window.setTimeout(() => setWarningOpen(true), 700);
+}
 
 // ---------------------------------------------------------------------------
 // Tema: botao alterna; inicia com o valor salvo.
@@ -227,7 +230,16 @@ toggleBtn.addEventListener('click', async () => {
 
   try {
     if (currentState === 'ACTIVE') {
-      await window.api.deactivate();
+      try {
+        await window.api.deactivate();
+      } catch (err) {
+        // O script pode falhar (elevacao/sudo) DEPOIS de fechar o Discord. Em vez de
+        // simplesmente alertar, deixa o botao travado e o status dirá "Desativar Bypass"
+        // enquanto o disco continuar "nosso" — a pessoa sabe que a desinstalacao nao
+        // aconteceu e pode fechar o cliente pra tentar de novo (o boot limpa a orfã).
+        updateStatus();
+        throw err;
+      }
     } else {
       const proxy = proxyInput.value.trim();
       await window.api.activate(proxy);
@@ -439,10 +451,21 @@ startupToggle.addEventListener('change', async () => {
 
 // ---------------------------------------------------------------------------
 // Modo desenvolvedor: so o toggle aqui. Logs e report ficam numa janela aparte.
+// So existe no modo npm run dev: em producao o toggle some e a janela de logs
+// nem abre (o main recusa o pedido quando empacotado).
 // ---------------------------------------------------------------------------
+const IS_DEV = import.meta.env.DEV;
 const DEV_KEY = 'golivebypass-dev-mode';
 const devModeToggle = document.getElementById('devModeToggle') as HTMLInputElement;
 const devModeHint = document.getElementById('devModeHint') as HTMLElement;
+
+if (!IS_DEV) {
+  // Producao nao tem modo dev: a linha inteira (switch + texto) some.
+  const devModeRow = document.getElementById('devModeRow');
+  if (devModeRow) devModeRow.hidden = true;
+  devModeToggle.hidden = true;
+  devModeHint.hidden = true;
+}
 
 async function setDevMode(on: boolean) {
   try {
@@ -475,7 +498,7 @@ window.api.onDevLogWindowClosed?.(() => {
 });
 
 try {
-  if (localStorage.getItem(DEV_KEY) === '1') {
+  if (IS_DEV && localStorage.getItem(DEV_KEY) === '1') {
     devModeToggle.checked = true;
     void setDevMode(true);
   }
@@ -486,3 +509,172 @@ try {
 // A bandeja tambem tem esses controles; sem os avisos, os dois ficariam dessincronizados.
 window.api.onRefreshStartup(refreshStartup);
 window.api.onRefreshStatus(updateStatus);
+
+// ---------------------------------------------------------------------------
+// Report de bug — dialog + IPC
+// ---------------------------------------------------------------------------
+const bugBtn = document.getElementById('bugBtn') as HTMLButtonElement | null;
+const bugDialog = document.getElementById('bugDialog') as HTMLElement | null;
+const bugBackdrop = document.getElementById('bugBackdrop') as HTMLElement | null;
+const bugTitle = document.getElementById('bugTitle') as HTMLInputElement | null;
+const bugDesc = document.getElementById('bugDesc') as HTMLTextAreaElement | null;
+const bugIncludeLogs = document.getElementById('bugIncludeLogs') as HTMLInputElement | null;
+const bugStatus = document.getElementById('bugStatus') as HTMLElement | null;
+const bugCancel = document.getElementById('bugCancel') as HTMLButtonElement | null;
+const bugSubmit = document.getElementById('bugSubmit') as HTMLButtonElement | null;
+const bugForm = document.getElementById('bugForm') as HTMLElement | null;
+const bugSkeleton = document.getElementById('bugSkeleton') as HTMLElement | null;
+const bugSuccess = document.getElementById('bugSuccess') as HTMLElement | null;
+const bugSuccessLink = document.getElementById('bugSuccessLink') as HTMLElement | null;
+const bugDialogTitle = document.getElementById('bugDialogTitle') as HTMLElement | null;
+
+function setBugStatus(msg: string, ok: boolean | null) {
+  if (!bugStatus) return;
+  bugStatus.textContent = msg;
+  bugStatus.className = 'bug-status' + (ok === true ? ' bug-status--ok' : ok === false ? ' bug-status--err' : '');
+}
+
+function setBugLoading(loading: boolean) {
+  if (!bugSubmit || !bugCancel || !bugTitle || !bugDesc || !bugIncludeLogs) return;
+  bugSubmit.disabled = loading;
+  bugCancel.disabled = loading;
+  bugTitle.disabled = loading;
+  bugDesc.disabled = loading;
+  bugIncludeLogs.disabled = loading;
+  bugSubmit.classList.toggle('bug-btn--loading', loading);
+  const txt = bugSubmit.querySelector('.bug-btn__text') as HTMLElement | null;
+  if (txt) txt.textContent = loading ? 'Enviando...' : 'Enviar';
+  if (bugForm) bugForm.hidden = loading;
+  if (bugSkeleton) bugSkeleton.hidden = !loading;
+  const hint = document.querySelector('.bug-dialog__hint') as HTMLElement | null;
+  if (hint) hint.hidden = loading;
+}
+
+function openBugDialog() {
+  if (!bugDialog) return;
+  // reset para estado de formulário
+  pararContagemBloqueio();
+  bugDialog.classList.remove('bug-dialog--success');
+  if (bugForm) bugForm.hidden = false;
+  if (bugSkeleton) bugSkeleton.hidden = true;
+  if (bugSuccess) bugSuccess.hidden = true;
+  if (bugSuccessLink) bugSuccessLink.innerHTML = '';
+  if (bugDialogTitle) bugDialogTitle.textContent = 'Reportar bug';
+  const hint = document.querySelector('.bug-dialog__hint') as HTMLElement | null;
+  if (hint) hint.hidden = false;
+  if (bugCancel) bugCancel.textContent = 'Cancelar';
+  if (bugSubmit) {
+    bugSubmit.hidden = false;
+    const txt = bugSubmit.querySelector<HTMLElement>('.bug-btn__text');
+    if (txt) txt.textContent = 'Enviar';
+  }
+  setBugStatus('', null);
+  setBugLoading(false);
+  bugDialog.hidden = false;
+  bugTitle?.focus();
+  fitWindowToContent();
+}
+function closeBugDialog() {
+  if (!bugDialog) return;
+  pararContagemBloqueio();
+  bugDialog.hidden = true;
+  setBugStatus('', null);
+  setBugLoading(false);
+  fitWindowToContent();
+}
+
+bugBtn?.addEventListener('click', openBugDialog);
+bugBackdrop?.addEventListener('click', closeBugDialog);
+bugCancel?.addEventListener('click', closeBugDialog);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && bugDialog && !bugDialog.hidden) closeBugDialog();
+});
+
+bugSubmit?.addEventListener('click', async () => {
+  const title = (bugTitle?.value ?? '').trim();
+  if (!title) {
+    setBugStatus('Informe um resumo do problema.', false);
+    bugTitle?.focus();
+    return;
+  }
+  if (!bugSubmit || !bugCancel) return;
+  setBugLoading(true);
+  setBugStatus('', null);
+  try {
+    const r = await window.api.reportBug({
+      title,
+      description: bugDesc?.value ?? '',
+      includeLogs: !!bugIncludeLogs?.checked,
+    });
+    if (r.ok) {
+      // Estado de agradecimento: os inputs e as acoes somem, fica so a mensagem.
+      setBugLoading(false);
+      if (bugTitle) bugTitle.value = '';
+      if (bugDesc) bugDesc.value = '';
+      if (bugForm) bugForm.hidden = true;
+      if (bugSkeleton) bugSkeleton.hidden = true;
+      if (bugSuccess) bugSuccess.hidden = false;
+      bugDialog?.classList.add('bug-dialog--success');
+      const hint = document.querySelector('.bug-dialog__hint') as HTMLElement | null;
+      if (hint) hint.hidden = true;
+      if (bugDialogTitle) bugDialogTitle.textContent = 'Obrigado!';
+      if (bugSuccessLink) {
+        if (r.issueUrl) {
+          const n = r.issueNumber ? ` #${r.issueNumber}` : '';
+          bugSuccessLink.innerHTML = `<a href="${r.issueUrl}" target="_blank" rel="noopener">Ver issue${n} no GitHub →</a>`;
+        } else {
+          bugSuccessLink.textContent = '';
+        }
+      }
+      setBugStatus('', null);
+      if (bugCancel) bugCancel.textContent = 'Fechar';
+      if (bugSubmit) bugSubmit.hidden = true;
+      if (bugCancel) bugCancel.hidden = false;
+      fitWindowToContent();
+    } else if (r.blocked && r.retryAfter) {
+      // Bloqueio por spam: mostra a mensagem com o tempo restante e desabilita
+      // o envio com contagem regressiva ate o bloqueio expirar.
+      setBugLoading(false);
+      iniciarContagemBloqueio(r.retryAfter);
+    } else {
+      setBugStatus(r.error || 'Falha ao enviar.', false);
+      setBugLoading(false);
+    }
+  } catch (err) {
+    setBugStatus(String((err as Error)?.message ?? err), false);
+    setBugLoading(false);
+  }
+});
+
+// Contagem regressiva do bloqueio por spam: desabilita o botao Enviar e mostra
+// o tempo restante na mensagem de status, reativando quando expirar.
+let bloqueioTimer: number | null = null;
+function pararContagemBloqueio() {
+  if (bloqueioTimer) {
+    window.clearInterval(bloqueioTimer);
+    bloqueioTimer = null;
+  }
+  if (bugSubmit) bugSubmit.disabled = false;
+}
+function iniciarContagemBloqueio(segundos: number) {
+  pararContagemBloqueio();
+  let restante = Math.max(1, Math.floor(segundos));
+
+  const tick = () => {
+    if (bugStatus) {
+      bugStatus.textContent =
+        restante > 60
+          ? `Você está bloqueado por enviar reports em excesso. Tente novamente em ${Math.ceil(restante / 60)}min.`
+          : `Você está bloqueado por enviar reports em excesso. Tente novamente em ${restante}s.`;
+    }
+    if (bugSubmit) bugSubmit.disabled = true;
+    if (restante <= 0) {
+      pararContagemBloqueio();
+      setBugStatus('', null);
+      return;
+    }
+    restante--;
+  };
+  tick();
+  bloqueioTimer = window.setInterval(tick, 1000);
+}

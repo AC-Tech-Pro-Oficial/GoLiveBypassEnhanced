@@ -95,7 +95,7 @@ const INTERCEPTING_PORTS = new Set([4145]);
 
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
-const PROXY_RULES_RE = /^(socks5|https?):\/\/(?:(.+)@)?([a-z0-9.-]{1,253}):(\d{1,5})$/;
+const PROXY_RULES_RE = /^(socks5|https?):\/\/(?:(.+)@)?([a-z0-9.-]{1,253}):(\d{1,5})(?:-(\d{1,5}))?$/;
 
 export type Scope = "login" | "gateway" | "off";
 

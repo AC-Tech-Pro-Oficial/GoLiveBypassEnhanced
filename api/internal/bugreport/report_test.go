@@ -102,3 +102,39 @@ func TestBuildIssueBodyVazio(t *testing.T) {
 		t.Errorf("secoes vazias nao deveriam aparecer: %q", body)
 	}
 }
+
+func TestBuildIssueBodyTruncaLogNoLimiteDoGitHub(t *testing.T) {
+	// Log gigante (o que a GUI manda com logs completos) — o body montado precisa
+	// caber em MaxIssueBodyLen (64KB), senao o GitHub recusa com 422.
+	logGrande := strings.Repeat("linha de log de diagnostico\n", 20_000)
+	rep := Report{
+		Title:       "t",
+		Description: "descricao do bug",
+		Log:         "=== sessao GUI (inicio do diagnostico) ===\n" + logGrande + "=== fim do log (eventos recentes) ===",
+		Meta:        map[string]string{"os": "linux", "versao": "1.1.6"},
+	}
+	body := BuildIssueBody(rep)
+	if len(body) > MaxIssueBodyLen {
+		t.Fatalf("body com %d bytes, limite %d — GitHub recusaria", len(body), MaxIssueBodyLen)
+	}
+	// O que importa foi preservado: cabecalho, meta e descricao intactos.
+	for _, want := range []string{"**Sistema:**", "| os | linux |", "**Descrição:**", "descricao do bug"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("corpo truncado perdeu %q", want)
+		}
+	}
+	// Head+tail: o INICIO do log (deteccao) e o FIM (eventos recentes) sobrevivem.
+	if !strings.Contains(body, "=== sessao GUI (inicio do diagnostico) ===") {
+		t.Error("inicio do log foi perdido — deveria preservar head+tail")
+	}
+	if !strings.Contains(body, "=== fim do log (eventos recentes) ===") {
+		t.Error("fim do log foi perdido")
+	}
+	// E o log foi cortado no meio com o marcador e o fence fechado.
+	if !strings.Contains(body, "[... log truncado no meio ...]") {
+		t.Error("marcador de truncamento ausente")
+	}
+	if !strings.HasSuffix(body, "\n"+logFence+"\n") {
+		t.Error("fence final nao foi fechado apos truncar")
+	}
+}

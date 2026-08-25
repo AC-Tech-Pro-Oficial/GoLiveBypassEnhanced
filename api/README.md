@@ -145,11 +145,17 @@ Cobertura: validação do payload e montagem do markdown (`internal/bugreport`),
 cliente GitHub contra um fake HTTP (`internal/gh`), e os endpoints completos
 com auth, rate limit, body limit e erros (`internal/server`).
 
-## Integração com a GUI
+## Integração (GUI)
 
-A GUI Electron tem o botão **Reportar bug** (modo desenvolvedor). Se
-`%LOCALAPPDATA%\GoLiveBypass\settings.json` (ou o equivalente em Linux/Mac)
-contiver:
+A GUI Electron usa esta API: o botão **"Reportar bug"** coleta `gui.log` +
+`golivebypass.log` + ring buffer, redige em camadas (L1 regex, L2 segredos
+literais da proxy, L3 varredura final com bloqueio) e chama `POST /v1/reports`
+com o `API_TOKEN` embutido ou configurado (`electron/bugreport.ts`). A resposta
+traz a URL da issue para mostrar ao usuário. Logs são cortados para 256 KB,
+corpo total limitado a 512 KB, rate limit 60/min por IP.
+
+Para apontar a GUI para sua própria instância, coloque em
+`settings.json` (ao lado do executável / `%LOCALAPPDATA%\GoLiveBypass\`):
 
 ```json
 {
@@ -158,6 +164,6 @@ contiver:
 }
 ```
 
-(ou as variáveis de ambiente `GOLIVE_BUG_API_URL` / `GOLIVE_BUG_API_TOKEN`), ela
-chama `POST /v1/reports` e abre a issue criada. Sem isso, cai no formulário
-`github.com/.../issues/new` com o diagnóstico no clipboard.
+(ou as variáveis de ambiente `GOLIVE_BUG_API_URL` / `GOLIVE_BUG_API_TOKEN`).
+Sem isso, a GUI cai no formulário `github.com/.../issues/new` com o diagnóstico
+no clipboard.

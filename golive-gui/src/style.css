@@ -387,6 +387,29 @@ html[data-theme='dark'] .page-ambient::before {
 html[data-theme='dark'] .theme-btn svg.icon-moon { display: none; }
 html[data-theme='dark'] .theme-btn svg.icon-sun { display: block; }
 
+/* Botao de reportar bug (canto inferior esquerdo). Mesma forma e linguagem do
+   botao de tema, com um acento de status (verde/ok) para se diferenciar como acao.
+   O icone e um pouco maior que o padrao para o detalhe do inseto respirar. */
+.report-btn {
+  color: var(--ok-ink);
+  border-color: color-mix(in srgb, var(--ok-ink) 35%, var(--line));
+}
+
+.report-btn:hover {
+  color: var(--ok-ink);
+  background: var(--ok-bg);
+  border-color: color-mix(in srgb, var(--ok-ink) 55%, var(--line-strong));
+}
+
+.report-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+html[data-theme='dark'] .report-btn {
+  border-color: color-mix(in srgb, var(--ok-ink) 45%, var(--line));
+}
+
 /* ------------------------------------------------------------
    Card de status — linha com dado e badge semântico
    ------------------------------------------------------------ */
@@ -976,21 +999,18 @@ body.logs-window {
 }
 
 /* ------------------------------------------------------------
-   Aviso — popover ligado ao botão redondo "!"
+   Toast de aviso — canto superior direito
    ------------------------------------------------------------ */
-.warning-anchor {
+.toast {
   position: fixed;
-}
-
-.warning-alert {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 0;
-  width: 280px;
-  display: none;
+  top: 44px;
+  right: 14px;
+  width: 300px;
+  max-width: calc(100vw - 28px);
+  display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 13px 14px;
+  padding: 12px 12px 12px 14px;
   border-radius: var(--r-md);
   background: var(--warn-bg);
   border: 1px solid var(--warn-line);
@@ -998,12 +1018,18 @@ body.logs-window {
   font-size: 12.5px;
   line-height: 1.6;
   box-shadow: var(--shadow-sm);
-  z-index: 70;
+  z-index: 80;
 }
 
-.warning-alert.open {
-  display: flex;
-  animation: pop-in 180ms var(--ease);
+.toast[hidden] { display: none !important; }
+
+.toast:not([hidden]) {
+  animation: toast-in 220ms var(--ease);
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
 }
 
 @keyframes pop-in {
@@ -1011,9 +1037,30 @@ body.logs-window {
   to   { opacity: 1; transform: none; }
 }
 
-.warning-alert p { flex: 1; }
+.toast p { flex: 1; }
 
-.warning-alert strong { color: var(--ink-strong); font-weight: 600; }
+.toast strong { color: var(--ink-strong); font-weight: 600; }
+
+.toast-close {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--warn-ink);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 150ms var(--ease);
+  margin-top: -2px;
+}
+
+.toast-close:hover {
+  background: color-mix(in srgb, var(--warn-ink) 12%, transparent);
+}
 
 .warn-icon {
   flex-shrink: 0;
@@ -1071,6 +1118,252 @@ kbd {
 .credits-link:focus-visible {
   opacity: 1;
   text-decoration-color: currentColor;
+}
+
+.bug-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------
+   Dialog de report de bug — overlay + painel
+   ------------------------------------------------------------ */
+.bug-dialog[hidden] { display: none !important; }
+.bug-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+.bug-dialog__backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--overlay-bg);
+  backdrop-filter: blur(2px);
+}
+.bug-dialog__panel {
+  position: relative;
+  width: 100%;
+  max-width: 380px;
+  max-height: 92vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.22);
+  padding: 18px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.bug-dialog__title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink-strong);
+}
+.bug-dialog__hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.bug-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.bug-field span { font-weight: 600; font-size: 11px; letter-spacing: 0.02em; color: var(--muted); }
+.bug-field input,
+.bug-field textarea {
+  width: 100%;
+  background: var(--canvas);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  border-radius: var(--r-sm);
+  padding: 9px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  resize: vertical;
+  transition: border-color 150ms var(--ease), box-shadow 150ms var(--ease);
+}
+.bug-field input:focus,
+.bug-field textarea:focus {
+  border-color: var(--ink-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink-strong) 12%, transparent);
+}
+.bug-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.bug-check input { accent-color: var(--ink-strong); }
+.bug-status {
+  min-height: 16px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.bug-status--ok { color: var(--ok-ink); }
+.bug-status--err { color: var(--err-ink); }
+.bug-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+/* Estado de sucesso: botao unico centralizado sob a mensagem de agradecimento */
+.bug-dialog--success .bug-dialog__actions {
+  justify-content: center;
+  margin-top: 10px;
+}
+.bug-btn {
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms var(--ease), border-color 150ms var(--ease), opacity 150ms var(--ease);
+}
+.bug-btn--ghost {
+  background: var(--surface);
+  color: var(--ink);
+}
+.bug-btn--ghost:hover { background: var(--surface-muted); }
+.bug-btn--primary {
+  background: var(--ink-strong);
+  color: var(--canvas);
+  border-color: var(--ink-strong);
+}
+.bug-btn--primary:hover { filter: brightness(1.08); }
+.bug-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.bug-btn__spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: bug-spin 0.6s linear infinite;
+}
+.bug-btn--loading .bug-btn__text { opacity: 0.85; }
+.bug-btn--loading .bug-btn__spinner { display: inline-block; }
+.bug-btn--primary.bug-btn--loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+@keyframes bug-spin { to { transform: rotate(360deg); } }
+
+.bug-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 22px 8px 14px;
+  animation: pop-in 280ms var(--ease);
+}
+.bug-success[hidden] { display: none !important; }
+.bug-success__icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-full);
+  background: var(--ok-bg);
+  color: var(--ok-ink);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--ok-ink) 20%, transparent);
+  animation: pop-in 320ms var(--ease) 80ms backwards;
+}
+.bug-success__icon svg {
+  width: 26px;
+  height: 26px;
+  stroke-dasharray: 30;
+  stroke-dashoffset: 30;
+  animation: bug-draw 420ms var(--ease) 160ms forwards;
+}
+@keyframes bug-draw {
+  to { stroke-dashoffset: 0; }
+}
+.bug-success h3 {
+  font-size: 16.5px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink-strong);
+  margin-top: 4px;
+}
+.bug-success p {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 30ch;
+}
+.bug-success__link {
+  margin-top: 10px;
+}
+.bug-success__link a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--r-full);
+  background: var(--ink-strong);
+  color: var(--canvas);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: filter 150ms var(--ease), transform 150ms var(--ease);
+}
+.bug-success__link a:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.bug-success__link:empty { display: none; }
+
+.bug-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 6px 0 2px;
+}
+.bug-skeleton[hidden] { display: none !important; }
+.skeleton-line {
+  height: 13px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-muted) 25%, var(--line-strong) 37%, var(--surface-muted) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+.skeleton-line--short { width: 46%; }
+.skeleton-line--medium { width: 82%; }
+.skeleton-line--full { width: 100%; }
+.skeleton-field {
+  height: 72px;
+  border-radius: var(--r-sm);
+}
+@keyframes shimmer {
+  from { background-position: 100% 0; }
+  to   { background-position: 0 0; }
+}
+
+@keyframes shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 
 /* ------------------------------------------------------------

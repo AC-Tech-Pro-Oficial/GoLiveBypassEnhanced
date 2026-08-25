@@ -179,11 +179,17 @@ if [ -d "$INSTALL_DIR" ]; then
         echo "  NAO EXISTE"
     fi
     echo
-    echo "--- golivebypass.log (ultimas 120 linhas):"
-    if [ -f "$INSTALL_DIR/golivebypass.log" ]; then
-        echo "  (tamanho: $(stat -c '%s' "$INSTALL_DIR/golivebypass.log" 2>/dev/null) bytes, modificado: $(stat -c '%y' "$INSTALL_DIR/golivebypass.log" 2>/dev/null | cut -d. -f1))"
+    echo "--- bypass.log (ultimas 120 linhas, pasta estavel logs/):"
+    BYPASS_LOG=""
+    if [ -f "$INSTALL_DIR/logs/bypass.log" ]; then
+        BYPASS_LOG="$INSTALL_DIR/logs/bypass.log"
+    elif [ -f "$INSTALL_DIR/golivebypass.log" ]; then
+        BYPASS_LOG="$INSTALL_DIR/golivebypass.log"
+    fi
+    if [ -n "$BYPASS_LOG" ]; then
+        echo "  (tamanho: $(stat -c '%s' "$BYPASS_LOG" 2>/dev/null) bytes, modificado: $(stat -c '%y' "$BYPASS_LOG" 2>/dev/null | cut -d. -f1))"
         echo "  ------------------------------------------------------------"
-        tail -120 "$INSTALL_DIR/golivebypass.log" 2>/dev/null | sed 's/^/  /'
+        tail -120 "$BYPASS_LOG" 2>/dev/null | sed 's/^/  /'
         echo "  ------------------------------------------------------------"
     else
         echo "  NAO EXISTE — o bypass nunca rodou, ou o log esta em outro lugar"

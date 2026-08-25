@@ -43,9 +43,16 @@ unset -f _local_probe 2>/dev/null || true
 
 
 PATCHER_NAME="golivebypass.js"
-INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass"
-STUB_PACKAGE='{"name":"discord","main":"index.js"}'
-FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary"
+# Quando o script roda via sudo (elevacao para mexer em /usr/lib), $HOME vira /root e o patcher
+# iria para uma pasta que o Discord do usuario nao le. SUDO_USER devolve o usuario real.
+_USER_HOME="${SUDO_USER:-${HOME}}"
+if [ -n "${SUDO_USER:-}" ]; then _USER_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || printf '/home/%s' "$SUDO_USER")"; fi
+INSTALL_DIR="${XDG_DATA_HOME:-$_USER_HOME/.local/share}/GoLiveBypass"
+STUB_PACKAGE='{"name":"discord","main":"index.js","version":"1.0.0"}'
+# Clientes do Discord por flatpak: os oficiais e os paralelos publicados no Flathub —
+# Vesktop (dev.vencord.Vesktop), Legcord (app.legcord.Legcord) e Equibop
+# (org.equicord.equibop).
+FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary dev.vencord.Vesktop app.legcord.Legcord org.equicord.equibop"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 MODE="install"
@@ -69,6 +76,7 @@ while [ $# -gt 0 ]; do
         --proxy) PROXY="${2:-}"; shift ;;
         --excluded-countries) EXCLUDED="${2:-BR}"; shift ;;
         --uninstall) MODE="uninstall" ;;
+        --restore) MODE="restore" ;;
         --status) MODE="status" ;;
         --json) JSON=1 ;;
         -y|--yes) ASSUME_YES=1 ;;
@@ -80,17 +88,44 @@ done
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Senha digitada numa janela (zenity/kdialog) para o sudo -S. Cacheada em arquivo
+# temporario para nao repetir a pergunta a cada operacao da injecao (mv, mkdir, cp).
+SUDO_PASS_FILE=""
+sudo_pass_get() {
+    if [ -n "$SUDO_PASS_FILE" ] && [ -f "$SUDO_PASS_FILE" ]; then
+        return 0
+    fi
+    local pass=""
+    if have zenity; then
+        pass="$(zenity --password --title='GoLiveBypass - senha do sudo' 2>/dev/null)"
+    elif have kdialog; then
+        pass="$(kdialog --password 'Senha do sudo (GoLiveBypass)' 2>/dev/null)"
+    fi
+    [ -n "$pass" ] || return 1
+    SUDO_PASS_FILE="$(mktemp)"
+    chmod 600 "$SUDO_PASS_FILE"
+    printf '%s\n' "$pass" > "$SUDO_PASS_FILE"
+    return 0
+}
+
 # Roda um comando como root. O sudo e o padrao, mas em desktops com polkit (Fedora KDE/GNOME,
 # Ubuntu com sudo desativado) ele falha sem TTY ou sem senha configurada — e o pkexec mostra o
 # dialogo grafico do sistema. Tentar os dois cobre os dois mundos; quem falhar, avisa.
+# Sem TTY e sem agente polkit (niri/hyprland headless-ish), nem sudo interativo nem pkexec
+# funcionam — ai a senha e pedida numa janela (zenity deve existir na GUI) e o sudo -S resolve.
 elevate() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
     elif have sudo && sudo -n true 2>/dev/null; then
         # NOPASSWD: sudo direto, sem dialogo.
         sudo "$@"
+    elif have sudo && sudo_pass_get; then
+        # Sem NOPASSWD e sem TTY (GUI/AppImage no niri), o pkexec falha sem agente polkit e o
+        # sudo interativo sem TTY idem. A senha pedida em janela resolve os dois casos. Cacheada
+        # em SUDO_PASS_FILE para nao repetir. Senha errada: invalida o cache e tenta de novo.
+        sudo -S "$@" < "$SUDO_PASS_FILE" || { rm -f "$SUDO_PASS_FILE"; SUDO_PASS_FILE=""; return 1; }
     elif have pkexec; then
-        # Sem sudo sem senha, o dialogo do polkit (KDE/GNOME) resolve.
+        # Dialogo grafico do polkit (GNOME/KDE com agente). Sem agente ele falha com 127.
         pkexec "$@"
     elif have sudo; then
         # Ultimo caso: sudo interativo (terminal). Sem TTY ele falha e o chamador avisa.
@@ -112,7 +147,7 @@ os_field() {
 # codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
 # bypass cairia para a lista gratuita sem dizer por que.
 if [ -n "$PROXY" ]; then
-    if ! printf '%s' "$PROXY" | grep -Eq '^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}$'; then
+    if ! printf '%s' "$PROXY" | grep -Eq '^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}(-[0-9]{1,5})?$'; then
         printf '\n  %s[X]%s Endereco de proxy invalido.\n' "$C_RED" "$C_OFF" >&2
         printf '      %sUse socks5://host:porta, ou socks5://usuario:senha@host:porta.%s\n' "$C_DIM" "$C_OFF" >&2
         printf '      %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A).%s\n\n' "$C_DIM" "$C_OFF" >&2
@@ -138,33 +173,62 @@ confirm() {
 # O app de verdade, com o app.asar, e baixado na primeira execucao para dentro do HOME. Quem
 # so olha /usr/share e /opt nao acha Discord nenhum numa instalacao atual.
 discord_dirs() {
-    local raiz sub base id
+    local raiz sub base id flav detect count=0
 
     base="${XDG_CONFIG_HOME:-$HOME/.config}"
+    detect="bootstrap"
     for sub in \
         "$base"/discord/app-*/resources \
         "$base"/discordptb/app-*/resources \
         "$base"/discordcanary/app-*/resources
     do
-        if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
-            printf '%s\n' "$sub"
-        fi
+        [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ] || continue
+        flav="discord"; case "$sub" in *ptb*) flav="discordptb" ;; *canary*) flav="discordcanary" ;; esac
+        printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
+        count=$((count + 1))
     done
+    warn "trace: bootstrap config varrido (achou $count)"
 
     # Pacotes que ainda embutem o app: discord_arch_electron do AUR (/usr/share/discord),
     # discord-electron-openasar (/usr/lib/discord), os AUR de PTB e Canary (/opt), e qualquer
     # tar.gz antigo que a pessoa tenha extraido na mao.
+    detect="nativo"
     for raiz in \
         /usr/share/discord /usr/share/discord-ptb /usr/share/discord-canary \
         /usr/lib/discord /usr/lib/discord-ptb /usr/lib/discord-canary /usr/lib64/discord \
         /opt/discord /opt/Discord /opt/discord-ptb /opt/discord-canary \
         /usr/local/share/discord \
-        "$HOME/.local/share/discord" "$HOME/Discord" "$HOME/discord"
+        "$HOME/.local/share/discord" "$HOME/.local/share/discordptb" "$HOME/.local/share/discordcanary" "$HOME/Discord" "$HOME/discord"
     do
         [ -d "$raiz" ] || continue
         for sub in "$raiz/resources" "$raiz"; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
-                printf '%s\n' "$sub"
+                flav="discord"; case "$raiz" in *ptb*) flav="discordptb" ;; *canary*) flav="discordcanary" ;; esac
+                printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
+                count=$((count + 1))
+                break
+            fi
+        done
+    done
+
+    # Clientes paralelos (mods standalone) com a mesma estrutura Electron: Vesktop (o desktop
+    # do Vencord), Equibop (fork do Vesktop) e Legcord. Instalam em /opt, /usr/lib e
+    # ~/.local/share conforme o empacotamento (AUR, .deb/.rpm ou portable). O bootstrap do
+    # Discord nao se aplica aqui: o app vem inteiro com o resources/ embutido.
+    detect="paralelo"
+    for raiz in \
+        /usr/share/vesktop /usr/lib/vesktop /usr/lib64/vesktop /opt/vesktop /opt/Vesktop \
+        /usr/share/equibop /usr/lib/equibop /usr/lib64/equibop /opt/equibop /opt/Equibop \
+        /usr/share/legcord /usr/lib/legcord /usr/lib64/legcord /opt/legcord /opt/Legcord \
+        /usr/local/share/vesktop /usr/local/share/equibop /usr/local/share/legcord \
+        "$HOME/.local/share/vesktop" "$HOME/.local/share/equibop" "$HOME/.local/share/legcord"
+    do
+        [ -d "$raiz" ] || continue
+        for sub in "$raiz/resources" "$raiz"; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                flav="vesktop"; case "$raiz" in *equibop*|*Equibop*) flav="equibop" ;; *legcord*|*Legcord*) flav="legcord" ;; esac
+                printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
+                count=$((count + 1))
                 break
             fi
         done
@@ -174,12 +238,18 @@ discord_dirs() {
     # do app.asar e cria uma pasta ao lado, sem reescrever arquivo nenhum, entao os objetos do
     # repositorio ficam intactos. O que muda em relacao ao resto e que um `flatpak update`
     # refaz o deploy inteiro e leva a injecao junto.
+    detect="flatpak"
     for raiz in /var/lib/flatpak/app "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app"; do
         [ -d "$raiz" ] || continue
         for id in $FLATPAK_IDS; do
-            for sub in "$raiz/$id"/current/active/files/*/resources; do
+            # O Discord oficial cai em files/<app>/resources; Vesktop, Equibop e Legcord
+            # empacotam o Electron em files/bin/<app>/resources.
+            for sub in "$raiz/$id"/current/active/files/*/resources \
+                       "$raiz/$id"/current/active/files/bin/*/resources; do
                 if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
-                    printf '%s\n' "$sub"
+                    flav="discord"; case "$id" in *Vesktop*) flav="vesktop" ;; *Legcord*) flav="legcord" ;; *equibop*) flav="equibop" ;; *PTB*) flav="discordptb" ;; *Canary*) flav="discordcanary" ;; esac
+                    printf '%s|%s|%s|%s\n' "$sub" "$flav" "$detect" "$id"
+                    count=$((count + 1))
                 fi
             done
         done
@@ -187,14 +257,18 @@ discord_dirs() {
 
     # O mesmo bootstrap de que fala o comentario la em cima, so que dentro do flatpak: o HOME
     # do Discord vira ~/.var/app/<id>, e o app baixado cai la. Este e do proprio usuario.
+    detect="flatpak-bootstrap"
     for id in $FLATPAK_IDS; do
         for sub in "$HOME/.var/app/$id"/config/discord*/app-*/resources; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
-                printf '%s\n' "$sub"
+                flav="discord"; case "$id" in *Vesktop*) flav="vesktop" ;; *Legcord*) flav="legcord" ;; *equibop*) flav="equibop" ;; *PTB*) flav="discordptb" ;; *Canary*) flav="discordcanary" ;; esac
+                printf '%s|%s|%s|%s\n' "$sub" "$flav" "$detect" "$id"
+                count=$((count + 1))
             fi
         done
     done
 
+    warn "trace: varridas 5 blocos de raizes, achei $count Discord(s)"
     return 0
 }
 
@@ -202,7 +276,7 @@ discord_dirs() {
 flatpak_app_id() {
     local parte
     for parte in $(printf '%s\n' "${1:-}" | tr '/' '\n'); do
-        case "$parte" in com.discordapp.*) printf '%s\n' "$parte"; return 0 ;; esac
+        case "$parte" in com.discordapp.*|dev.vencord.*|app.legcord.*|org.equicord.*) printf '%s\n' "$parte"; return 0 ;; esac
     done
     return 1
 }
@@ -286,7 +360,24 @@ aviso_empacotado() {
         warn "Voce tem o Discord por snap, e ali o sistema de arquivos e somente leitura."
         printf '      %sA injecao nao acontece dentro de um snap. Para usar o standalone,%s\n' "$C_DIM" "$C_OFF" >&2
         printf '      %sinstale o Discord por flatpak, pelo site oficial ou pela sua distro.%s\n' "$C_DIM" "$C_OFF" >&2
+        warn "trace: snap detectado (injecao impossivel, squashfs read-only)"
+    else
+        warn "trace: snap nao detectado"
     fi
+
+    # AppImage dos clientes paralelos: o scan nao injeta neles (e um binario unico, precisa
+    # de extracao), mas o diagnostico deve avisar que o Vesktop/Equibop/Legcord existe e
+    # nao foi considerado — senao a pessoa ve "Discord nao encontrado" com o app na tela.
+    for raiz in "$HOME/Applications" "$HOME/AppImages" "$HOME/.local/bin" "$HOME/Downloads"; do
+        [ -d "$raiz" ] || continue
+        for appimage in "$raiz"/*.AppImage; do
+            [ -e "$appimage" ] || continue
+            case "$(basename "$appimage")" in
+                Vesktop*|Equibop*|Legcord*)
+                    warn "trace: achei AppImage de cliente paralelo em $appimage — injecao exige extracao (instale via pacote/flatpak)" ;;
+            esac
+        done
+    done
 
     return 0
 }
@@ -327,14 +418,60 @@ discord_running() {
     pgrep -x discord-canary >/dev/null 2>&1 && return 0
     pgrep -x discordptb >/dev/null 2>&1 && return 0
 
+    # Clientes paralelos nativos (Vesktop, Equibop, Legcord): o processo costuma ser o
+    # binario generico do Electron (/usr/lib/electron*/electron), entao o NOME do processo
+    # nao identifica nada. O cmdline de todos carrega o caminho do app.asar da pasta
+    # instalada — o running_flav casa pelo nome do flav do install.
+    if [ -n "${FOUND:-}" ]; then
+        if [ -n "$(printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav rest; do
+            case "$flav" in vesktop|equibop|legcord) running_flav "$flav" && printf 'achou\n' ;; esac
+        done)" ]; then
+            return 0
+        fi
+    fi
     # Um `flatpak ps` so, e nao um por id: isto roda em laco de dois em dois segundos enquanto
     # o modo temporario espera o Discord fechar.
     if have flatpak; then
         local rodando
         rodando="$(flatpak ps --columns=application 2>/dev/null || true)"
-        case "$rodando" in *com.discordapp.*) return 0 ;; esac
+        case "$rodando" in *com.discordapp.*|*dev.vencord.*|*app.legcord.*|*org.equicord.*) return 0 ;; esac
     fi
     return 1
+}
+
+# O cliente deste flav esta vivo? Oficiais ("discord*"): pelo NOME do processo. Paralelos
+# (vesktop|equibop|legcord): o processo costuma ser o binario generico do Electron, entao o
+# nome nao identifica nada — mas o cmdline de todos carrega o caminho do app.asar na pasta
+# do cliente (ex.: /usr/lib/equibop/app.asar). O padrao casa "/flav/app.asar" (o main) e
+# "/flav/arrpc" (o helper): nao casa o proprio script nem o shell que o invocou.
+running_flav() {
+    local flav="$1"
+    case "$flav" in
+        vesktop|equibop|legcord)
+            pgrep -f "/$flav/app.asar" >/dev/null 2>&1 || pgrep -f "/$flav/arrpc" >/dev/null 2>&1
+            ;;
+        discord|discordptb|discordcanary)
+            pgrep -x Discord >/dev/null 2>&1 || pgrep -x discord >/dev/null 2>&1 \
+                || pgrep -x discordptb >/dev/null 2>&1 || pgrep -x discord-canary >/dev/null 2>&1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Mata os clientes paralelos pelo caminho do app.asar: o nome do processo nao basta
+# (o Electron generico nao tem o nome do cliente), mas o cmdline carrega a pasta instalada.
+kill_parallel_by_path() {
+    local sig="${1:-}"
+    [ -n "${FOUND:-}" ] || return 0
+    printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav rest; do
+        case "$flav" in
+            vesktop|equibop|legcord)
+                pkill $sig -f "/$flav/app.asar" 2>/dev/null || true
+                pkill $sig -f "/$flav/arrpc" 2>/dev/null || true
+                ;;
+        esac
+    done
+    return 0
 }
 
 stop_discord() {
@@ -348,6 +485,7 @@ stop_discord() {
     pkill -x discord 2>/dev/null || true
     pkill -x discord-canary 2>/dev/null || true
     pkill -x discordptb 2>/dev/null || true
+    kill_parallel_by_path
     if have flatpak; then
         local id
         for id in $FLATPAK_IDS; do
@@ -369,6 +507,7 @@ stop_discord() {
     pkill -9 -x discord 2>/dev/null || true
     pkill -9 -x discord-canary 2>/dev/null || true
     pkill -9 -x discordptb 2>/dev/null || true
+    kill_parallel_by_path -9
     for i in $(seq 1 20); do
         sleep 0.25
         discord_running || return 0
@@ -426,22 +565,36 @@ JSON
     ok "Configuracao gravada em $INSTALL_DIR/settings.json"
 }
 
+# Devolve 1 em qualquer falha, sem matar o script (set -eu mataria o processo inteiro se
+# fosse chamada sem guarda -- e com varios Discords paralelos numa mesma rodada, um so falhar
+# em elevar (dialogo do polkit recusado, sem TTY, disco cheio) nao pode levar os outros junto.
+# Cada passo desfaz o anterior antes de devolver, para a pasta sair como entrou.
 install_injection() {
     local resources="$1"
     local patcher="$INSTALL_DIR/$PATCHER_NAME"
 
-    as_root "$resources" mv "$resources/app.asar" "$resources/_app.asar"
+    if ! as_root "$resources" mv "$resources/app.asar" "$resources/_app.asar"; then
+        warn "Nao consegui mover o app.asar em $resources."
+        return 1
+    fi
 
     if ! as_root "$resources" mkdir -p "$resources/app.asar"; then
-        as_root "$resources" mv "$resources/_app.asar" "$resources/app.asar"
-        fail "Nao consegui criar a pasta de injecao."
+        as_root "$resources" mv "$resources/_app.asar" "$resources/app.asar" || true
+        warn "Nao consegui criar a pasta de injecao em $resources."
+        return 1
     fi
 
     local tmp
     tmp="$(mktemp -d)"
     printf '%s' "$STUB_PACKAGE" > "$tmp/package.json"
     printf 'require(%s);\n' "\"$patcher\"" > "$tmp/index.js"
-    as_root "$resources" cp "$tmp/package.json" "$tmp/index.js" "$resources/app.asar/"
+    if ! as_root "$resources" cp "$tmp/package.json" "$tmp/index.js" "$resources/app.asar/"; then
+        rm -rf "$tmp"
+        as_root "$resources" rm -rf "$resources/app.asar" || true
+        as_root "$resources" mv "$resources/_app.asar" "$resources/app.asar" || true
+        warn "Nao consegui copiar o carregador em $resources."
+        return 1
+    fi
     rm -rf "$tmp"
 }
 
@@ -456,14 +609,29 @@ remove_injection() {
 
 
 # Reabre o Discord depois de injetar ou de desfazer. Quem tem o flatpak e um Discord nativo
-# pela metade acabaria com o errado aberto: abre o mesmo que foi mexido.
+# pela metade acabaria com o errado aberto: abre o mesmo que foi mexido. Recebe a linha crua
+# do FOUND (path|flav|...) para abrir o binario certo do flav — injetou no Equibop, abre o
+# equibop, nao "discord".
 start_discord() {
-    local resources="${1:-}" id exe
+    local linha="${1:-}" resources="" flav="" id exe
 
-    if [ -n "$resources" ] && id="$(flatpak_app_id "$resources")" && have flatpak; then
+    resources="${linha%%|*}"
+    [ -n "$resources" ] || return 1
+
+    if id="$(flatpak_app_id "$resources")" && have flatpak; then
         nohup flatpak run "$id" >/dev/null 2>&1 &
         return 0
     fi
+
+    flav="$(printf '%s' "$linha" | cut -d'|' -f2)"
+    case "$flav" in
+        equibop|vesktop|legcord)
+            if have "$flav"; then
+                nohup "$flav" >/dev/null 2>&1 &
+                return 0
+            fi
+            ;;
+    esac
 
     for exe in discord Discord discord-canary; do
         if have "$exe"; then
@@ -487,23 +655,29 @@ FOUND="$(discord_dirs)"
 if [ "$MODE" = "status" ]; then
     if [ "$JSON" -eq 1 ]; then
         # Saida maquina para a GUI: um JSON com o estado de cada Discord encontrado.
-        # A ordem e estavel e o caminho e a chave, entao a GUI nao precisa de parser.
+        # Formato de cada linha do FOUND: path|flavour|detected_by|flatpak_id(opcional)
         printf '{"discords":['
         first=1
-        printf '%s\n' "$FOUND" | while IFS= read -r resources; do
+        printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav detect id; do
             [ "$first" -eq 1 ] || printf ','
             first=0
-            printf '{"path":"%s","state":"%s"}' "$resources" "$(injection_state "$resources")"
+            running="nao"
+            if running_flav "$flav"; then running="sim"; fi
+            printf '{"path":"%s","state":"%s","flavour":"%s","detected_by":"%s","running":"%s"' "$resources" "$(injection_state "$resources")" "$flav" "$detect" "$running"
+            if [ -n "$id" ]; then
+                printf ',"flatpak_id":"%s"' "$id"
+            fi
+            printf '}'
         done
         printf ']}'
         printf '\n'
         exit 0
     fi
-    printf '%s\n' "$FOUND" | while IFS= read -r resources; do
+    printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav detect id; do
         case "$(injection_state "$resources")" in
-            vanilla)  printf '  %s: sem nada instalado\n' "$resources" >&2 ;;
-            nosso)    printf '  %s: com o GoLiveBypass standalone\n' "$resources" >&2 ;;
-            outromod) printf '  %s: com Equicord/Vencord (ou outro mod)\n' "$resources" >&2 ;;
+            vanilla)  printf '  %s (%s): sem nada instalado\n' "$resources" "$flav" >&2 ;;
+            nosso)    printf '  %s (%s): com o GoLiveBypass standalone\n' "$resources" "$flav" >&2 ;;
+            outromod) printf '  %s (%s): com Equicord/Vencord (ou outro mod)\n' "$resources" "$flav" >&2 ;;
         esac
     done
     [ -f "$INSTALL_DIR/golivebypass.log" ] && tail -12 "$INSTALL_DIR/golivebypass.log" >&2
@@ -512,7 +686,43 @@ fi
 
 if [ "$MODE" = "uninstall" ]; then
     stop_discord
-    printf '%s\n' "$FOUND" | while IFS= read -r resources; do
+    failed=0
+    # Arquivo em vez de pipe: o while dentro de um pipe roda em subshell, e o "failed"
+    # nao voltaria para o pai. Com redirecionamento, o laco roda no shell principal.
+    tmp="$(mktemp)"
+    printf '%s\n' "$FOUND" > "$tmp"
+    while IFS='|' read -r resources flav detect id; do
+        if [ "$(injection_state "$resources")" != "nosso" ]; then
+            warn "$resources nao tem o standalone, deixando como esta."
+            continue
+        fi
+        if remove_injection "$resources" && [ "$(injection_state "$resources")" = "vanilla" ]; then
+            ok "$resources voltou ao normal."
+            if id="$(flatpak_app_id "$resources")"; then
+                revoke_flatpak_access "$id" "$INSTALL_DIR"
+            fi
+        else
+            warn "NAO consegui desinstalar de $resources — a elevacao falhou ou o arquivo esta bloqueado."
+            failed=1
+        fi
+    done < "$tmp"
+    rm -f "$tmp"
+
+    # Nao reabrir o Discord nao-revertido: abriria com a injecao ainda no disco, e o botao
+    # da GUI voltaria a "Ativo" por engano. Se nada falhou e ha um vanilla pra abrir, abre.
+    if [ "$failed" -eq 0 ]; then
+        start_discord "$(printf '%s\n' "$FOUND" | head -1)"
+        exit 0
+    fi
+    exit 1
+fi
+
+# Igual ao --uninstall, mas sem reabrir o Discord: usado pela GUI no boot para reverter
+# uma injecao orfa de uma sessao anterior que morreu sem o quit limpo (PC desligado,
+# crash). Reabrir aqui abriria o Discord de surpresa no login.
+if [ "$MODE" = "restore" ]; then
+    stop_discord
+    printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav detect id; do
         if [ "$(injection_state "$resources")" != "nosso" ]; then
             warn "$resources nao tem o standalone, deixando como esta."
             continue
@@ -522,21 +732,32 @@ if [ "$MODE" = "uninstall" ]; then
             revoke_flatpak_access "$id" "$INSTALL_DIR"
         fi
     done
-
-    # Modo portatil: ao desfazer, reabre o Discord limpo (mesmo comportamento do app do Windows).
-    start_discord "$(printf '%s\n' "$FOUND" | head -1)"
     exit 0
 fi
 
-printf '%s\n' "$FOUND" | while IFS= read -r resources; do
+injected=0
+# O while do pipe roda em subshell; o acumulador precisa ser um arquivo para o -eq valer.
+lista="$(mktemp)"
+tally="$(mktemp)"
+printf '%s\n' "$FOUND" > "$lista"
+while IFS='|' read -r resources flav detect id; do
     state="$(injection_state "$resources")"
-    printf '  %s: %s\n' "$resources" "$state" >&2
+    printf '  %s (%s): %s\n' "$resources" "$flav" "$state" >&2
 
     if [ "$state" = "outromod" ]; then
         warn "Este Discord ja tem Equicord ou Vencord injetado."
         printf '      %sO standalone ocupa o mesmo lugar, entao instalar aqui desliga o outro mod.%s\n' "$C_DIM" "$C_OFF" >&2
         printf '      %sSe voce usa Equicord ou Vencord, prefira o plugin: ele convive com o resto.%s\n' "$C_DIM" "$C_OFF" >&2
         confirm "Substituir o mod em $resources pelo standalone?" || { warn "Deixei como estava."; continue; }
+    fi
+
+    # Vesktop, Equibop e Legcord de flatpak usam Electron 18 com zypak, que tenta ler o
+    # app.asar como arquivo no bootstrap: a pasta de injecao faz o app nem abrir. O Discord
+    # oficial de flatpak (Electron antigo) nao tem esse problema.
+    if id="$(flatpak_app_id "$resources")" && case "$id" in dev.vencord.*|app.legcord.*|org.equicord.*) true ;; *) false ;; esac; then
+        warn "Flatpak do $id: a injecao por pasta app.asar nao abre este cliente (Electron 18/zypak)."
+        printf '      %sPrefira a versao nativa (pacote da distro, AUR, deb/rpm) deste cliente.%s\n' "$C_DIM" "$C_OFF" >&2
+        confirm "Mesmo assim injetar em $id?" || { warn "Deixei como estava."; continue; }
     fi
 
     install_patcher
@@ -552,16 +773,29 @@ printf '%s\n' "$FOUND" | while IFS= read -r resources; do
     [ "$state" = "outromod" ] && remove_injection "$resources"
     if [ "$(injection_state "$resources")" = "nosso" ]; then
         ok "Ja estava injetado, so atualizei o bypass."
+        printf '1\n' >> "$tally"
         continue
     fi
 
-    install_injection "$resources"
+    if ! install_injection "$resources"; then
+        warn "Pulei $resources -- os outros Discords encontrados continuam."
+        continue
+    fi
+    printf '1\n' >> "$tally"
     ok "$resources pronto."
-done
+done < "$lista"
+injected="$(grep -c . "$tally" || true)"
+rm -f "$lista" "$tally"
 
 # Modo portatil: reabre o Discord ja com o bypass ativo (mesmo comportamento do app do Windows).
 # head -1 em vez de pipe para o while: nohup num subshell morreria junto com ele.
 start_discord "$(printf '%s\n' "$FOUND" | head -1)"
+if [ "$injected" -eq 0 ]; then
+    # Nada foi injetado: nao reabrir (senao a GUI mostraria um "sucesso" mentiroso) e
+    # falhar de verdade para o chamador enxergar.
+    printf '\n  %sNADA foi injetado — a elevacao falhou ou nenhum Discord foi tocado.%s\n' "$C_RED" "$C_OFF" >&2
+    exit 1
+fi
 printf '\n  %sDiscord aberto com o GoLiveBypass.%s\n' "$C_GREEN" "$C_OFF" >&2
 
 # O updater do Discord baixa a versao nova numa pasta app-<versao> inteiramente nova, entao a

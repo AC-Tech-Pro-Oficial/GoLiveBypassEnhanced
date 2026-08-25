@@ -52,7 +52,7 @@ PLUGIN_FILES="goLiveBypass/index.tsx goLiveBypass/native.ts"
 PLUGIN_DIR_NAME="goLiveBypass"
 EQUICORD_GIT="https://github.com/Equicord/Equicord"
 VENCORD_GIT="https://github.com/Vendicated/Vencord"
-FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary"
+FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary dev.vencord.Vesktop app.legcord.Legcord org.equicord.equibop"
 
 MODE="menu"
 MOD=""
@@ -105,7 +105,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 flatpak_app_id() {
     local parte
     for parte in $(printf '%s\n' "${1:-}" | tr '/' '\n'); do
-        case "$parte" in com.discordapp.*) printf '%s\n' "$parte"; return 0 ;; esac
+        case "$parte" in com.discordapp.*|dev.vencord.*|app.legcord.*|org.equicord.*) printf '%s\n' "$parte"; return 0 ;; esac
     done
     return 1
 }
@@ -333,6 +333,7 @@ installed_mod() {
             *equicord*) echo "Equicord"; return 0 ;;
             *vesktop*) echo "Vesktop"; return 0 ;;
             *vencord*) echo "Vencord"; return 0 ;;
+            *legcord*) echo "Legcord"; return 0 ;;
         esac
     done <<EOF
 $(discord_resources)
@@ -636,7 +637,7 @@ discord_running() {
     if have flatpak; then
         local rodando
         rodando="$(flatpak ps --columns=application 2>/dev/null || true)"
-        case "$rodando" in *com.discordapp.*) return 0 ;; esac
+        case "$rodando" in *com.discordapp.*|*dev.vencord.*|*app.legcord.*|*org.equicord.*) return 0 ;; esac
     fi
     return 1
 }
@@ -959,7 +960,7 @@ select_proxy() {
             # O mesmo casamento do =~ do bash, com case. O trecho antes do @ e opcional.
             case "$manual" in
                 socks5://*|https://*|http://*)
-                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
                     ;;
                 *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
             esac
