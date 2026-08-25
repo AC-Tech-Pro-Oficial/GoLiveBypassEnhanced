@@ -6,6 +6,7 @@ import {
   nativeImage,
   Tray,
   shell,
+  clipboard,
 } from "electron";
 import path, { dirname } from "path";
 import { fileURLToPath } from "url";
@@ -82,6 +83,8 @@ const MAC_HELPER_PROCESSES = [
 ];
 
 let mainWindow: BrowserWindow | null = null;
+let logWindow: BrowserWindow | null = null;
+let suppressLogClosedNotify = false;
 let tray: Tray | null = null;
 
 // Fechar a janela esconde na bandeja (Windows) / barra de menus (Mac); so o Sair do menu
@@ -262,11 +265,95 @@ function createWindow() {
   }
 }
 
+function loadLogsPage(win: BrowserWindow) {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const base = process.env.VITE_DEV_SERVER_URL.replace(/\/?$/, "/");
+    win.loadURL(`${base}logs.html`);
+  } else {
+    win.loadFile(path.join(__dirname, "../dist/logs.html"));
+  }
+}
+
+function closeLogWindow() {
+  if (!logWindow || logWindow.isDestroyed()) {
+    logWindow = null;
+    return;
+  }
+  // Fecha pelo toggle: nao manda o evento que desligaria o switch de novo.
+  suppressLogClosedNotify = true;
+  const win = logWindow;
+  logWindow = null;
+  try {
+    win.destroy();
+  } catch {
+    /* ignore */
+  }
+}
+
+function openLogWindow() {
+  if (logWindow && !logWindow.isDestroyed()) {
+    logWindow.show();
+    logWindow.focus();
+    return;
+  }
+
+  // Ao lado da janela principal, sem alongar a UI principal.
+  let x: number | undefined;
+  let y: number | undefined;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const [mx, my] = mainWindow.getPosition();
+    const [mw] = mainWindow.getSize();
+    x = mx + mw + 12;
+    y = my;
+  }
+
+  logWindow = new BrowserWindow({
+    width: 520,
+    height: 560,
+    x,
+    y,
+    minWidth: 420,
+    minHeight: 360,
+    resizable: true,
+    icon: loadAsset("icon.png"),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+    autoHideMenuBar: true,
+    titleBarStyle: isMac ? "hiddenInset" : "hidden",
+    ...(isMac
+      ? { trafficLightPosition: { x: 8, y: 8 }, useContentSize: true }
+      : { titleBarOverlay: TITLEBAR[theme] }),
+  });
+
+  logWindow.setTitle("GoLiveBypass — Logs");
+  logWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  logWindow.on("closed", () => {
+    logWindow = null;
+    stopLogWatch();
+    if (!suppressLogClosedNotify && mainWindow && !mainWindow.isDestroyed() && !quitting) {
+      mainWindow.webContents.send("dev-log-window-closed");
+    }
+    suppressLogClosedNotify = false;
+  });
+
+  loadLogsPage(logWindow);
+}
+
 // A janela precisa refletir o que a bandeja fez; sem isto, ativar/desativar pelo icone deixava
 // a interface com o estado antigo (botao "Ativar" com o bypass ja ativo, por exemplo).
 function refreshWindowStatus() {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('refresh-status');
+    mainWindow.webContents.send("refresh-status");
+  }
+  if (logWindow && !logWindow.isDestroyed()) {
+    logWindow.webContents.send("refresh-status");
   }
 }
 
@@ -473,6 +560,8 @@ app.on("before-quit", (event) => {
   cleaningUp = true;
   // O Tor embutido morre junto com o app (e o Discord restaurado nao fica dependente dele).
   stopTor();
+  closeLogWindow();
+  stopLogWatch();
   // Reversao em background: o runScript roda detached/unref, entao o filho sobrevive ao
   // app.quit() e o Discord nao fica com a injecao pendurada. Sem esperar: o "Sair" sai na
   // hora mesmo se o script demorar (fechar o Discord, flatpak, sudo...).
@@ -1579,6 +1668,656 @@ ipcMain.handle("install-tor", async () => {
   return r.ok ? { ok: true, porta: r.porta } : { ok: false, error: r.error };
 });
 
+// ------------------------------------------------------------------ teste de proxy (Personalizado / VPS)
+// A mesma pergunta do Tor: esta saida abre tunel ate o gateway? Sem isto a pessoa cola um
+// endereco errado, ativa o bypass e o Discord fica carregando sem saber por que.
+
+const PROXY_URL_RE =
+  /^(socks5|socks4|http|https):\/\/(?:(.+)@)?([^:/?#\s@]+):(\d{1,5})$/i;
+
+function parseProxyUrl(value: string): {
+  scheme: string;
+  user: string;
+  pass: string;
+  host: string;
+  port: number;
+} | null {
+  const match = PROXY_URL_RE.exec(String(value).trim());
+  if (!match) return null;
+  const port = Number(match[4]);
+  if (port < 1 || port > 65535) return null;
+
+  const credentials = match[2] ?? "";
+  const split = credentials.indexOf(":");
+  const decode = (raw: string) => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  };
+
+  return {
+    scheme: match[1].toLowerCase(),
+    user: credentials === "" ? "" : decode(split < 0 ? credentials : credentials.slice(0, split)),
+    pass: credentials === "" || split < 0 ? "" : decode(credentials.slice(split + 1)),
+    host: match[3],
+    port,
+  };
+}
+
+function openSocks5Tunnel(
+  proxyHost: string,
+  proxyPort: number,
+  user: string,
+  pass: string,
+  destHost: string,
+  destPort: number,
+  timeoutMs = 12_000,
+): Promise<import("net").Socket | null> {
+  return new Promise((resolve) => {
+    const net = require("net") as typeof import("net");
+    const s = net.connect({ host: proxyHost, port: proxyPort });
+    let etapa: "saudacao" | "auth" | "resposta" = "saudacao";
+    let buf = Buffer.alloc(0);
+    let settled = false;
+
+    const fim = (sock: import("net").Socket | null) => {
+      if (settled) return;
+      settled = true;
+      s.setTimeout(0);
+      s.removeAllListeners();
+      if (sock === null) s.destroy();
+      resolve(sock);
+    };
+
+    const enviarConnect = () => {
+      buf = Buffer.alloc(0);
+      const alvo = Buffer.from(destHost, "utf8");
+      s.write(
+        Buffer.concat([
+          Buffer.from([0x05, 0x01, 0x00, 0x03, alvo.length]),
+          alvo,
+          Buffer.from([(destPort >> 8) & 0xff, destPort & 0xff]),
+        ]),
+      );
+      etapa = "resposta";
+    };
+
+    s.setTimeout(timeoutMs, () => fim(null));
+    s.on("error", () => fim(null));
+    s.on("close", () => {
+      if (!settled) fim(null);
+    });
+
+    s.on("connect", () => {
+      if (user === "") s.write(Buffer.from([0x05, 0x01, 0x00]));
+      else s.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
+    });
+
+    s.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+
+      if (etapa === "saudacao") {
+        if (buf.length < 2) return;
+        if (buf[0] !== 0x05) return fim(null);
+        const metodo = buf[1];
+        buf = buf.subarray(2);
+
+        if (metodo === 0x02) {
+          const u = Buffer.from(user, "utf8");
+          const p = Buffer.from(pass, "utf8");
+          if (u.length > 255 || p.length > 255) return fim(null);
+          etapa = "auth";
+          s.write(
+            Buffer.concat([
+              Buffer.from([0x01, u.length]),
+              u,
+              Buffer.from([p.length]),
+              p,
+            ]),
+          );
+          return;
+        }
+        if (metodo !== 0x00) return fim(null);
+        enviarConnect();
+        return;
+      }
+
+      if (etapa === "auth") {
+        if (buf.length < 2) return;
+        if (buf[1] !== 0x00) return fim(null);
+        buf = buf.subarray(2);
+        enviarConnect();
+        return;
+      }
+
+      if (etapa === "resposta") {
+        // VER REP RSV ATYP + ADDR + PORT
+        if (buf.length < 4) return;
+        if (buf[0] !== 0x05 || buf[1] !== 0x00) return fim(null);
+        const atyp = buf[3];
+        let headerLen = 4;
+        if (atyp === 0x01) headerLen = 10;
+        else if (atyp === 0x03) {
+          if (buf.length < 5) return;
+          headerLen = 5 + buf[4] + 2;
+        } else if (atyp === 0x04) headerLen = 22;
+        else return fim(null);
+        if (buf.length < headerLen) return;
+        const leftover = buf.subarray(headerLen);
+        if (leftover.length > 0) s.unshift(leftover);
+        fim(s);
+      }
+    });
+  });
+}
+
+function readHttpOverTls(
+  socket: import("net").Socket,
+  host: string,
+  reqPath: string,
+  timeoutMs = 10_000,
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const tls = require("tls") as typeof import("tls");
+    let body = "";
+    let settled = false;
+    const fim = (v: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        tlsSock.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve(v);
+    };
+
+    const timer = setTimeout(() => fim(null), timeoutMs);
+    const tlsSock = tls.connect({ socket, servername: host, host }, () => {
+      tlsSock.write(
+        `GET ${reqPath} HTTP/1.1\r\nHost: ${host}\r\nAccept: */*\r\nConnection: close\r\n\r\n`,
+      );
+    });
+    tlsSock.setEncoding("latin1");
+    tlsSock.on("error", () => fim(null));
+    tlsSock.on("data", (chunk: string) => {
+      body += chunk;
+      if (body.length > 65536) fim(body);
+    });
+    tlsSock.on("end", () => fim(body || null));
+  });
+}
+
+async function exitCountryViaSocks(
+  proxyHost: string,
+  proxyPort: number,
+  user: string,
+  pass: string,
+): Promise<string | null> {
+  // Mesma estrategia do bypass: Cloudflare /cdn-cgi/trace, fallback ipwho.is (Tor = loc=T1).
+  const geoHost = "cloudflare.com";
+  const sock = await openSocks5Tunnel(proxyHost, proxyPort, user, pass, geoHost, 443, 10_000);
+  if (sock) {
+    const response = await readHttpOverTls(sock, geoHost, "/cdn-cgi/trace");
+    sock.destroy();
+    const match = response ? /^loc=([A-Z]{2})/m.exec(response) : null;
+    if (match && match[1] !== "T1") return match[1];
+  }
+
+  try {
+    const fallbackHost = "ipwho.is";
+    const fb = await openSocks5Tunnel(
+      proxyHost,
+      proxyPort,
+      user,
+      pass,
+      fallbackHost,
+      443,
+      10_000,
+    );
+    if (fb) {
+      const json = await readHttpOverTls(fb, fallbackHost, "/?fields=country_code");
+      fb.destroy();
+      const iso = json ? /"country_code"\s*:\s*"([A-Z]{2})"/.exec(json) : null;
+      if (iso) return iso[1];
+    }
+  } catch {
+    /* sem pais */
+  }
+  return null;
+}
+
+ipcMain.handle("test-proxy", async (_event, proxyRaw: unknown) => {
+  const raw = typeof proxyRaw === "string" ? proxyRaw.trim() : "";
+  if (raw === "") {
+    return { ok: false, error: "Cole o endereco da proxy (socks5://host:porta)." };
+  }
+
+  const parsed = parseProxyUrl(raw);
+  if (!parsed) {
+    return {
+      ok: false,
+      error: "Formato invalido. Use socks5://host:porta ou socks5://usuario:senha@host:porta.",
+    };
+  }
+
+  if (parsed.scheme !== "socks5") {
+    return {
+      ok: false,
+      error: `Por enquanto o teste so cobre SOCKS5 (voce usou ${parsed.scheme}).`,
+    };
+  }
+
+  const t0 = Date.now();
+  const tunnel = await openSocks5Tunnel(
+    parsed.host,
+    parsed.port,
+    parsed.user,
+    parsed.pass,
+    TOR_ALVO_HOST,
+    TOR_ALVO_PORTA,
+  );
+  const ms = Date.now() - t0;
+
+  if (!tunnel) {
+    return {
+      ok: false,
+      error: "Nao abriu tunel ate gateway.discord.gg. Confira IP, porta, firewall e se a saida nao e BR.",
+      ms,
+    };
+  }
+  tunnel.destroy();
+
+  const country = await exitCountryViaSocks(
+    parsed.host,
+    parsed.port,
+    parsed.user,
+    parsed.pass,
+  );
+
+  if (country === "BR") {
+    return {
+      ok: false,
+      error: `Tunel OK (${ms}ms), mas a saida e BR — o Discord continua bloqueando Go Live. Use VPS/Tor fora do Brasil.`,
+      ms,
+      country,
+      host: parsed.host,
+      port: parsed.port,
+    };
+  }
+
+  return {
+    ok: true,
+    ms,
+    country: country ?? undefined,
+    host: parsed.host,
+    port: parsed.port,
+  };
+});
+
+// ------------------------------------------------------------------ diagnostico / modo dev
+const ISSUE_REPO = "bezumiya/GoLiveBypass";
+// A label "gui" precisa existir no repo (criar uma vez no GitHub). Sem ela o form ainda abre;
+// a API de reports usa ISSUE_LABELS no servidor.
+const ISSUE_LABELS = ["bug", "gui"];
+
+function logFilePath() {
+  return path.join(settingsDir(), "golivebypass.log");
+}
+
+function maskSecrets(text: string): string {
+  return text
+    .replace(
+      /(socks5|socks4|https?|http):\/\/([^/\s@]+)@/gi,
+      (_m, scheme: string, creds: string) => {
+        const user = creds.split(":")[0] || "user";
+        return `${scheme}://${user}:***@`;
+      },
+    )
+    .replace(/(pass|password|senha)\s*[:=]\s*\S+/gi, "$1=***");
+}
+
+function readLogTail(maxBytes = 48_000): string {
+  const file = logFilePath();
+  try {
+    if (!fs.existsSync(file)) return "(ainda nao ha golivebypass.log — ative o bypass uma vez)";
+    const size = fs.statSync(file).size;
+    const start = Math.max(0, size - maxBytes);
+    const fd = fs.openSync(file, "r");
+    try {
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      const text = buf.toString("utf8");
+      return start > 0 ? `… (trecho final)\n${text}` : text;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    return `(nao consegui ler o log: ${error instanceof Error ? error.message : String(error)})`;
+  }
+}
+
+function buildDiagnostic(status: string, extraNote = ""): string {
+  const proxy = maskSecrets(
+    readProxyFrom(path.join(settingsDir(), "settings.json")) || "(vazio)",
+  );
+  const lines = [
+    "### Diagnóstico GoLiveBypass (GUI)",
+    "",
+    "| | |",
+    "|---|---|",
+    `| app | golive-gui ${app.getVersion()} |`,
+    `| os | ${process.platform} ${process.arch} |`,
+    `| electron | ${process.versions.electron} |`,
+    `| status | ${status} |`,
+    `| routeMode | ${readNetMode()} |`,
+    `| proxy | ${proxy} |`,
+    `| torPort | ${torPortaEmUso} (verificado=${torVerificado}) |`,
+    `| log | \`${logFilePath()}\` |`,
+    "",
+  ];
+  if (extraNote.trim()) {
+    lines.push("**Relato:**", "", extraNote.trim(), "");
+  }
+  lines.push("**Log (trecho):**", "", "```", maskSecrets(readLogTail()), "```", "");
+  lines.push(
+    "_Senhas mascaradas. Se o corpo da issue ficar curto demais, cole o diagnóstico completo do clipboard._",
+  );
+  return lines.join("\n");
+}
+
+let logWatchOffset = 0;
+let logWatchActive = false;
+
+function stopLogWatch() {
+  logWatchActive = false;
+  try {
+    fs.unwatchFile(logFilePath());
+  } catch {
+    /* ignore */
+  }
+}
+
+function pushLogChunk(chunk: string) {
+  if (!chunk) return;
+  if (logWindow && !logWindow.isDestroyed()) {
+    logWindow.webContents.send("log-chunk", chunk);
+  }
+}
+
+function startLogWatch() {
+  stopLogWatch();
+  const file = logFilePath();
+  try {
+    fs.mkdirSync(settingsDir(), { recursive: true });
+  } catch {
+    /* ignore */
+  }
+
+  logWatchActive = true;
+  try {
+    if (fs.existsSync(file)) {
+      const size = fs.statSync(file).size;
+      // Manda o final do arquivo de uma vez, depois so o que chegar.
+      const start = Math.max(0, size - 24_000);
+      logWatchOffset = start;
+      const fd = fs.openSync(file, "r");
+      try {
+        const buf = Buffer.alloc(size - start);
+        if (buf.length > 0) {
+          fs.readSync(fd, buf, 0, buf.length, start);
+          pushLogChunk(buf.toString("utf8"));
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+      logWatchOffset = size;
+    } else {
+      logWatchOffset = 0;
+      pushLogChunk("(aguardando golivebypass.log — aparece quando o Discord roda com o bypass)\n");
+    }
+  } catch (error) {
+    pushLogChunk(
+      `(erro ao abrir log: ${error instanceof Error ? error.message : String(error)})\n`,
+    );
+  }
+
+  fs.watchFile(file, { interval: 700 }, (curr, prev) => {
+    if (!logWatchActive) return;
+    try {
+      if (!fs.existsSync(file)) {
+        logWatchOffset = 0;
+        return;
+      }
+      if (curr.size < logWatchOffset) logWatchOffset = 0; // rotacao / truncate
+      if (curr.size === logWatchOffset) return;
+      if (curr.mtimeMs === prev.mtimeMs && curr.size === prev.size) return;
+
+      const fd = fs.openSync(file, "r");
+      try {
+        const len = curr.size - logWatchOffset;
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, logWatchOffset);
+        logWatchOffset = curr.size;
+        pushLogChunk(buf.toString("utf8"));
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      /* ignore race */
+    }
+  });
+}
+
+ipcMain.handle("start-log-watch", () => {
+  startLogWatch();
+  return { path: logFilePath() };
+});
+
+ipcMain.handle("stop-log-watch", () => {
+  stopLogWatch();
+  return true;
+});
+
+ipcMain.handle("get-diagnostic", (_event, payload: unknown) => {
+  const p = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const status = typeof p.status === "string" ? p.status : "UNKNOWN";
+  const note = typeof p.note === "string" ? p.note : "";
+  return {
+    text: buildDiagnostic(status, note),
+    logPath: logFilePath(),
+    apiConfigured: Boolean(readBugReportConfig()),
+  };
+});
+
+function readBugReportConfig(): { baseUrl: string; token: string } | null {
+  // Prioridade: settings.json da pasta compartilhada, depois env do processo.
+  // Sem os dois, o botao cai no form do GitHub (sem segredo embutido no binario).
+  let url = (process.env.GOLIVE_BUG_API_URL || "").trim().replace(/\/$/, "");
+  let token = (process.env.GOLIVE_BUG_API_TOKEN || "").trim();
+  try {
+    const file = path.join(settingsDir(), "settings.json");
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (typeof data.bugReportApiUrl === "string" && data.bugReportApiUrl.trim()) {
+        url = data.bugReportApiUrl.trim().replace(/\/$/, "");
+      }
+      if (typeof data.bugReportToken === "string" && data.bugReportToken.trim()) {
+        token = data.bugReportToken.trim();
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  if (!url || !token) return null;
+  return { baseUrl: url, token };
+}
+
+async function postBugReportToApi(
+  cfg: { baseUrl: string; token: string },
+  title: string,
+  description: string,
+  status: string,
+): Promise<{ ok: true; issueUrl: string; issueNumber?: number } | { ok: false; error: string }> {
+  const endpoint = `${cfg.baseUrl}/v1/reports`;
+  const body = {
+    title,
+    description,
+    log: maskSecrets(readLogTail(200_000)),
+    meta: {
+      app: "golive-gui",
+      version: app.getVersion(),
+      os: `${process.platform} ${process.arch}`,
+      electron: process.versions.electron ?? "",
+      status,
+      routeMode: readNetMode(),
+    },
+  };
+
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      /* corpo nao-json */
+    }
+
+    if (!res.ok) {
+      const err =
+        typeof data.error === "string"
+          ? data.error
+          : `API respondeu ${res.status}`;
+      return { ok: false, error: err };
+    }
+
+    const issueUrl =
+      typeof data.issue_url === "string"
+        ? data.issue_url
+        : typeof data.html_url === "string"
+          ? data.html_url
+          : "";
+    if (!issueUrl) return { ok: false, error: "API nao devolveu issue_url" };
+    return {
+      ok: true,
+      issueUrl,
+      issueNumber: typeof data.issue_number === "number" ? data.issue_number : undefined,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
+  const p = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const status = typeof p.status === "string" ? p.status : "UNKNOWN";
+  const note =
+    typeof p.note === "string" && p.note.trim()
+      ? p.note.trim()
+      : "(descreva o que aconteceu, o que esperava, e se câmera / Go Live / região da call)";
+  const titleRaw =
+    typeof p.title === "string" && p.title.trim()
+      ? p.title.trim()
+      : `[GUI] problema com bypass (${status})`;
+  const title = titleRaw.slice(0, 180);
+
+  const fullBody = buildDiagnostic(status, note);
+  clipboard.writeText(fullBody);
+
+  // 1) API (log completo, labels no servidor) — se configurada.
+  const apiCfg = readBugReportConfig();
+  if (apiCfg) {
+    const posted = await postBugReportToApi(apiCfg, title, note, status);
+    if (posted.ok) {
+      await shell.openExternal(posted.issueUrl);
+      return {
+        ok: true,
+        via: "api" as const,
+        url: posted.issueUrl,
+        issueNumber: posted.issueNumber,
+        copied: true,
+        truncated: false,
+      };
+    }
+    // Cai no form do GitHub, mas avisa o motivo no retorno.
+    const maxBody = 5500;
+    const bodyForUrl =
+      fullBody.length > maxBody
+        ? `${fullBody.slice(0, maxBody)}\n\n…(truncado — cole o diagnóstico do clipboard)\n\n_API falhou: ${posted.error}_`
+        : `${fullBody}\n\n_API falhou: ${posted.error}_`;
+    const params = new URLSearchParams({
+      title,
+      body: bodyForUrl,
+      labels: ISSUE_LABELS.join(","),
+    });
+    const url = `https://github.com/${ISSUE_REPO}/issues/new?${params.toString()}`;
+    await shell.openExternal(url);
+    return {
+      ok: true,
+      via: "github" as const,
+      url,
+      copied: true,
+      truncated: fullBody.length > maxBody,
+      apiError: posted.error,
+    };
+  }
+
+  // 2) Fallback: form do GitHub (sem token no app).
+  const maxBody = 5500;
+  const bodyForUrl =
+    fullBody.length > maxBody
+      ? `${fullBody.slice(0, maxBody)}\n\n…(truncado — cole o diagnóstico completo do clipboard)`
+      : fullBody;
+
+  const params = new URLSearchParams({
+    title,
+    body: bodyForUrl,
+    labels: ISSUE_LABELS.join(","),
+  });
+  const url = `https://github.com/${ISSUE_REPO}/issues/new?${params.toString()}`;
+  await shell.openExternal(url);
+
+  return {
+    ok: true,
+    via: "github" as const,
+    url,
+    copied: true,
+    truncated: fullBody.length > maxBody,
+  };
+});
+
+ipcMain.handle("open-log-folder", async () => {
+  const dir = settingsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  await shell.openPath(dir);
+  return dir;
+});
+
+ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
+  if (open === true) {
+    openLogWindow();
+    return true;
+  }
+  closeLogWindow();
+  stopLogWatch();
+  return false;
+});
+
 ipcMain.handle("get-proxy", () => {
   const salva = readProxyFrom(path.join(settingsDir(), "settings.json"));
   if (salva !== "") return salva;
@@ -1601,14 +2340,15 @@ ipcMain.handle("get-proxy", () => {
   return "";
 });
 
-// A pagina reporta a altura de que precisa (o warning do bypass ativo faz o conteudo crescer).
-// A janela e fixa (resizable: false), entao o proprio app ajusta para caber tudo sem cortar.
-ipcMain.on('resize-window', (_event, height: unknown) => {
-  const h = Number(height);
+// A pagina reporta a ALTURA DO CONTEUDO. Com titleBarOverlay, setSize (janela externa)
+// nao casa com essa medida: a janela crescia no Personalizado e nao encolhia ao voltar.
+// setContentSize ajusta a area cliente — a mesma que o getBoundingClientRect mede.
+ipcMain.on("resize-window", (_event, height: unknown) => {
+  const h = Math.round(Number(height));
   if (!mainWindow || mainWindow.isDestroyed() || !Number.isFinite(h) || h <= 0) return;
-  const [, currentH] = mainWindow.getSize();
-  if (Math.abs(currentH - Math.round(h)) < 2) return;
-  mainWindow.setSize(480, Math.round(h));
+  const [, contentH] = mainWindow.getContentSize();
+  if (Math.abs(contentH - h) < 2) return;
+  mainWindow.setContentSize(480, h);
 });
 
 // O renderer avisa quando o tema muda para o overlay da barra de titulo
@@ -1617,4 +2357,7 @@ ipcMain.on('set-theme', (_event, value: unknown) => {
   if (value !== 'light' && value !== 'dark') return;
   theme = value;
   applyTitlebarTheme();
+  if (logWindow && !logWindow.isDestroyed() && !isMac) {
+    logWindow.setTitleBarOverlay(TITLEBAR[theme]);
+  }
 });

@@ -24,8 +24,8 @@ app (GUI/standalone, futuro)              API (este serviço)              GitHu
    Fine-grained personal access tokens*, com acesso somente ao repositório
    alvo (`Repository access → Only select repositories`) e permissão
    **Issues: write**.
-2. **Crie a label** usada por padrão (`bug`) no repositório alvo — sem ela o
-   GitHub responde 422 e a issue não é criada. A lista vem de `ISSUE_LABELS`.
+2. **Crie as labels** usadas por padrão (`bug`, `gui`) no repositório alvo — sem
+   elas o GitHub responde 422 e a issue não é criada. A lista vem de `ISSUE_LABELS`.
 3. **Gere o token compartilhado** com os apps (`API_TOKEN`), por exemplo:
    `openssl rand -hex 32`. Este token será embutido na GUI/standalone quando
    eles ganharem o botão de reportar bug — se vazar, troque o valor e o
@@ -45,7 +45,7 @@ Variáveis (todas em `.env.example`):
 | `API_TOKEN` | sim | — | segredo compartilhado com os apps (Bearer) |
 | `GITHUB_TOKEN` | sim | — | PAT com permissão Issues: write no repo alvo |
 | `GITHUB_REPO` | não | `bezumiya/GoLiveBypass` | `owner/repo` da issue |
-| `ISSUE_LABELS` | não | `bug` | labels separadas por vírgula (precisam existir no repo) |
+| `ISSUE_LABELS` | não | `bug,gui` | labels separadas por vírgula (precisam existir no repo) |
 | `PORT` | não | `8080` | porta HTTP |
 | `RATE_LIMIT` | não | `60` | requisições por minuto por IP |
 | `MAX_LOG_BYTES` | não | `262144` | teto do campo `log` (256 KB) |
@@ -145,9 +145,19 @@ Cobertura: validação do payload e montagem do markdown (`internal/bugreport`),
 cliente GitHub contra um fake HTTP (`internal/gh`), e os endpoints completos
 com auth, rate limit, body limit e erros (`internal/server`).
 
-## Integração futura (fora deste escopo)
+## Integração com a GUI
 
-A GUI (Electron) e o standalone ganharão um botão **"Reportar bug"** que
-monta o relato — com o `golivebypass.log` e os metadados do sistema — e chama
-`POST /v1/reports` com o `API_TOKEN` embutido. A resposta traz a URL da issue
-para mostrar ao usuário.
+A GUI Electron tem o botão **Reportar bug** (modo desenvolvedor). Se
+`%LOCALAPPDATA%\GoLiveBypass\settings.json` (ou o equivalente em Linux/Mac)
+contiver:
+
+```json
+{
+  "bugReportApiUrl": "https://sua-api.exemplo.com",
+  "bugReportToken": "<mesmo valor de API_TOKEN>"
+}
+```
+
+(ou as variáveis de ambiente `GOLIVE_BUG_API_URL` / `GOLIVE_BUG_API_TOKEN`), ela
+chama `POST /v1/reports` e abre a issue criada. Sem isso, cai no formulário
+`github.com/.../issues/new` com o diagnóstico no clipboard.
