@@ -454,6 +454,11 @@ if (!gotLock) {
   app.on("second-instance", () => showWindow());
 
   app.whenReady().then(() => {
+    // Se uma sessao anterior morreu sem o quit limpo (PC desligado, crash), a injecao
+    // ficou orfa: reverte agora para o status nao mentir (bug: "Ativo" sem ter ativado).
+    revertOrphanedInjection().catch((error) =>
+      console.error("[restore] falha na reversao de boot:", error),
+    );
     // Se o modo salvo e Tor, comeca a subir o daemon JA na abertura. Sem isto ha um impasse:
     // o botao de ativar so libera com o Tor verificado, e o Tor so subia ao ativar ou ao
     // clicar no seletor -- mas quem abre o app com Tor ja selecionado nao clica em nada, e
@@ -495,6 +500,9 @@ app.on("before-quit", (event) => {
   cleaningUp = true;
   // O Tor embutido morre junto com o app (e o Discord restaurado nao fica dependente dele).
   stopTor();
+  // O quit e limpo: o marcador de sessao morre aqui, para o boot seguinte nao tentar
+  // reverter nada (a reversao abaixo e a que vale).
+  clearSessionMarker();
   // Reversao em background: o runScript roda detached/unref, entao o filho sobrevive ao
   // app.quit() e o Discord nao fica com a injecao pendurada. Sem esperar: o "Sair" sai na
   // hora mesmo se o script demorar (fechar o Discord, flatpak, sudo...).
@@ -857,6 +865,9 @@ async function activateBypass(event: any, proxyAddress: string = "") {
     startDiscord(install);
   }
 
+  // Registra a sessao: o bypass so se desfaz no quit limpo; se o PC desligar no meio, o
+  // boot seguinte encontra este marcador e reverte a injecao orfa.
+  writeSessionMarker(installs);
 }
 
 async function deactivateAll() {
@@ -889,6 +900,8 @@ async function deactivateAll() {
     startDiscord(install);
   }
 
+  // Reverteu (de verdade): a sessao terminou, o marcador nao vale mais.
+  clearSessionMarker();
 }
 
 function getStatus(): string {
@@ -968,6 +981,31 @@ async function linuxActivate(
     );
   }
 
+  // Marca a sessao: se o PC desligar sem o quit limpo, o boot seguinte reverte a injecao
+  // que ficou orfa. Os resources sao lidos do --status --json (a injecao no Linux e do
+  // script, nao do getDiscordInstalls).
+  try {
+    const estado = await runScript(["--status", "--json"]);
+    const data = JSON.parse(estado.stdout || "{}");
+    const nossos = Array.isArray(data?.discords)
+      ? data.discords
+          .filter((d: { state?: string }) => d?.state === "nosso")
+          .map((d: { path?: string }) => d?.path)
+          .filter((p: unknown): p is string => typeof p === "string")
+      : [];
+    if (nossos.length > 0) {
+      writeSessionMarker(
+        nossos.map((resources) => ({
+          flavour: "",
+          resources,
+          exePath: "",
+          bundlePath: undefined,
+        } as DiscordInstall)),
+      );
+    }
+  } catch {
+    // sem marcador o boot seguinte nao consegue reverter; a injecao orfa fica para a mao
+  }
 }
 
 async function linuxDeactivate(onChunk: (c: string) => void) {
@@ -978,6 +1016,7 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
         "Falha ao desativar",
     );
   }
+  clearSessionMarker();
 }
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
@@ -1029,6 +1068,104 @@ function readProxyFrom(file: string) {
     return typeof data.proxy === "string" ? data.proxy : "";
   } catch {
     return "";
+  }
+}
+
+// ======================================================== reversao de injecao orfa
+// O bypass e persistente no disco (app.asar -> _app.asar + pasta-stub) e so volta ao
+// normal no quit limpo da GUI. Se o PC desligar no meio (sem o before-quit rodar), a
+// injecao fica orfa: o Discord abre injetado e a GUI mostra "Ativo" por engano. Este
+// marcador registra o que a sessao injetou; no boot seguinte a GUI reverte o resto.
+function markerFile() {
+  return path.join(settingsDir(), "session.json");
+}
+
+function writeSessionMarker(installs: DiscordInstall[]) {
+  try {
+    fs.mkdirSync(settingsDir(), { recursive: true });
+    fs.writeFileSync(
+      markerFile(),
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: Date.now(),
+        installs: installs.map((i) => i.resources),
+      }),
+    );
+  } catch {
+    // sem marcador, um desligamento no meio deixaria a injecao orfa; o boot seguinte limpa
+  }
+}
+
+function clearSessionMarker() {
+  try {
+    fs.rmSync(markerFile(), { force: true });
+  } catch {
+    // inofensivo
+  }
+}
+
+// Reverte injecoes deixadas por uma sessao anterior que morreu sem o quit limpo (PC
+// desligado, crash). So mexe onde a injecao e NOSSA, e nao inicia o Discord a toa: se ele
+// ja estava aberto (o caso do status falso ativo), fecha, restaura e reabre.
+async function revertOrphanedInjection() {
+  let data: { installs?: unknown } | null = null;
+  try {
+    data = JSON.parse(fs.readFileSync(markerFile(), "utf8"));
+  } catch {
+    return; // sem marcador: nada orfao
+  }
+
+  // No Linux a injecao vive no script (com permissoes flatpak/sudo); o --restore reverte
+  // sem reabrir o Discord no login.
+  if (IS_LINUX) {
+    clearSessionMarker();
+    const { code, stderr } = await runScript(["--restore"]);
+    if (code !== 0) {
+      console.error("[restore] falha ao reverter injecao orfa:", stderr);
+    }
+    return;
+  }
+
+  if (!Array.isArray(data?.installs) || data.installs.length === 0) return;
+
+  const resourcesList = data.installs.filter((r): r is string => typeof r === "string");
+  if (resourcesList.length === 0) return;
+
+  const atuais = getDiscordInstalls();
+  const alvos: DiscordInstall[] = [];
+  for (const resources of resourcesList) {
+    const install =
+      atuais.find((a) => a.resources === resources) ??
+      ({ flavour: "", resources, exePath: "", bundlePath: undefined } as DiscordInstall);
+    // So age onde a injecao ainda e a nossa (outro mod tomou o lugar = nao mexe).
+    const temOriginal = withNoAsar(() => diskFs.existsSync(path.join(resources, "_app.asar")));
+    if (temOriginal && isOurInjection(resources)) alvos.push(install);
+  }
+
+  if (alvos.length === 0) {
+    clearSessionMarker();
+    return;
+  }
+
+  const estavaRodando = discordIsRunning();
+  if (estavaRodando) await killDiscord();
+
+  for (const install of alvos) {
+    const asar = path.join(install.resources, "app.asar");
+    const originalAsar = path.join(install.resources, "_app.asar");
+    try {
+      await safeRemove(asar);
+      await safeRename(originalAsar, asar);
+      clearBundleQuarantine(install.bundlePath);
+      console.log("[restore] injecao orfa revertida:", install.resources);
+    } catch (error) {
+      console.error("[restore] nao consegui reverter:", install.resources, error);
+    }
+  }
+
+  clearSessionMarker();
+  if (estavaRodando) {
+    for (const install of alvos) startDiscord(install);
   }
 }
 
