@@ -19,6 +19,9 @@ param(
 
     [string] $ExcludedCountries = 'BR',
 
+    # Instala e sobe o Tor embutido, e aponta o bypass para ele (rota automatica tor).
+    [switch] $Tor,
+
     [switch] $Yes
 )
 
@@ -41,6 +44,16 @@ $InstallDir = Join-Path $env:LOCALAPPDATA 'GoLiveBypass'
 $PatcherName = 'golivebypass.js'
 $DiscordFlavours = @('Discord', 'DiscordPTB', 'DiscordCanary')
 $StubPackage = '{"name":"discord","main":"index.js","version":"1.0.0"}'
+
+# Tor embutido: mesma versao, mesmos hashes e mesma porta da GUI (golive-gui/electron/main.ts).
+$TorBundle = '13.5'
+$TorPort = 9060
+$TorDir = Join-Path $InstallDir 'Tor'
+$TorExe = Join-Path $TorDir 'tor\tor.exe'
+$TorTorrc = Join-Path $TorDir 'torrc'
+$TorArchiveName = 'tor-expert-bundle-windows-x86_64-13.5.tar.gz'
+$TorUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/$TorBundle/$TorArchiveName"
+$TorSha256 = '5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb'
 
 function Write-Step($m) { Write-Host "  [*] $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
@@ -155,8 +168,149 @@ function Install-Patcher {
     }
     if ($Proxy -eq '' -and $settings.proxy) { $result.proxy = $settings.proxy }
 
+    # Modo Tor: aponta o bypass para a porta dedicada e limpa a proxy manual (o Tor tem
+    # prioridade no golivebypass.js quando routeMode='tor' e torAddr definido).
+    if ($Tor) {
+        $result.routeMode = 'tor'
+        $result.torAddr = "127.0.0.1:$TorPort"
+        $result.proxy = ''
+    } elseif ($settings.routeMode) {
+        # Sem -Tor, preserva a escolha anterior (rotina do script).
+        $result.routeMode = $settings.routeMode
+        $result.torAddr = $settings.torAddr
+    }
+
     [IO.File]::WriteAllText($settingsPath, ($result | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
     Write-Ok "Configuracao gravada em $settingsPath"
+}
+
+# =============================================================== Tor embutido
+
+function Test-TorReady {
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $task = $client.ConnectAsync('127.0.0.1', $TorPort)
+        if (-not $task.Wait(1500)) { $client.Close(); return $false }
+        if (-not $client.Connected) { $client.Close(); return $false }
+        $client.Close()
+        return $true
+    } catch { return $false }
+}
+
+function Install-Tor {
+    # Ja esta atendendo? Reusa (pode ser o Tor da GUI, que morre com ela, ou o servico nosso).
+    if (Test-TorReady) {
+        Write-Ok "Tor ja esta atendendo em 127.0.0.1:$TorPort."
+        return $true
+    }
+
+    if (-not (Test-Path -LiteralPath $TorExe)) {
+        Write-Step "Baixando o Tor ($TorArchiveName, ~30 MB)"
+        $archive = Join-Path $env:TEMP $TorArchiveName
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $TorUrl -OutFile $archive
+        } catch {
+            Write-Warn "Falha ao baixar o Tor: $($_.Exception.Message)"
+            return $false
+        }
+
+        Write-Step 'Conferindo SHA-256'
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
+        if ($hash -ne $TorSha256.ToLower()) {
+            Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+            Write-Warn 'O download do Tor veio corrompido (SHA-256 diferente). Abortando.'
+            return $false
+        }
+
+        Write-Step 'Extraindo o Tor'
+        New-Item -ItemType Directory -Path $TorDir -Force | Out-Null
+        & tar -xzf $archive -C $TorDir --exclude 'tor/pluggable_transports/*' --exclude 'debug/*'
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn 'Falha ao extrair o bundle do Tor.'
+            return $false
+        }
+        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not (Test-Path -LiteralPath $TorExe)) {
+        Write-Warn "O binario do Tor nao apareceu em $TorExe."
+        return $false
+    }
+
+    $dataDir = Join-Path $TorDir 'data-state'
+    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+
+    $geoipLines = ''
+    if (Test-Path -LiteralPath (Join-Path $TorDir 'tor\data\geoip')) {
+        $geoipLines += "GeoIPFile $(Join-Path $TorDir 'tor\data\geoip')`n"
+    }
+    if (Test-Path -LiteralPath (Join-Path $TorDir 'tor\data\geoip6')) {
+        $geoipLines += "GeoIPv6File $(Join-Path $TorDir 'tor\data\geoip6')`n"
+    }
+    [IO.File]::WriteAllText($TorTorrc, "SocksPort $TorPort`nDataDirectory $dataDir`n$geoipLines`Log notice stdout`n", (New-Object Text.UTF8Encoding $false))
+
+    # O caminho do Windows: o servico (tor.exe --service install) roda como LocalService e
+    # nao tem acesso a %LOCALAPPDATA% do usuario, entao o Tor nao consegue escrever no
+    # DataDirectory e o servico fica parado. A Run key sobe o Tor no logon do USUARIO — mesmo
+    # contexto da GUI — e e o caminho que funciona para o standalone/plugin, com ou sem admin.
+    # So vale a pena o servico se o DataDirectory morar em ProgramData (acessivel por
+    # LocalService); isso e o caso da GUI, nao dos instaladores.
+    Write-Step 'Registrando o Tor na inicializacao do usuario (sobe no logon)'
+    Set-RunKey
+
+    # A Run key so vale no proximo logon; para a sessao atual, sobe o daemon agora.
+    Write-Step 'Iniciando o Tor'
+    Start-Process -FilePath $TorExe -ArgumentList '-f', $TorTorrc -WindowStyle Hidden
+
+    Write-Step 'Esperando o Tor subir'
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Milliseconds 1000
+        if (Test-TorReady) { break }
+    }
+
+    if (-not (Test-TorReady)) {
+        Write-Warn "Tor nao subiu em 30s. Veja o log em $TorDir\tor\data-state."
+        return $false
+    }
+    Write-Ok "Tor atendendo em 127.0.0.1:$TorPort"
+    return $true
+}
+
+function Set-RunKey {
+    try {
+        $command = "`"$TorExe`" -f `"$TorTorrc`""
+        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
+        Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'GoLiveBypassTor' -Value $command
+        Write-Ok 'Tor registrado para subir no proximo logon (GoLiveBypassTor).'
+    } catch {
+        Write-Warn "Nao consegui registrar a inicializacao: $($_.Exception.Message)"
+    }
+}
+
+function Remove-Tor {
+    # Remove a Run key (o que este script cria). Se um servico "tor" existir de uma instalacao
+    # anterior (ex.: GUI), o deixamos em paz? Nao — se o binario e nosso (pasta GoLiveBypass),
+    # o servico aponta para ele e deve sair; senao e de outra pessoa.
+    try {
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        Remove-ItemProperty -Path $key -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
+    } catch { }
+
+    if (Test-Path -LiteralPath $TorExe) {
+        try {
+            $service = Get-CimInstance Win32_Service -Filter "Name='tor' AND PathName LIKE '%GoLiveBypass%'" -ErrorAction SilentlyContinue
+            if ($service) {
+                Write-Step 'Removendo o servico do Tor'
+                & $TorExe --service stop 2>&1 | Out-Null
+                & $TorExe --service remove 2>&1 | Out-Null
+            }
+        } catch { }
+    }
+
+    # O binario fica: a GUI usa o mesmo e sem ele nao faz mal.
+    if (Test-Path -LiteralPath $TorExe) {
+        Write-Host '  [*] O binario do Tor em %LOCALAPPDATA%\GoLiveBypass\Tor permanece (usado tambem pela GUI).' -ForegroundColor DarkGray
+    }
 }
 
 function Install-Injection($resources) {
@@ -231,6 +385,7 @@ if ($Mode -eq 'Uninstall') {
         }
         if (Remove-Injection $install.Resources) { Write-Ok "$($install.Flavour) voltou ao normal." }
     }
+    Remove-Tor
     Write-Host ''
     Write-Host "  A pasta $InstallDir ficou, com o registro e a sua configuracao." -ForegroundColor DarkGray
     return
@@ -248,6 +403,13 @@ foreach ($install in $installs) {
             Write-Warn "$($install.Flavour) ficou como estava."
             continue
         }
+    }
+
+    # Com -Tor, prepara o daemon antes de injetar: o settings.json do patcher aponta para ele
+    # e o gateway segura ate o Tor responder (o bypass nunca cai direto no modo tor).
+    if ($Tor -and -not (Install-Tor)) {
+        Write-Warn 'O Tor nao subiu. Nao vou instalar o standalone no modo tor; tente de novo ou use -Proxy.'
+        break
     }
 
     Install-Patcher
