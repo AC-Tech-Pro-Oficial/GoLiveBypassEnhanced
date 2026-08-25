@@ -27,7 +27,19 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)}))
 	slog.SetDefault(logger)
 
-	e := server.New(cfg, gh.New(cfg.GitHubToken, cfg.GitHubRepo), logger)
+	client := gh.New(cfg.GitHubToken, cfg.GitHubRepo)
+	// Fail-fast no boot: se as labels de ISSUE_LABELS nao existem no repo alvo (ex.:
+	// deploy novo com repo trocado), aborta com mensagem clara em vez de responder
+	// 422 no primeiro report real. Erro de auth/rede tambem falha o boot.
+	checkCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	err = client.VerifyLabels(checkCtx, cfg.Labels)
+	cancel()
+	if err != nil {
+		logger.Error("labels do repo alvo nao conferem — abortando (crie as labels antes de subir)", "err", err, "repo", cfg.GitHubRepo)
+		os.Exit(1)
+	}
+
+	e := server.New(cfg, client, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

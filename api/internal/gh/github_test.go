@@ -102,3 +102,55 @@ func TestCreateIssueTimeout(t *testing.T) {
 		t.Fatal("esperava erro de timeout")
 	}
 }
+
+func TestVerifyLabelsOK(t *testing.T) {
+	c, getReq := newFake(t, http.StatusOK,
+		`[{"name":"bug"},{"name":"gui"},{"name":"enhancement"}]`)
+
+	if err := c.VerifyLabels(context.Background(), []string{"bug", "gui"}); err != nil {
+		t.Fatalf("VerifyLabels() error = %v", err)
+	}
+	req, _ := getReq()
+	if req.Method != http.MethodGet {
+		t.Errorf("method = %s, want GET", req.Method)
+	}
+	if req.URL.Path != "/repos/owner/repo/labels" {
+		t.Errorf("path = %s", req.URL.Path)
+	}
+}
+
+func TestVerifyLabelsMissingOne(t *testing.T) {
+	c, _ := newFake(t, http.StatusOK, `[{"name":"bug"}]`)
+
+	err := c.VerifyLabels(context.Background(), []string{"bug", "gui"})
+	if err == nil || !strings.Contains(err.Error(), `"gui"`) {
+		t.Fatalf("err = %v, queria erro apontando a label gui", err)
+	}
+}
+
+func TestVerifyLabelsEmptyIsNoop(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New("tok", "owner/repo")
+	c.baseURL = srv.URL
+
+	if err := c.VerifyLabels(context.Background(), nil); err != nil {
+		t.Fatalf("VerifyLabels() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("nenhuma requisicao deveria acontecer com labels vazias; houve %d", calls)
+	}
+}
+
+func TestVerifyLabelsAuthError(t *testing.T) {
+	c, _ := newFake(t, http.StatusUnauthorized, `{"message":"Bad credentials"}`)
+
+	err := c.VerifyLabels(context.Background(), []string{"bug"})
+	if err == nil || !strings.Contains(err.Error(), "autenticacao") {
+		t.Fatalf("err = %v, queria erro de autenticacao", err)
+	}
+}
