@@ -651,6 +651,29 @@ async function probe(proxy, timeoutMs) {
 // O host que reporta o pais de saida quando o trace da Cloudflare nao traz um loc de pais
 // real — exatamente o que acontece com exits do Tor (o loc vem como "T1") e com varias
 // gratuitas. O ipwho.is responde via Tor/US; ifconfig.co provou ser instavel demais.
+
+// Cache do pais de saida de Tor. O exit do Tor muda a cada ~10min (novo circuito), entao
+// um cache de TOR_GEO_TTL_MS = 8min descreve o pais certo com 1 consulta por circuito,
+// independente de quantas vezes o heartbeat rodou. Sem cache, o ipwho.is receberia 1
+// consulta por batimento e estourava a cota -- 37 relays BR em 10k explica o porquê dessa
+// escolha ter sido a primeira coisa pensada quando o modo tor virou "sem checagem de pais".
+const TOR_GEO_TTL_MS = 8 * 60 * 1000;
+const torGeoCache = new Map();
+
+function torGeoFresh(entry) {
+  return entry !== undefined && Date.now() < entry.ate;
+}
+
+async function exitCountryTorCached(proxy, timeoutMs) {
+  const cached = torGeoCache.get(proxy);
+  if (torGeoFresh(cached)) return cached.pais;
+  const pais = await exitCountry(proxy, timeoutMs);
+  if (pais === null) return null;
+  torGeoCache.set(proxy, { pais: pais, ate: Date.now() + TOR_GEO_TTL_MS });
+  return pais;
+}
+
+
 const GEO_FALLBACK_HOST = "ipwho.is";
 
 async function exitCountry(proxy, timeoutMs) {
@@ -891,7 +914,13 @@ async function detectTor() {
         // seja, a checagem quase nunca barra nada na pratica. Quem escolhe Tor esta pedindo
         // uma saida que nao se identifica; nao sair pelo IP brasileiro o proprio Tor garante.
         if (routeMode === "tor") {
-            log("Tor encontrado na porta " + port + " (geo nao verificada em modo tor)");
+            const pais = await exitCountryTorCached(proxy, 6000);
+            if (pais !== null && excludedCountries.has(pais)) {
+                log("Tor na porta " + port + " recusado: saida em " + pais);
+                continue;
+            }
+            log("Tor encontrado na porta " + port +
+                (pais === null ? " (geo nao verificada)" : ", saida em " + pais));
             return proxy;
         }
 
