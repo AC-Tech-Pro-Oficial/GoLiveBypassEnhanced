@@ -84,7 +84,254 @@ C_OFF=$(printf '\033[0m'); C_CYAN=$(printf '\033[36m'); C_GREEN=$(printf '\033[3
 step() { printf '  %s[*]%s %s\n' "$C_CYAN" "$C_OFF" "$1" >&2; }
 ok()   { printf '  %s[OK]%s %s\n' "$C_GREEN" "$C_OFF" "$1" >&2; }
 warn() { printf '  %s[!]%s %s\n' "$C_YELLOW" "$C_OFF" "$1" >&2; }
-fail() { printf '  %s[X]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2; exit 1; }
+fail() {
+    printf '  %s[X]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2
+    # Report automatico: so quando esta de fato falhando (e nao em --yes de teste).
+    if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
+        report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
+    fi
+    exit 1
+}
+
+# =========================================================================== Report de bugs
+# Quando o instalador falha, monta um diagnostico (versao, OS, log sanitizado) e chama
+# a mesma API de bugs da GUI. A issue abre automaticamente no bezumiya/GoLiveBypass.
+# O envio NUNCA bloqueia o fluxo: falhou o report, avisa e segue.
+
+BUG_API_URL="https://api.skyplaceia.com/bugs/v1/reports"
+BUG_API_TOKEN="c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511"
+
+# Sanitiza texto: credenciais em URL, tokens Discord, query de gateway, e a proxy salva.
+report_sanitize() {
+    local texto="$1"
+    # credenciais em URL: scheme://usuario:senha@host -> scheme://usuario:***@host
+    texto="$(printf '%s' "$texto" | sed -E 's#([a-z][a-z0-9+.-]*://)([^/ @:]+):([^/@]+)@#\1\2:***@#g')"
+    # tokens Discord (mfa.* / JWT)
+    texto="$(printf '%s' "$texto" | sed -E 's/\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b/***/g')"
+    # query de gateway: so o host interessa
+    texto="$(printf '%s' "$texto" | sed -E 's#(https://gateway[^ ?]+)\?[^ ]*#\1?<params>#g')"
+    # proxy personalizada salva (host/porta e URL inteira)
+    if [ -f "$INSTALL_DIR/settings.json" ]; then
+        local segredo
+        segredo="$(sed -n 's/.*"proxy"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
+        if [ -n "$segredo" ]; then
+            texto="$(printf '%s' "$texto" | sed "s#$(printf '%s' "$segredo" | sed 's/[&/\]/\\&/g')#<proxy-pessoal>#g")"
+        fi
+    fi
+    printf '%s' "$texto"
+}
+
+# Envia o report para a API. Devolve 0 em caso de sucesso (issue aberta).
+report_send() {
+    local titulo="$1" descricao="$2"
+    local corpo
+    corpo="$(report_sanitize "$descricao")"
+    # JSON minimo: title, description, includeLogs
+    local json
+    json="$(printf '{"title":"%s","description":"%s","includeLogs":true}' \
+        "$(printf '%s' "$titulo" | sed 's/"/\\"/g')" \
+        "$(printf '%s' "$corpo" | sed 's/"/\\"/g')")"
+    if have curl; then
+        curl -fsS -X POST "$BUG_API_URL" \
+            -H "Authorization: Bearer $BUG_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$json" >/dev/null 2>&1 && return 0
+    elif have wget; then
+        echo "$json" | wget -qO- --post-data=- --header="Authorization: Bearer $BUG_API_TOKEN" --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+# Chamada unica de report: mostra aviso e tenta enviar (sem bloquear).
+report_error() {
+    local titulo="$1"
+    local desc="$(cat 2>/dev/null || true)"
+    if [ -s /tmp/glb-report-context.txt ]; then
+        desc="$(cat /tmp/glb-report-context.txt 2>/dev/null || true) $desc"
+    fi
+    # Aqui entra a cauda do log se existir
+    if [ -f "$INSTALL_DIR/golivebypass.log" ]; then
+        desc="$desc
+$(tail -n 40 "$INSTALL_DIR/golivebypass.log" 2>/dev/null || true)"
+    fi
+    if [ -n "$desc" ]; then
+        printf '  %s[!]%s Ocorreu um erro. Enviando relatorio automatico (issue no GitHub)...%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+        if report_send "$titulo" "$desc"; then
+            printf '  %s[OK]%s Relatorio enviado. Obrigado — os devs vao ver a issue no GitHub.%s\n' "$C_GREEN" "$C_OFF" "$C_OFF" >&2
+        else
+            printf '  %s[!]%s Nao consegui enviar o relatorio automatico. Rode com --json e mande a saida.%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+        fi
+    else
+        printf '  %s[!]%s Nao consegui montar o relatorio (sem logs). Mande o erro acima.%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+    fi
+}
+
+# =========================================================================== /Report de bugs
+
+# =========================================================================== TUI (standalone)
+# Interface no estilo OpenCode (dark, caixas, setas/Enter), ANSI puro, POSIX.
+# Quando nao ha TTY, ou -y/--yes esta ligado, o script cai para o fluxo por flags.
+# As funcoes usam prefixo st_ para nao colidir com as do instalador de plugin.
+
+st_tui_is_interactive() {
+    [ "$ASSUME_YES" -eq 1 ] && return 1
+    # stdin interativo e suficiente (evita quebrar em pty/emuladores).
+    [ -t 0 ] && return 0
+    return 1
+}
+
+ST_BG=$(printf '\033[48;5;235m')
+ST_FG=$(printf '\033[38;5;252m')
+ST_ACCENT=$(printf '\033[38;5;75m')
+ST_OK=$(printf '\033[38;5;114m')
+ST_DIM2=$(printf '\033[38;5;240m')
+ST_BOLD=$(printf '\033[1m')
+ST_RSET=$(printf '\033[0m')
+
+st_tui_mouse_on()   { printf '\033[?1000h\033[?1006h' >&2; }
+st_tui_mouse_off()  { printf '\033[?1000l\033[?1006l' >&2; }
+st_tui_hide_cursor() { printf '\033[?25l' >&2; }
+st_tui_show_cursor() { printf '\033[?25h' >&2; }
+
+# Tamanho do terminal + posicionamento (centraliza o box).
+st_tui_size() {
+    local s
+    if s="$(stty size 2>/dev/null)"; then
+        set -- $s
+        ST_ROWS=${1:-24}
+        ST_COLS=${2:-80}
+    else
+        ST_ROWS=24
+        ST_COLS=80
+    fi
+    if [ "$ST_COLS" -le 20 ]; then ST_COLS=80; fi
+    return 0
+}
+st_tui_cursor() { printf '\033[%d;%dH' "$1" "$2" >&2; }
+
+st_tui_raw_begin() {
+    ST_STTY_SAVED="$(stty -g 2>/dev/null || true)"
+    stty -icanon -echo 2>/dev/null || true
+}
+st_tui_raw_end() {
+    if [ -n "${ST_STTY_SAVED:-}" ]; then
+        stty "$ST_STTY_SAVED" 2>/dev/null || true
+    else
+        stty icanon echo 2>/dev/null || true
+    fi
+    ST_STTY_SAVED=""
+}
+
+st_tui_getkey() {
+    local key rest
+    key="$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    case "$key" in
+        1b)
+            rest="$(dd bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+            case "$rest" in
+                5b41) printf 'up\n' ;;
+                5b42) printf 'down\n' ;;
+                *)    printf 'esc\n' ;;
+            esac ;;
+        0a|0d) printf 'enter\n' ;;
+        6a) printf 'down\n' ;;
+        6b) printf 'up\n' ;;
+        71) printf 'esc\n' ;;
+        *) printf 'other\n' ;;
+    esac
+}
+
+st_seq() {
+    local start="$1" end="$2" i
+    i="$start"
+    while [ "$i" -le "$end" ]; do printf '%d ' "$i"; i=$((i+1)); done
+}
+
+# st_tui_menu <title> <items...> → imprime indice (1..N) ou 0 para cancelar.
+# Centraliza o box no meio do terminal (horizontal e vertical).
+st_tui_menu() {
+    local title="$1"; shift
+    local n sel key i txt
+    n=$#
+    sel=0
+    st_tui_mouse_on
+    st_tui_hide_cursor
+    st_tui_raw_begin
+    st_tui_size
+    local w=62
+    local total_rows top pad margin_col margin_row r
+    total_rows=$((n + 5))
+    margin_col=$(( ( ST_COLS - w ) / 2 ))
+    [ "$margin_col" -lt 1 ] && margin_col=1
+    margin_row=$(( ( ST_ROWS - total_rows ) / 2 ))
+    [ "$margin_row" -lt 1 ] && margin_row=1
+    while :; do
+        printf '\033[1;0H\033[J' >&2
+        top=""
+        i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+        r=$margin_row
+        st_tui_cursor $r $margin_col
+        printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$ST_BG" "$ST_RSET" "$ST_ACCENT" "$title" "$ST_RSET" "$ST_DIM2" "$top" "$ST_RSET" >&2
+        i=0
+        for txt in "$@"; do
+            r=$((r+1))
+            st_tui_cursor $r $margin_col
+            pad=""
+            local j
+            j=0; while [ "$j" -lt $((w-6-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
+            if [ "$i" -eq "$sel" ]; then
+                printf '%s│ %s●%s %s%s%s%s│%s\n' "$ST_BG" "$ST_ACCENT" "$ST_RSET" "$ST_BOLD" "$txt" "$ST_RSET" "$pad" "$ST_RSET" >&2
+            else
+                printf '%s│ %s○%s %s%s%s│%s\n' "$ST_BG" "$ST_DIM2" "$ST_RSET" "$txt" "$ST_RSET" "$pad" "$ST_RSET" >&2
+            fi
+            i=$((i+1))
+        done
+        r=$((r+1))
+        st_tui_cursor $r $margin_col
+        printf '%s└%s┘%s\n' "$ST_BG" "$(printf '─%.0s' $(st_seq 1 $((w-2))))" "$ST_RSET" >&2
+        r=$((r+1))
+        st_tui_cursor $r $margin_col
+        printf '%s  %s[↑↓] navegar · [Enter] escolher · [Esc] cancelar%s' "$ST_BG" "$ST_DIM2" "$ST_RSET" >&2
+        key="$(st_tui_getkey)"
+        case "$key" in
+            up)   [ "$sel" -gt 0 ] && sel=$((sel-1)) ;;
+            down) [ "$sel" -lt $((n-1)) ] && sel=$((sel+1)) ;;
+            enter) break ;;
+            esc)  sel=-1; break ;;
+        esac
+    done
+    st_tui_raw_end
+    st_tui_mouse_off
+    st_tui_show_cursor
+    if [ "$sel" -ge 0 ] && [ "$sel" -lt "$n" ]; then printf '%d\n' $((sel+1)); else printf '0\n'; fi
+}
+
+# st_tui_confirm <question> → 0 sim, 1 nao
+st_tui_confirm() {
+    st_tui_is_interactive || return 1
+    local answer
+    printf '%s%s  %s [s/N] ' "$ST_BG" "$ST_FG" "$1" >&2
+    st_tui_show_cursor
+    read -r answer
+    st_tui_hide_cursor
+    case "$answer" in [sSyY]*) return 0 ;; *) return 1 ;; esac
+}
+
+# st_tui_input <label> <inicial>
+st_tui_input() {
+    local label="$1" value="${2:-}"
+    printf '%s%s  %s%s: %s%s' "$ST_BG" "$ST_FG" "$label" "$ST_ACCENT" "$value" >&2
+    st_tui_show_cursor
+    IFS= read -r value
+    st_tui_hide_cursor
+    printf '%s\n' "$value"
+}
+
+# st_tui_progress/done: linha de status com spinner simples.
+st_tui_progress() { printf '\033[2K\r%s%s[*]%s %s%s' "$ST_BG" "$ST_ACCENT" "$ST_RSET" "$1" "$ST_RSET" >&2; }
+st_tui_done() { printf '\033[2K\r%s%s[OK]%s\n' "$ST_BG" "$ST_OK" "$ST_RSET" >&2; }
+
+# =========================================================================== /TUI (standalone)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -101,6 +348,10 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Em automacao (--yes) o report automatico nao deve spammar a API: quase sempre essas
+# rodadas sao de teste/CI. Usuario de verdade sem --yes reporta.
+[ "$ASSUME_YES" -eq 1 ] && REPORT_NO_AUTO=1 || REPORT_NO_AUTO=0
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -808,6 +1059,25 @@ DISTRO="$(os_field PRETTY_NAME)"
 [ -n "$DISTRO" ] || DISTRO="Linux"
 printf '  %s%s%s\n\n' "$C_DIM" "$DISTRO" "$C_OFF" >&2
 
+# ---------------------------------------------------------------------------
+# Modo interativo (TUI): quando rodamos sem flags --status/--uninstall/--restore/--json
+# com TTY de verdade, mostramos um menu estilo OpenCode. Com --yes ou sem TTY, o
+# fluxo continua 100% por flags (comportamento atual).
+if [ "$MODE" = "install" ] && st_tui_is_interactive; then
+    st_choice="$(st_tui_menu "GoLiveBypass standalone" \
+        "Instalar / atualizar o bypass" \
+        "Ver status" \
+        "Desinstalar" \
+        "Sair")"
+    case "$st_choice" in
+        1) : ;;  # continua no fluxo de instalação abaixo
+        2) MODE="status"; JSON=0 ;;
+        3) MODE="uninstall" ;;
+        *) printf '  %sAte mais.%s\n' "$C_DIM" "$C_OFF"; exit 0 ;;
+    esac
+    # Se veio de "Ver status" ou "Desinstalar", despacha abaixo (code continua).
+fi
+
 aviso_empacotado
 FOUND="$(discord_dirs)"
 [ -n "$FOUND" ] || fail "Nao achei nenhum Discord instalado."
@@ -875,7 +1145,7 @@ if [ "$MODE" = "uninstall" ]; then
         start_discord "$(printf '%s\n' "$FOUND" | head -1)"
         exit 0
     fi
-    exit 1
+    fail "Nao consegui desinstalar de todos — a elevacao pode ter falhado. Enviando relatorio."
 fi
 
 # Igual ao --uninstall, mas sem reabrir o Discord: usado pela GUI no boot para reverter
@@ -901,6 +1171,20 @@ injected=0
 # O while do pipe roda em subshell; o acumulador precisa ser um arquivo para o -eq valer.
 lista="$(mktemp)"
 tally="$(mktemp)"
+
+# Se entramos pela TUI (instalar sem flags), pergunta a rede antes de injetar.
+if [ "$MODE" = "install" ] && st_tui_is_interactive; then
+    st_net="$(st_tui_menu "Como o bypass vai sair?" \
+        "Tor automatico (recomendado, baixa e sobe sozinho)" \
+        "Proxy gratuita (escolhida e testada sozinha)" \
+        "Proxy minha (socks5://host:porta)")"
+    case "$st_net" in
+        2) PROXY="" ; TOR_MODE=0 ;;
+        3) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ;;
+        *) TOR_MODE=1 ;;
+    esac
+fi
+
 printf '%s\n' "$FOUND" > "$lista"
 while IFS='|' read -r resources flav detect id; do
     state="$(injection_state "$resources")"
@@ -963,8 +1247,7 @@ start_discord "$(printf '%s\n' "$FOUND" | head -1)"
 if [ "$injected" -eq 0 ]; then
     # Nada foi injetado: nao reabrir (senao a GUI mostraria um "sucesso" mentiroso) e
     # falhar de verdade para o chamador enxergar.
-    printf '\n  %sNADA foi injetado — a elevacao falhou ou nenhum Discord foi tocado.%s\n' "$C_RED" "$C_OFF" >&2
-    exit 1
+    fail "NADA foi injetado — a elevacao falhou ou nenhum Discord foi tocado."
 fi
 printf '\n  %sDiscord aberto com o GoLiveBypass.%s\n' "$C_GREEN" "$C_OFF" >&2
 

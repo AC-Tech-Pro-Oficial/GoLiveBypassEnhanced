@@ -1,4 +1,4 @@
-<#
+﻿<#
     GoLiveBypass standalone - instalador
 
     Instala direto no Discord, sem Equicord e sem Vencord. Nao precisa de Node, nem de pnpm,
@@ -66,6 +66,151 @@ function Confirm-Action($question) {
     $answer = Read-Host "  $question [s/N]"
     return $answer -match '^[sSyY]'
 }
+
+# =========================================================================== Report de bugs
+# Igual a GUI: ao falhar, monta diagnostico sanitizado e POST na API de bugs
+# (abre issue no bezumiya/GoLiveBypass). Nunca bloqueia o fluxo.
+
+$script:BugApiUrl = 'https://api.skyplaceia.com/bugs/v1/reports'
+$script:BugApiToken = 'c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511'
+
+function Invoke-BugReport([string]$title, [string]$description) {
+    if ($Yes) { return }  # automacao: nao spammar a API
+    $desc = Invoke-SanitizeBug $description
+    $body = @{ title = $title; description = $desc; includeLogs = $true } | ConvertTo-Json
+    try {
+        Invoke-RestMethod -Method Post -Uri $script:BugApiUrl -Body $body -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($script:BugApiToken)" } -TimeoutSec 15 -ErrorAction Stop | Out-Null
+        Write-Host ''
+        Write-Host '  [OK] Relatorio enviado. Obrigado — os devs vao ver a issue no GitHub.' -ForegroundColor Green
+    } catch {
+        Write-Host ''
+        Write-Host '  [!] Nao consegui enviar o relatorio automatico. Rode de novo e mande a saida.' -ForegroundColor Yellow
+    }
+}
+
+function Invoke-SanitizeBug([string]$text) {
+    $text = [regex]::Replace($text, '([a-z][a-z0-9+.-]*://)([^/ @:]+):([^/@]+)@', '$1$2:***@')
+    $text = [regex]::Replace($text, '\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b', '***')
+    $text = [regex]::Replace($text, '(https://gateway[^ ?]+)\?[^ ]*', '$1?<params>')
+    # proxy personalizada salva
+    try {
+        $settings = Join-Path $InstallDir 'settings.json'
+        if (Test-Path -LiteralPath $settings) {
+            $p = (Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json).proxy
+            if ($p) { $text = $text.Replace($p, '<proxy-pessoal>') }
+        }
+    } catch { }
+    return $text
+}
+
+function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
+    # monta a descricao: extra + cauda do log (se existir)
+    $logPath = Join-Path $InstallDir 'golivebypass.log'
+    $tail = ''
+    if (Test-Path -LiteralPath $logPath) {
+        $tail = (Get-Content -LiteralPath $logPath -Tail 40 -ErrorAction SilentlyContinue | Out-String)
+    }
+    if ($extra -or $tail) {
+        Invoke-BugReport $summary ($extra + "`n`n--- log ---`n" + $tail)
+    }
+}
+
+# =========================================================================== /Report de bugs
+
+# =========================================================================== TUI (PowerShell)
+# Interface no estilo OpenCode (dark, caixas, setas/Enter). Mouse: console do Windows nao
+# expoe cliques de forma confiavel; navegacao por teclado. Sem TTY ou com -Yes → flags.
+
+function Test-TuiInteractive {
+    if ($Yes) { return $false }
+    return (-not [Console]::IsInputRedirected) -and (-not [Console]::IsOutputRedirected)
+}
+
+$script:TuiBg = "`e[48;5;235m"
+$script:TuiFg = "`e[38;5;252m"
+$script:TuiAccent = "`e[38;5;75m"
+$script:TuiOk = "`e[38;5;114m"
+$script:TuiDim = "`e[38;5;240m"
+$script:TuiBold = "`e[1m"
+$script:TuiRset = "`e[0m"
+
+function Tui-HideCursor { Write-Host "`e[?25l" -NoNewline }
+function Tui-ShowCursor { Write-Host "`e[?25h" -NoNewline }
+function Tui-ClearBelow([int]$row) { Write-Host "`e[$row;0H`e[J" -NoNewline }
+
+function Tui-GetKey {
+    try {
+        $k = [Console]::ReadKey($true)
+        switch ($k.Key) {
+            'UpArrow'  { return 'up' }
+            'DownArrow' { return 'down' }
+            'Enter'    { return 'enter' }
+            'Escape'   { return 'esc' }
+            default {
+                if ($k.KeyChar -eq 'j') { return 'down' }
+                if ($k.KeyChar -eq 'k') { return 'up' }
+                if ($k.KeyChar -eq 'q') { return 'esc' }
+                return 'other'
+            }
+        }
+    } catch { return 'other' }
+}
+
+function Tui-Menu([string]$title, [string[]]$items) {
+    if (-not (Test-TuiInteractive)) { return 0 }
+    $sel = 0
+    $n = $items.Count
+    Tui-HideCursor
+    try {
+        while ($true) {
+            Tui-ClearBelow 1
+            Write-Host "`r" -NoNewline
+            $top = '─' * (62 - 8)
+            Write-Host "$($script:TuiBg)$($script:TuiRset)┌─ $($script:TuiAccent)$title$($script:TuiRset) ─$($script:TuiDim)$top$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            for ($i = 0; $i -lt $n; $i++) {
+                $txt = $items[$i]
+                $pad = ' ' * [Math]::Max(0, (62 - 6 - $txt.Length))
+                if ($i -eq $sel) {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiAccent)●$($script:TuiRset) $($script:TuiBold)$txt$($script:TuiRset)$pad │$($script:TuiRset)" -NoNewline
+                } else {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiDim)○$($script:TuiRset) $txt$pad │$($script:TuiRset)" -NoNewline
+                }
+                Write-Host ''
+            }
+            Write-Host "$($script:TuiBg)└$('─' * (62 - 2))┘$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            Write-Host "  $($script:TuiDim)[↑↓] navegar · [Enter] escolher · [Esc] cancelar$($script:TuiRset)" -NoNewline
+            $key = Tui-GetKey
+            switch ($key) {
+                'up'   { if ($sel -gt 0) { $sel-- } }
+                'down' { if ($sel -lt $n - 1) { $sel++ } }
+                'enter' { break }
+                'esc'  { $sel = -1; break }
+            }
+            if ($key -eq 'enter' -or $key -eq 'esc') { break }
+        }
+    } finally {
+        Tui-ShowCursor
+    }
+    if ($sel -ge 0) { return $sel + 1 } else { return 0 }
+}
+
+function Tui-Input([string]$label, [string]$initial = '') {
+    Write-Host "$($script:TuiBg)$($script:TuiFg)  ${label}: $($script:TuiAccent)$initial" -NoNewline
+    Tui-ShowCursor
+    $v = Read-Host
+    Tui-HideCursor
+    return ($v -replace '\s+$', '')
+}
+
+function Tui-Confirm([string]$question) {
+    if (-not (Test-TuiInteractive)) { return (Confirm-Action $question) }
+    $ans = Read-Host "$($script:TuiBg)$($script:TuiFg)  $question [s/N]"
+    return ($ans -match '^[sSyY]')
+}
+
+# =========================================================================== /TUI
 
 function Test-DiscordResourcesReady($resources) {
     $asar = Join-Path $resources 'app.asar'
@@ -376,6 +521,41 @@ if ($Mode -eq 'Status') { Show-Status; return }
 $installs = Get-DiscordResources
 if (-not $installs) { Write-Bad 'Nao achei nenhum Discord instalado.'; return }
 
+# corpo principal protegido: qualquer erro nao tratado vira report automatico
+try {
+# ---------------------------------------------------------------------------
+# Modo interativo (TUI): rodando sem -Mode Uninstall/Status, sem flags de proxy/tor
+# e com TTY, mostra um menu estilo OpenCode e deixa escolher a rede. Com -Yes ou
+# sem TTY, o fluxo continua por flags (comportamento atual).
+if ($Mode -eq 'Install' -and (Test-TuiInteractive)) {
+    $tuiChoice = Tui-Menu 'GoLiveBypass standalone' @(
+        'Instalar / atualizar o bypass',
+        'Ver status',
+        'Desinstalar',
+        'Sair'
+    )
+    switch ($tuiChoice) {
+        2 {
+            Show-Status
+            return
+        }
+        3 {
+            $Mode = 'Uninstall'
+        }
+        0 { Write-Host '  Ate mais.' -ForegroundColor DarkGray; return }
+        default {
+            # Instalar: pede a rede antes de prosseguir.
+            $tuiNet = Tui-Menu 'Como o bypass vai sair?' @(
+                'Tor automatico (recomendado, baixa e sobe sozinho)',
+                'Proxy gratuita (escolhida e testada sozinha)',
+                'Proxy minha (socks5://host:porta)'
+            )
+            if ($tuiNet -eq 1) { $Tor = $true }
+            elseif ($tuiNet -eq 3) { $Proxy = (Tui-Input 'Endereco da proxy').Trim() }
+        }
+    }
+}
+
 if ($Mode -eq 'Uninstall') {
     Stop-Discord
     foreach ($install in $installs) {
@@ -430,3 +610,8 @@ Write-Host '  Abra o Discord. O Go Live deve voltar sozinho.' -ForegroundColor G
 Write-Host "  Se algo der errado, o registro fica em $(Join-Path $InstallDir 'golivebypass.log')" -ForegroundColor DarkGray
 Write-Host '  Para desfazer: .\GoLiveBypass-Standalone.ps1 -Mode Uninstall' -ForegroundColor DarkGray
 Write-Host ''
+} catch {
+    Write-Host ''
+    Write-Bad "Erro: $($_.Exception.Message)"
+    Invoke-AutoBugReport 'Falha no GoLiveBypass standalone' $_.Exception.Message
+}
