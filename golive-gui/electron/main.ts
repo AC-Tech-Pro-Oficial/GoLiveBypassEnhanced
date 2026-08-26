@@ -196,53 +196,13 @@ function isPermissionError(e: any) {
 }
 
 /**
- * O app mora na bandeja / barra de menus.  Windows o arg --hidden esconde a janela;
- * No Mac usamos wasOpenedAtLogin porque o openAsHidden morreu no macOS 13 :(
- * Nos dois casos sobe so o icone, sem jogar janela na cara do usuario a cada login.
+ * O app mora na bandeja / barra de menus. Windows usa HKCU\...\Run direto
+ * (ver electron/startup.ts) porque o app e distribuido em portable e o
+ * setLoginItemSettings do Electron delega ao instalador Squirrel/MSI, que
+ * nao existe. No Mac usamos wasOpenedAtLogin porque o openAsHidden morreu
+ * no macOS 13 :( Nos dois casos sobe so o icone, sem abrir janela no login.
  */
-function getStartup() {
-  if (IS_LINUX) {
-    const file = path.join(app.getPath('home'), '.config', 'autostart', 'golivebypass.desktop');
-    return fs.existsSync(file);
-  }
-  return app.getLoginItemSettings().openAtLogin;
-}
-
-function setStartup(enabled: boolean) {
-  if (IS_LINUX) {
-    const dir = path.join(app.getPath('home'), '.config', 'autostart');
-    const file = path.join(dir, 'golivebypass.desktop');
-    try {
-      if (enabled) {
-        fs.mkdirSync(dir, { recursive: true });
-        // Exec com --hidden: abre so na bandeja/notificacao no login, sem jogar janela na tela.
-        fs.writeFileSync(file, `[Desktop Entry]
-Type=Application
-Name=GoLiveBypass
-Comment=Devolve o Go Live e a camera no Discord
-Exec=${process.execPath} --hidden
-X-GNOME-Autostart-enabled=true
-`);
-      } else if (fs.existsSync(file)) {
-        fs.unlinkSync(file);
-      }
-    } catch (error) {
-      console.error('Falha ao alterar autostart:', error);
-    }
-    return;
-  }
-  app.setLoginItemSettings({
-    openAtLogin: enabled,
-    args: ["--hidden"],
-  });
-}
-
-function launchedHidden() {
-  return (
-    process.argv.includes("--hidden") ||
-    app.getLoginItemSettings().wasOpenedAtLogin
-  );
-}
+import { getStartup, setStartup, launchedHidden } from "./startup";
 
 function createWindow() {
   mainWindow = new BrowserWindow({
