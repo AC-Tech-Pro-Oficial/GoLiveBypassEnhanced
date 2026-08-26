@@ -127,6 +127,11 @@ function Test-ShouldReport([string]$msg) {
     # Cancelamento via Ctrl+C no Read-Host: ver nota no installer.ps1.
     if ($msg -like '*cancelada pelo usu*rio*') { return $false }
     if ($msg -like '*canceled by the user*') { return $false }
+    if ($msg -like '*cadeia de caracteres vazia*') { return $false }
+    if ($msg -like '*empty string*') { return $false }
+    if ($msg -like 'Illegal characters in path*') { return $false }
+    if ($msg -like 'Nao e possivel associar*') { return $false }
+    if ($msg -like 'Cannot bind argument*') { return $false }
     if ($msg -like 'O Discord nao fechou*') { return $false }
     # input / uso do usuario
     if ($msg -like 'Opcao desconhecida: *') { return $false }

@@ -96,6 +96,17 @@ should_report() {
         *"interrompido"*) return 1 ;;
         *"terminated"*) return 1 ;;
         "O Discord nao fechou"*) return 1 ;;
+        # Argumento vazio/ilegal passado pro instalador (input ruim do usuario, nao bug):
+        # ver notas no installer.ps1.
+        *"cancelada pelo usu"*) return 1 ;;
+        *"canceled by the user"*) return 1 ;;
+        *"interrompido"*) return 1 ;;
+        *"terminated"*) return 1 ;;
+        *"cadeia de caracteres vazia"*) return 1 ;;
+        *"empty string"*) return 1 ;;
+        *"Illegal characters in path"*) return 1 ;;
+        *"Nao e possivel associar"*) return 1 ;;
+        *"Cannot bind argument"*) return 1 ;;
         # --- input / uso do usuario ---
         "Opcao desconhecida: "*) return 1 ;;
         "Formato invalido. Use socks5://"*) return 1 ;;
