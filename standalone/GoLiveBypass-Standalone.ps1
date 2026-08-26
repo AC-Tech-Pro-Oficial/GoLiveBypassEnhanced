@@ -104,6 +104,8 @@ function Invoke-SanitizeBug([string]$text) {
 }
 
 function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
+    # Cancelar ou uma instrucao de uso (ex.: "feche o Discord") nao e bug: nao reporta.
+    if ($extra -match '^Cancelado|^O Discord nao fechou') { return }
     # monta a descricao: extra + cauda do log (se existir)
     $logPath = Join-Path $InstallDir 'golivebypass.log'
     $tail = ''

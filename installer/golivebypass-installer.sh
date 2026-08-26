@@ -80,9 +80,15 @@ ok()   { printf '  %s[OK] %s%s\n' "$C_GREEN" "$1" "$C_OFF" >&2; }
 warn() { printf '  %s[!] %s%s\n' "$C_YELLOW" "$1" "$C_OFF" >&2; }
 fail() {
     printf '\n  %s[X] %s%s\n\n' "$C_RED" "$1" "$C_OFF" >&2
-    if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
-        report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
-    fi
+    # Cancelar ou uma instrucao de uso (ex.: "feche o Discord") nao e bug: nao reporta.
+    case "$1" in
+        "Cancelado."|"O Discord nao fechou"*) ;; # sem report
+        *)
+            if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
+                report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
+            fi
+            ;;
+    esac
     exit 1
 }
 

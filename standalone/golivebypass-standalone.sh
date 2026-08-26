@@ -86,10 +86,16 @@ ok()   { printf '  %s[OK]%s %s\n' "$C_GREEN" "$C_OFF" "$1" >&2; }
 warn() { printf '  %s[!]%s %s\n' "$C_YELLOW" "$C_OFF" "$1" >&2; }
 fail() {
     printf '  %s[X]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2
-    # Report automatico: so quando esta de fato falhando (e nao em --yes de teste).
-    if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
-        report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
-    fi
+    # Cancelar ou uma instrucao de uso (ex.: "feche o Discord") nao e bug: nao reporta.
+    case "$1" in
+        "Cancelado."|"O Discord nao fechou"*) ;; # sem report
+        *)
+            # Report automatico: so quando esta de fato falhando (e nao em --yes de teste).
+            if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
+                report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
+            fi
+            ;;
+    esac
     exit 1
 }
 

@@ -1281,7 +1281,10 @@ try {
     Write-Host '      Se for relatar, mande esta linha junto.' -ForegroundColor DarkGray
 
     # Report automatico (se nao for automacao): a issue abre no GitHub.
-    Invoke-SendAutoReport "Falha no instalador GoLiveBypass: $($_.Exception.Message)" $_.Exception.Message
+    # Cancelar ou uma instrucao de uso (ex.: "feche o Discord") nao e bug: nao reporta.
+    if ($_.Exception.Message -notmatch '^Cancelado|^O Discord nao fechou') {
+        Invoke-SendAutoReport "Falha no instalador GoLiveBypass: $($_.Exception.Message)" $_.Exception.Message
+    }
     exit 1
 }
 
