@@ -104,8 +104,8 @@ function Invoke-SanitizeBug([string]$text) {
 }
 
 function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
-    # Cancelar ou uma instrucao de uso (ex.: "feche o Discord") nao e bug: nao reporta.
-    if ($extra -match '^Cancelado|^O Discord nao fechou') { return }
+    # Erros de uso (dependencia, CLI typo, path errado, ferramenta externa) nao viram issue.
+    if (-not (Test-ShouldReport $extra)) { return }
     # monta a descricao: extra + cauda do log (se existir)
     $logPath = Join-Path $InstallDir 'golivebypass.log'
     $tail = ''
@@ -115,6 +115,41 @@ function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
     if ($extra -or $tail) {
         Invoke-BugReport $summary ($extra + "`n`n--- log ---`n" + $tail)
     }
+}
+
+# Test-ShouldReport <mensagem>: $false se a mensagem NAO deve abrir issue.
+# Mesmo espelho do should_report() do .sh: erros de uso (dependencia faltando,
+# CLI digitada errada, path errado, ferramenta externa quebrada) nao viram
+# issue. O resto (bug real) continua reportando.
+function Test-ShouldReport([string]$msg) {
+    # cancelamento e instrucoes de uso
+    if ($msg -eq 'Cancelado.') { return $false }
+    if ($msg -like 'O Discord nao fechou*') { return $false }
+    # input / uso do usuario
+    if ($msg -like 'Opcao desconhecida: *') { return $false }
+    if ($msg -like 'Formato invalido. Use socks5://*') { return $false }
+    if ($msg -like 'Endereco da proxy invalido*') { return $false }
+    if ($msg -like 'Nao consegui baixar *') { return $false }
+    # dependencia faltando (ambiente)
+    if ($msg -like 'Instale *') { return $false }
+    if ($msg -like 'O npm nao conseguiu instalar o pnpm*') { return $false }
+    if ($msg -like 'Nao consegui deixar o pnpm funcionando*') { return $false }
+    # path / checkout errado
+    if ($msg -like 'Nao encontrei o checkout do Equicord/Vencord*') { return $false }
+    if ($msg -like 'Nao achei *') { return $false }
+    if ($msg -like '*ja existe e nao parece um checkout*') { return $false }
+    if ($msg -like 'Nao achei o patcher *') { return $false }
+    if ($msg -like 'Nao achei nenhum Discord instalado*') { return $false }
+    # ferramenta externa (ambiente)
+    if ($msg -eq 'git clone falhou') { return $false }
+    if ($msg -eq 'pnpm install falhou') { return $false }
+    if ($msg -eq 'pnpm build falhou') { return $false }
+    if ($msg -eq 'pnpm inject falhou') { return $false }
+    # desinstalacao / elevacao parcial
+    if ($msg -like 'Nao consegui desinstalar de todos*') { return $false }
+    if ($msg -like 'NADA foi injetado*') { return $false }
+    # default: e bug, reporta
+    return $true
 }
 
 # =========================================================================== /Report de bugs

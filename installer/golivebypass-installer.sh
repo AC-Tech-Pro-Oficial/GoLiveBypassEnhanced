@@ -78,17 +78,48 @@ fi
 step() { printf '  %s[*] %s%s\n' "$C_DIM" "$1" "$C_OFF" >&2; }
 ok()   { printf '  %s[OK] %s%s\n' "$C_GREEN" "$1" "$C_OFF" >&2; }
 warn() { printf '  %s[!] %s%s\n' "$C_YELLOW" "$1" "$C_OFF" >&2; }
+# should_report <mensagem>: 0 se a mensagem deve virar issue no GitHub, 1 se nao.
+# Tudo o que e "erro de uso" (dependencia faltando, CLI digitada errada, path
+# errado, ferramenta externa quebrada) cai aqui — NAO e bug do projeto. O resto
+# (bug real do instalador/bypass/patcher) continua abrindo issue como antes.
+should_report() {
+    case "$1" in
+        # --- cancelamento e instrucoes de uso ---
+        "Cancelado.") return 1 ;;
+        "O Discord nao fechou"*) return 1 ;;
+        # --- input / uso do usuario ---
+        "Opcao desconhecida: "*) return 1 ;;
+        "Formato invalido. Use socks5://"*) return 1 ;;
+        "Endereco da proxy invalido"*) return 1 ;;
+        "Nao consegui baixar "*) return 1 ;;
+        # --- dependencia faltando (ambiente) ---
+        "Instale "*) return 1 ;;
+        "O npm nao conseguiu instalar o pnpm"*) return 1 ;;
+        "Nao consegui deixar o pnpm funcionando"*) return 1 ;;
+        # --- path / checkout errado ---
+        "Nao encontrei o checkout do Equicord/Vencord"*) return 1 ;;
+        "Nao achei "*) return 1 ;;
+        *"ja existe e nao parece um checkout"*) return 1 ;;
+        "Nao achei o patcher "*) return 1 ;;
+        "Nao achei nenhum Discord instalado"*) return 1 ;;
+        # --- ferramenta externa (ambiente) ---
+        "git clone falhou") return 1 ;;
+        "pnpm install falhou") return 1 ;;
+        "pnpm build falhou") return 1 ;;
+        "pnpm inject falhou") return 1 ;;
+        # --- desinstalacao / elevacao parcial ---
+        "Nao consegui desinstalar de todos"*) return 1 ;;
+        "NADA foi injetado"*) return 1 ;;
+        # default: e bug, reporta
+        *) return 0 ;;
+    esac
+}
+
 fail() {
     printf '\n  %s[X] %s%s\n\n' "$C_RED" "$1" "$C_OFF" >&2
-    # Cancelar ou uma instrucao de uso (ex.: "feche o Discord") nao e bug: nao reporta.
-    case "$1" in
-        "Cancelado."|"O Discord nao fechou"*) ;; # sem report
-        *)
-            if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
-                report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
-            fi
-            ;;
-    esac
+    if [ "${REPORT_NO_AUTO:-0}" -eq 0 ] && should_report "$1"; then
+        report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
+    fi
     exit 1
 }
 
