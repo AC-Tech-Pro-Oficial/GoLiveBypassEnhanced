@@ -1323,6 +1323,83 @@ build_mod() {
     (cd "$root" && pnpm build) || fail "pnpm build falhou"
 }
 
+# Patch direto em cliente paralelo (Equibop/Vesktop/Legcord) com source local.
+# O instalador de mod do Equicord (EquilotlCli) nao reconhece esses clientes
+# (FindDiscords() soh olha LinuxDiscordNames) - pnpm inject mostra so "Custom
+# Location" e falha. Esse caminho copia o dist/<cliente>.asar (gerado pelo
+# build do Equicord) sobre o app.asar do cliente, com backup automatico.
+inject_parallel() {
+    local root="$1"
+    local parallels target="" asar="" client_name="" app_path=""
+
+    parallels="$(parallel_installs)"
+    [ -n "$parallels" ] || return 1
+
+    local n
+    n="$(printf '%s\n' "$parallels" | grep -c .)"
+    if [ "$n" -eq 1 ]; then
+        target="$parallels"
+    elif [ "$ASSUME_YES" -eq 0 ] && tui_is_interactive; then
+        local choices=()
+        while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            choices+=("$p")
+        done <<EOF
+$parallels
+EOF
+        local choice
+        choice="$(tui_menu "Em qual cliente paralelo injetar?" "${choices[@]}")"
+        local i=1
+        while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            if [ "$i" = "$choice" ]; then target="$p"; break; fi
+            i=$((i+1))
+        done <<EOF
+$parallels
+EOF
+    else
+        target="$(printf '%s\n' "$parallels" | head -1)"
+    fi
+
+    [ -n "$target" ] || return 1
+
+    case "$target" in
+        */equibop|*/Equibop)
+            client_name="Equibop"; asar="$root/dist/equibop.asar"; app_path="$target/app.asar" ;;
+        */vesktop|*/Vesktop)
+            client_name="Vesktop"; asar="$root/dist/vesktop.asar"; app_path="$target/app.asar" ;;
+        */legcord|*/Legcord)
+            client_name="Legcord"; asar="$root/dist/legcord.asar"; app_path="$target/app.asar" ;;
+        *) fail "Cliente paralelo desconhecido em $target" ;;
+    esac
+
+    if [ ! -f "$asar" ]; then
+        fail "Build nao gerou $asar. Rode 'pnpm build' em $root e tente de novo."
+    fi
+
+    if [ ! -f "$target/_app.asar" ]; then
+        if [ ! -w "$target" ]; then
+            step "Backup do app.asar original (precisa de sudo)"
+            sudo cp "$app_path" "$target/_app.asar" || fail "Nao consegui fazer backup."
+            sudo chown "$(id -u):$(id -g)" "$target/_app.asar" 2>/dev/null || true
+        else
+            cp "$app_path" "$target/_app.asar" || fail "Nao consegui fazer backup"
+        fi
+        ok "Backup criado em $target/_app.asar"
+    else
+        step "Backup ja existe em $target/_app.asar"
+    fi
+
+    if [ ! -w "$target" ]; then
+        step "Copiando $client_name com patcher (precisa de sudo)"
+        sudo cp "$asar" "$app_path" || fail "Nao consegui copiar. Verifique permissoes."
+        sudo chown "$(id -u):$(id -g)" "$app_path" 2>/dev/null || true
+    else
+        cp "$asar" "$app_path" || fail "Nao consegui copiar"
+    fi
+    ok "$client_name patchado: $app_path"
+}
+
 # --location poupa a pergunta do instalador do mod quando so ha um Discord, e de quebra deixa
 # a escolha do sudo certa: da para saber de antemao onde a injecao vai cair. Com mais de um,
 # quem escolhe e o instalador do mod, que lista todos.
@@ -1379,21 +1456,29 @@ inject_mod() {
     # funciona em clientes paralelos - eles ja vem com o mod embutido). Falha
     # com mensagem especifica apontando o caminho certo.
     if [ "$n" -eq 0 ]; then
-        # Listar os paralelos para o user entender o que esta acontecendo
+        # Nao achou Discord puro, mas pode ter Equibop/Vesktop/Legcord. Esses
+        # clientes paralelos nao sao reconhecidos pelo instalador de mod
+        # (EquilotlCli soh olha "discord"/"discordptb"/"discordcanary"/flatpak),
+        # mas o build do Equicord gera dist/<cliente>.asar que pode ser copiado
+        # direto para o app.asar do cliente (com backup automatico).
         local parallels
         parallels="$(parallel_installs)"
-        printf '\n'
-        printf '  %s[!]%s Nao encontrei o Discord puro instalado.\n' "$C_YELLOW" "$C_OFF"
         if [ -n "$parallels" ]; then
-            printf '      Detectei so clientes paralelos (Vesktop/Equibop/Legcord):\n'
+            printf '\n'
+            printf '  %s[!]%s Nao encontrei o Discord puro, mas achei clientes paralelos:\n' "$C_YELLOW" "$C_OFF"
             while IFS= read -r p; do
                 [ -z "$p" ] && continue
                 printf '        - %s\n' "$p"
             done <<EOF
 $parallels
 EOF
+            if [ "$ASSUME_YES" -eq 1 ] || confirm "Injetar em um dos clientes acima (patch direto, vai pedir sudo)"; then
+                inject_parallel "$root" || fail "Patch direto falhou."
+                # Marca injecao como OK para o do_install seguir
+                return 0
+            fi
         fi
-        fail "Cliente paralelo nao eh injetado pelo instalador de mod. Use o instalador de plugin: baixe goLiveBypass-vencord.zip de https://github.com/bezumiya/GoLiveBypass/releases/latest e coloque em $root/src/userplugins/goLiveBypass/."
+        fail "Discord puro nao encontrado, e nenhum cliente paralelo disponivel para patch direto. Instale o Discord (ou use o instalador de plugin goLiveBypass-vencord.zip, que convive com mod)."
     fi
 
     if [ "$n" -eq 1 ]; then
