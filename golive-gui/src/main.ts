@@ -4,7 +4,7 @@ declare global {
   interface Window {
     api: {
       platform: string;
-      activate: (proxy?: string) => Promise<void>;
+      activate: (proxy?: string, confirmOverride?: boolean) => Promise<void>;
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
       getProxy: () => Promise<string>;
@@ -123,6 +123,19 @@ const statusTag = document.getElementById('statusTag')!;
 const statusCard = document.getElementById('statusCard')!;
 const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
 const btnText = document.getElementById('btnText')!;
+// Card de aviso quando o Discord tem Vencord/Equicord/Vesktop/Equibop/Legcord.
+// Acoes: baixar o plugin (link) ou sobrescrever (botao secundario, com confirmacao).
+const conflictCard = document.getElementById('conflictCard')!;
+const conflictTitleText = document.getElementById('conflictTitleText')!;
+const conflictBodyText = document.getElementById('conflictBodyText')!;
+const conflictPluginLink = document.getElementById('conflictPluginLink') as HTMLAnchorElement;
+const conflictOverwriteBtn = document.getElementById('conflictOverwriteBtn') as HTMLButtonElement | null;
+
+// Guarda o nome do mod detectado (vencord/equicord/vesktop/equibop/legcord) entre
+// updates de status. Vencord/Equicord exigem confirmacao explicita para sobrescrever;
+// Vesktop/Equibop/Legcord apenas avisam, e a GUI pode sobrescrever sem bloqueio
+// (cliente paralelo, sem plugins do user perdidos).
+let detectedMod: string | null = null;
 const warningToast = document.getElementById('warningToast') as HTMLElement | null;
 const toastClose = document.getElementById('toastClose') as HTMLButtonElement | null;
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
@@ -182,6 +195,20 @@ async function updateStatus() {
     statusTag.className = 'status-tag';
     toggleBtn.disabled = false;
     toggleBtn.classList.remove('loading', 'deactivate', 'overwrite');
+    conflictCard.hidden = true;
+    // Link do plugin (zip do release): mesma URL para todos os mods.
+    conflictPluginLink.href =
+      'https://github.com/bezumiya/GoLiveBypass/releases/latest/download/goLiveBypass-vencord.zip';
+
+    // Decodifica o status: pode ser "OTHER_MOD" (legado) ou "OTHER_MOD:vencord" / "OTHER_MOD:equicord" / etc.
+    let baseStatus = status;
+    let modName: string | null = null;
+    const m = status.match(/^OTHER_MOD(?::(.+))?$/);
+    if (m) {
+      baseStatus = 'OTHER_MOD';
+      modName = m[1] || null;
+    }
+    detectedMod = modName;
 
     if (status === 'ACTIVE') {
       statusText.innerText = 'GoLiveBypass está Ativo';
@@ -190,13 +217,47 @@ async function updateStatus() {
       btnText.innerText = 'Desativar Bypass';
       toggleBtn.classList.add('deactivate');
       statusCard.hidden = true;
-    } else if (status === 'OTHER_MOD') {
-      statusText.innerText = 'Outro mod detectado';
-      statusTag.textContent = 'Conflito';
-      statusTag.classList.add('tag--warn');
-      btnText.innerText = 'Sobrescrever e Ativar';
-      toggleBtn.classList.add('overwrite');
+    } else if (baseStatus === 'OTHER_MOD') {
+      // Mod detectado. Texto do card depende do tipo:
+      // - Vencord/Equicord: ameaca real (perde plugins do user). Mostra conflictCard
+      //   com link pro plugin, esconde o botao principal de ativar e exige
+      //   clique explicito no botao "Sobrescrever mesmo assim".
+      // - Vesktop/Equibop/Legcord: cliente paralelo, sem plugins perdidos. Mostra o
+      //   conflictCard informativo mas o botao principal segue funcional.
+      const isProtected = modName === 'vencord' || modName === 'equicord';
+      const friendly = isProtected
+        ? (modName === 'vencord' ? 'Vencord' : 'Equicord')
+        : modName
+          ? modName.charAt(0).toUpperCase() + modName.slice(1)
+          : 'Outro mod';
+      statusText.innerText = `${friendly} detectado`;
+      statusTag.textContent = isProtected ? 'Conflito' : 'Cliente paralelo';
+      statusTag.classList.add(isProtected ? 'tag--warn' : 'tag--info');
+      // Esconde o botao principal para Vencord/Equicord (sobrescrita so via
+      // botao secundario dentro do conflictCard). Para outros mods, mantem.
+      if (isProtected) {
+        toggleBtn.hidden = true;
+      } else {
+        toggleBtn.hidden = false;
+        btnText.innerText = 'Sobrescrever e Ativar';
+        toggleBtn.classList.add('overwrite');
+      }
       statusCard.hidden = false;
+      // Conflict card: texto especifico por mod
+      conflictTitleText.textContent = `${friendly} detectado`;
+      if (isProtected) {
+        conflictBodyText.innerHTML =
+          `Sobrescrever este Discord <strong>apaga o ${friendly}</strong> e os outros plugins ` +
+          `dele ate voce reinstalar tudo. Use o <strong>plugin</strong> do GoLiveBypass ` +
+          `para conviver com o mod.`;
+      } else {
+        conflictBodyText.innerHTML =
+          `Detectamos o cliente paralelo <strong>${friendly}</strong>. Como esse cliente ` +
+          `nao roda plugins de Vencord/Equicord, sobrescrever o app.asar dele nao perde ` +
+          `nada - mas o ${friendly} deixa de existir como tal (vira um Discord com bypass). ` +
+          `Para manter o mod embutido do ${friendly}, o caminho recomendado tambem e o plugin.`;
+      }
+      conflictCard.hidden = false;
     } else if (status === 'NOT_FOUND') {
       statusText.innerText = 'Discord não encontrado';
       statusTag.textContent = 'Ausente';
@@ -243,7 +304,13 @@ toggleBtn.addEventListener('click', async () => {
       }
     } else {
       const proxy = proxyInput.value.trim();
-      await window.api.activate(proxy);
+      // Vencord/Equicord: a GUI esconde o botao principal e so deixa o usuario
+      // prosseguir via o botao "Sobrescrever mesmo assim" do conflictCard, que
+      // confirma explicitamente. Se por algum motivo o toggleBtn for clicado
+      // (atalho de teclado, DevTools, etc), a gente envia confirmOverride=true
+      // tambem, porque o dialog.showMessageBox no main process faz a trava final.
+      const isProtected = detectedMod === 'vencord' || detectedMod === 'equicord';
+      await window.api.activate(proxy, isProtected);
 
       // Popup de aviso
       setWarningOpen(true);
@@ -255,6 +322,27 @@ toggleBtn.addEventListener('click', async () => {
   await updateStatus();
   // O Tor sobe durante a ativacao, entao o texto lido na abertura da janela ja nasceu velho:
   // ficava em "aguardando ativacao" com o Tor de pe e o bypass funcionando.
+  refreshTorStatus();
+});
+
+// Botao secundario dentro do conflictCard. Aparece quando ha Vencord/Equicord.
+// O fluxo:
+//   1) User clica "Sobrescrever mesmo assim"
+//   2) Enviamos activate(proxy, confirmOverride=true) pro backend
+//   3) Backend abre o dialog.showMessageBox nativo (defesa em profundidade)
+//   4) Se confirmar, segue o fluxo normal de ativacao
+// Sem o passo 3, o user poderia clicar direto aqui sem ler o aviso.
+conflictOverwriteBtn?.addEventListener('click', async () => {
+  conflictOverwriteBtn.disabled = true;
+  try {
+    const proxy = proxyInput.value.trim();
+    await window.api.activate(proxy, true);
+    setWarningOpen(true);
+  } catch (err) {
+    alert('Erro: ' + err);
+  }
+  conflictOverwriteBtn.disabled = false;
+  await updateStatus();
   refreshTorStatus();
 });
 

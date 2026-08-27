@@ -480,6 +480,112 @@ html[data-theme='dark'] .report-btn {
   color: var(--err-ink);
 }
 
+.status-tag.tag--info {
+  background: var(--info-bg);
+  color: var(--info-ink);
+}
+
+/* ------------------------------------------------------------
+   Conflict card — aviso grande quando o Discord tem Vencord/Equicord/Vesktop/etc.
+   Substitui o status-card em importancia visual. Cor de borda warn pra Vencord/Equicord
+   (perda real de plugins), info pra Vesktop/Equibop/Legcord (cliente paralelo).
+   ------------------------------------------------------------ */
+.conflict-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 16px;
+  background: var(--warn-bg-soft, rgba(255, 184, 0, 0.08));
+  border: 1px solid var(--warn-stroke, rgba(255, 184, 0, 0.4));
+  border-radius: var(--r-sm);
+  text-align: left;
+  animation: slide-up var(--anim) ease-out;
+  animation-delay: 80ms;
+  animation-fill-mode: both;
+}
+
+.conflict-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--warn-ink);
+}
+
+.conflict-title svg {
+  flex: 0 0 auto;
+}
+
+.conflict-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg);
+}
+
+.conflict-body p {
+  margin: 0;
+}
+
+.conflict-body strong {
+  color: var(--warn-ink);
+  font-weight: 600;
+}
+
+.conflict-link {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 8px 14px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  text-decoration: none;
+  border-radius: var(--r-sm);
+  font-weight: 600;
+  font-size: 12px;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.conflict-link:hover {
+  filter: brightness(1.1);
+  text-decoration: none;
+}
+
+.conflict-link:active {
+  transform: scale(0.98);
+}
+
+.conflict-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.conflict-overwrite-btn {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--err-ink);
+  border: 1px solid var(--err-stroke, rgba(255, 95, 86, 0.4));
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.conflict-overwrite-btn:hover:not(:disabled) {
+  background: var(--err-bg-soft, rgba(255, 95, 86, 0.08));
+  border-color: var(--err-stroke, rgba(255, 95, 86, 0.6));
+}
+
+.conflict-overwrite-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ------------------------------------------------------------
    CTA principal — ativar (verde leitoso) / desativar (vermelho leitoso)
    ------------------------------------------------------------ */

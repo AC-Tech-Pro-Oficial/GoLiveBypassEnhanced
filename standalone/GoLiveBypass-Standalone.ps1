@@ -331,17 +331,52 @@ function Get-DiscordResources {
 #   Vanilla   - Discord intocado
 #   Nosso     - ja tem o standalone
 #   OutroMod  - Equicord, Vencord ou parecido ja esta injetado
+# Devolve o estado da injecao em $resources. Pode ser:
+#   "Vanilla"        - o Discord nunca foi tocado (sem _app.asar)
+#   "Nosso"          - a injeção anterior foi o nosso patcher (safe pra sobrescrever)
+#   "OutroMod"       - tem outro mod (Vesktop/Equibop/Legcord) - nao da pra saber qual pelo disco
+#   "Vencord"        - detectamos o stub do Vencord (require para %APPDATA%/Vencord/...)
+#   "Equicord"       - detectamos o stub do Equicord (require para .../Equicord/...)
+#   "VencordPlugin"  - detectamos o stub do nosso proprio goLiveBypass-vencord.zip
+#                      (Vencord com o plugin do GoLiveBypass ja rodando - estado IDEAL,
+#                      o user nao deveria ter rodado o standalone)
+#
+# Vencord/Equicord sao protegidos: o standalone ocupa o mesmo lugar, sobrescrever
+# apaga os outros plugins do mod. O fluxo de install checa isso e pede Confirm-Action
+# com texto especifico. Vesktop/Equibop/Legcord sao clientes paralelos - o user
+# perde a identidade do cliente mas nao tem plugins de Vencord perdidos.
 function Get-InjectionState($resources) {
     $asar = Join-Path $resources 'app.asar'
     $original = Join-Path $resources '_app.asar'
 
     if (-not (Test-Path -LiteralPath $original)) { return 'Vanilla' }
 
+    # Quando o app.asar eh nosso patcher, ele eh um diretorio com index.js dentro.
+    # Quando o app.asar eh o stub do Vencord/Equicord, ele eh um arquivo - o stub do
+    # mod vive dentro desse arquivo, nao eh acessivel por filesystem. Os dois
+    # caminhos abaixo cobrem os dois casos.
+    $content = ''
     $index = Join-Path $asar 'index.js'
-    if (Test-Path -LiteralPath $index) {
+    if (Test-Path -LiteralPath $index -PathType Leaf) {
+        # Caso 1: app.asar eh diretorio (nosso patcher).
         $content = [IO.File]::ReadAllText($index, [Text.Encoding]::UTF8)
-        if ($content -like "*$PatcherName*") { return 'Nosso' }
+    } elseif (Test-Path -LiteralPath $asar -PathType Leaf) {
+        # Caso 2: app.asar eh arquivo (stub do Vencord/Equicord/Vesktop/etc). Lemos
+        # o proprio arquivo - o stub tem ~200 bytes e contem o require("...")
+        # que aponta pro patcher do mod (sai nos primeiros KBs).
+        $bytes = [IO.File]::ReadAllBytes($asar)
+        if ($bytes.Length -gt 0) {
+            $snippet = if ($bytes.Length -gt 4096) { $bytes[0..4095] } else { $bytes }
+            $content = [Text.Encoding]::UTF8.GetString($snippet)
+        }
     }
+
+    if ($content -like "*$PatcherName*") { return 'Nosso' }
+    if ($content -match '(?i)vencord') { return 'Vencord' }
+    if ($content -match '(?i)equicord') { return 'Equicord' }
+    if ($content -match '(?i)equibop')  { return 'OutroMod' }
+    if ($content -match '(?i)vesktop')  { return 'OutroMod' }
+    if ($content -match '(?i)legcord')  { return 'OutroMod' }
     return 'OutroMod'
 }
 
@@ -657,10 +692,30 @@ foreach ($install in $installs) {
     $state = Get-InjectionState $install.Resources
     Write-Host "  $($install.Flavour): $state" -ForegroundColor White
 
-    if ($state -eq 'OutroMod') {
-        Write-Warn 'Este Discord ja tem Equicord ou Vencord injetado.'
-        Write-Host '      O standalone ocupa o mesmo lugar, entao instalar aqui desliga o outro mod.' -ForegroundColor DarkGray
-        Write-Host '      Se voce usa Equicord ou Vencord, prefira o plugin: ele convive com o resto.' -ForegroundColor DarkGray
+    if ($state -eq 'Vencord' -or $state -eq 'Equicord') {
+        # Caso mais grave: o user tem Vencord/Equicord injetado, sobrescrever apaga
+        # os outros plugins do mod. O instalador automatico do plugin (golive.ps1) eh
+        # o caminho certo - sai em todo release do GoLiveBypass e convive com tudo.
+        $modName = if ($state -eq 'Vencord') { 'Vencord' } else { 'Equicord' }
+        Write-Warn "Este Discord ja tem $modName injetado."
+        Write-Host "      O standalone ocupa o mesmo lugar, entao instalar aqui desliga o $modName e os outros plugins dele." -ForegroundColor DarkGray
+        Write-Host "      Caminho certo: instale o GoLiveBypass como userplugin do $modName." -ForegroundColor DarkGray
+        # O link do instalador automatico do plugin: o user cola esse comando e o
+        # Vencord/Equicord + GoLiveBypass sao instalados juntos, sem sobrescrever nada.
+        $cmd1 = 'irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile $env:TEMP\glb.ps1'
+        $cmd2 = 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb.ps1" -Mod Vencord -Yes'
+        Write-Host "      Comando:" -ForegroundColor DarkGray
+        Write-Host ("        " + $cmd1) -ForegroundColor DarkGray
+        Write-Host ("        " + $cmd2) -ForegroundColor DarkGray
+        if (-not (Confirm-Action "Substituir o $modName em $($install.Flavour) pelo standalone mesmo assim? (perde o mod e os plugins dele)")) {
+            Write-Warn "$($install.Flavour) ficou como estava. Instale o GoLiveBypass como plugin do $modName para nao perder nada."
+            continue
+        }
+    } elseif ($state -eq 'OutroMod') {
+        # Cliente paralelo (Vesktop/Equibop/Legcord): o user perde a identidade do
+        # cliente, mas nao tem plugins de Vencord perdidos. Aviso mais leve.
+        Write-Warn 'Este Discord ja tem outro mod (Vesktop/Equibop/Legcord).'
+        Write-Host '      O standalone ocupa o mesmo lugar, entao instalar aqui desliga o mod.' -ForegroundColor DarkGray
         if (-not (Confirm-Action "Substituir o mod em $($install.Flavour) pelo standalone?")) {
             Write-Warn "$($install.Flavour) ficou como estava."
             continue

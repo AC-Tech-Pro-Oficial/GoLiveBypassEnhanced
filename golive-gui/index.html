@@ -138,6 +138,37 @@
           <span class="status-tag" id="statusTag">—</span>
         </div>
 
+        <!-- Aparece quando o status vem como OTHER_MOD:vencord / OTHER_MOD:equicord.
+             O usuario tem o mod, e sobrescrever o app.asar mata os outros plugins dele.
+             A GUI aqui NAO empurra o botao "Sobrescrever": ela recomenda o caminho do
+             plugin e so deixa o botao de sobrescrita como acao secundaria, com confirmacao
+             explicita. -->
+        <div class="conflict-card" id="conflictCard" hidden>
+          <div class="conflict-title">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+              <path d="M12 2 1 21h22L12 2zm0 6 7 12H5l7-12zm-1 4v4h2v-4h-2zm0 5v2h2v-2h-2z"/>
+            </svg>
+            <span id="conflictTitleText">Vencord detectado</span>
+          </div>
+          <div class="conflict-body">
+            <p id="conflictBodyText">
+              Sobrescrever este Discord <strong>apaga o Vencord</strong> e os outros plugins
+              dele ate voce reinstalar tudo. Use o <strong>plugin</strong> do GoLiveBypass
+              para conviver com o mod.
+            </p>
+            <a class="conflict-link" id="conflictPluginLink" href="#" target="_blank" rel="noopener">
+              Baixar o plugin do GoLiveBypass (goLiveBypass-vencord.zip)
+            </a>
+            <p class="conflict-hint">
+              Ou, se quiser substituir mesmo assim (perde o Vencord e os plugins dele),
+              clique em <em>Sobrescrever</em> abaixo e confirme no próximo diálogo.
+            </p>
+            <button id="conflictOverwriteBtn" class="conflict-overwrite-btn" type="button">
+              Sobrescrever mesmo assim
+            </button>
+          </div>
+        </div>
+
         <button id="toggleBtn" class="toggle-btn" disabled>
           <svg
             class="btn-icon icon-play"

@@ -2,7 +2,8 @@ import { ipcRenderer } from 'electron';
 
 (window as any).api = {
   platform: process.platform,
-  activate: (proxy?: string) => ipcRenderer.invoke('activate', proxy),
+  activate: (proxy?: string, confirmOverride?: boolean) =>
+    ipcRenderer.invoke('activate', proxy, !!confirmOverride),
   deactivate: () => ipcRenderer.invoke('deactivate'),
   getStatus: () => ipcRenderer.invoke('get-status'),
   getProxy: () => ipcRenderer.invoke('get-proxy'),

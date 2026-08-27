@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
@@ -922,6 +923,59 @@ function isOurInjection(resources: string) {
   });
 }
 
+// Detecta qual mod esta no app.asar (Vencord, Equicord, Vesktop, Equibop, Legcord).
+// Vencord/Equicord injetam no Discord oficial patcheando o app.asar com um stub que faz
+// require do patcher deles. Vesktop/Equibop/Legcord sao clientes paralelos com a mesma
+// estrutura de <resources>/app.asar - nesse caso, quem nos informa o mod eh o flavour
+// (pasta %LOCALAPPDATA%/<Nome>) e nao o conteudo do app.asar.
+//
+// Retorna null se nao detectou nenhum mod conhecido, ou a string com o nome canonico.
+function detectOtherMod(resources: string, flavour?: string): string | null {
+  // Primeiro tenta adivinhar pelo flavour (cliente paralelo). Esses tem o mod ja
+  // embutido no executavel, nao no app.asar - o app.asar deles pode ser "deles mesmos"
+  // ou de um mod que o user injetou em cima.
+  if (flavour) {
+    const f = flavour.toLowerCase();
+    if (f === "vesktop") return "vesktop";
+    if (f === "equibop") return "equibop";
+    if (f === "legcord") return "legcord";
+  }
+
+  // Vencord/Equicord/Vesktop patcheado a mao: detecta lendo o stub do app.asar
+  // (ate 64KB) e procurando o caminho do patcher. O stub faz `require("<caminho>")`
+  // e o caminho contem o nome do mod.
+  return withNoAsar(() => {
+    const stub = path.join(resources, "app.asar");
+    if (!diskFs.existsSync(stub)) return null;
+    const stat = diskFs.statSync(stub);
+    if (stat.isDirectory()) return null;  // nosso: pasta, nao asar
+    if (stat.size > 65536) return null;   // stub de Vencord/Equicord tem < 1KB
+    let content: string;
+    try {
+      content = diskFs.readFileSync(stub, "utf8");
+    } catch {
+      return null;
+    }
+    const m = content.match(/require\("([^"]+)"\)/);
+    const target = m ? m[1].toLowerCase() : "";
+    if (target.includes("vencord")) return "vencord";
+    if (target.includes("equibop")) return "equibop";
+    if (target.includes("equicord")) return "equicord";
+    if (target.includes("vesktop")) return "vesktop";
+    return null;
+  });
+}
+
+// Vencord/Equicord convivem com a gente via plugin (goLiveBypass-vencord.zip).
+// Quando detectado no app.asar, NAO sobrescrevemos sem confirmacao explicita - o
+// user provavelmente tem outros plugins do Vencord/Equicord que vao deixar de funcionar.
+// Vesktop/Equibop/Legcord sao clientes paralelos: sobrescrever o app.asar deles os
+// transforma em "Discord com bypass" (perde a identidade, mas nao ha plugins do
+// user perdidos). O retorno e mais informativo do que restritivo.
+function isProtectedMod(name: string | null): boolean {
+  return name === "vencord" || name === "equicord";
+}
+
 function writeInjection(asar: string, proxyAddress: string) {
   withNoAsar(() => {
     diskFs.mkdirSync(asar);
@@ -948,12 +1002,57 @@ function writeInjection(asar: string, proxyAddress: string) {
   });
 }
 
-async function activateBypass(event: any, proxyAddress: string = "") {
+async function activateBypass(event: any, proxyAddress: string = "", confirmOverride: boolean = false) {
   const installs = getDiscordInstalls();
   if (installs.length === 0) {
     discordscan.ativacaoSemDiscord("nenhum install encontrado na varredura");
     throw new Error("Nenhum Discord encontrado.");
   }
+
+  // Antes de matar o Discord: detecta mods protegidos (Vencord/Equicord). Sobrescrever
+  // o app.asar deles apaga os plugins do user (BetterDiscord, MessageLogger, etc) e
+  // os dados do mod em %APPDATA%/Vencord. A unica saida que convive e o modo plugin
+  // (goLiveBypass-vencord.zip, publicado em todo release), entao oferecemos o caminho
+  // certo e exigimos confirmacao explicita antes de mexer.
+  const protectedMods = installs
+    .map((i) => ({ install: i, mod: detectOtherMod(i.resources, i.flavour) }))
+    .filter((x) => isProtectedMod(x.mod));
+
+  if (protectedMods.length > 0 && !confirmOverride) {
+    const names = Array.from(new Set(protectedMods.map((x) => x.mod!)));
+    const namesStr = names.join(" / ");
+    const installPaths = protectedMods
+      .map((x) => `  - ${x.install.flavour} (${x.install.resources})`)
+      .join("\n");
+    const choice = await dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Cancelar", "Sobrescrever mesmo assim"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Vencord/Equicord detectado",
+      message: `Detectamos ${namesStr} instalado(a) no seu Discord.`,
+      detail:
+        `Instalar o GoLiveBypass aqui SUBSTITUI o mod: o Vencord/Equicord para de ` +
+        `carregar e os outros plugins dele (BetterDiscord, MessageLogger, etc) param ` +
+        `de funcionar ate voce reinstalar tudo.\n\n` +
+        `Para nao perder nada, instale o GoLiveBypass como userplugin do ` +
+        `${namesStr} - o zip sai em todo release (` +
+        `goLiveBypass-vencord.zip no GitHub Releases) e convive com o mod.\n\n` +
+        `Installations detectadas:\n${installPaths}\n\n` +
+        `Continuar e sobrescrever mesmo assim? (recomendamos cancelar e usar o plugin)`,
+    });
+    if (choice.response !== 1) {
+      // User escolheu Cancelar. Devolve sem fazer nada - o frontend recebe
+      // a mensagem de erro e mostra o card orientando para o plugin.
+      throw new Error(
+        `Cancelado: ${namesStr} detectado. Instale o GoLiveBypass como userplugin ` +
+        `(goLiveBypass-vencord.zip) para nao perder o mod e os plugins dele.`,
+      );
+    }
+    // Se chegou aqui, o user confirmou sobrescrever. Segue o fluxo normal.
+    logger.warn("ativacao", `user-confirmou-sobrescrever mod=${namesStr}`);
+  }
+
   netevents.gatewayConectando("gateway.discord.gg", "desconhecida");
 
   // Salvo antes de mexer no Discord: mesmo que a injecao falhe, o que a pessoa digitou nao se
@@ -1063,7 +1162,11 @@ function getStatus(): string {
           const content = diskFs.readFileSync(indexJs, "utf8");
           if (content.includes("golivebypass.js")) return "ACTIVE";
         }
-        return "OTHER_MOD";
+        // Outro mod (Vencord/Equicord/Vesktop/Equibop/Legcord). Devolve o nome
+        // para o frontend poder oferecer o caminho de plugin ("instale como
+        // userplugin do Vencord/Equicord em vez de sobrescrever").
+        const mod = detectOtherMod(install.resources, install.flavour);
+        return mod ? `OTHER_MOD:${mod}` : "OTHER_MOD";
       }
     }
     return "INACTIVE";
@@ -1217,13 +1320,17 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
 // tambem remontam o menu ao terminar.
-ipcMain.handle("activate", async (event, proxyAddress: string = "") => {
+ipcMain.handle("activate", async (event, proxyAddress: string = "", confirmOverride: boolean = false) => {
   if (IS_LINUX) {
+    // No Linux, a GUI delega pro script standalone; o script.sh ja tem a heuristica
+    // de deteccao de outromod e pede Confirm-Action quando acha Vencord/Equicord
+    // (ver golivebypass-standalone.sh). O confirmOverride so faz sentido no fluxo
+    // da GUI no Windows/macOS, onde o dialog.showMessageBox roda aqui.
     await linuxActivate(proxyAddress, (c) =>
       event.sender.send("bypass-log", c),
     );
   } else {
-    await activateBypass(event, proxyAddress);
+    await activateBypass(event, proxyAddress, confirmOverride);
   }
   refreshTray().catch(() => {});
 });
