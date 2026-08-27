@@ -117,33 +117,71 @@ Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e 
 
 ### Um comando só
 
-**Windows**, no PowerShell:
+Os comandos abaixo baixam o instalador direto da branch `main` deste repositório
+(garante que você sempre pega a versão mais recente, com TUI e auto-update) e abrem
+a interface de instalação — a mesma TUI estilo OpenCode nos dois sistemas, navegável
+por **setas** (ou `j`/`k`), **Enter** para escolher, **Esc** para sair, e mouse.
+
+**Windows**, no PowerShell interativo (Windows Terminal, PowerShell 7 ou terminal
+integrado do VS Code — todos suportam ANSI):
 
 ```powershell
-& ([scriptblock]::Create((irm https://bezu.dev/golive.ps1)))
+irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile $env:TEMP\glb.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb.ps1"
 ```
 
-**Linux**, no terminal:
+**Linux**, em qualquer shell (bash, zsh, fish, sh, dash, ksh):
 
 ```sh
-curl -fsSL https://bezu.dev/golive.sh -o golive.sh && sh golive.sh
+curl -fsSL https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/golivebypass-installer.sh -o /tmp/glb.sh && chmod +x /tmp/glb.sh && /tmp/glb.sh
 ```
 
-Os dois abrem o mesmo menu da instalação normal.
+Os dois abrem a TUI completa. Se você já tem Equicord ou Vencord clonado em algum
+lugar, ele detecta; se não tem, pergunta qual você quer e instala junto.
 
-Se quiser passar opções, elas vão no fim:
+### Instalação direta (sem TUI)
+
+Se preferir não abrir o menu interativo — em CI, em automação, ou quando o terminal
+não tem suporte a VT/ANSI (cmd puro, conhost clássico, SSH sem TTY) — passe as opções
+diretamente. O instalador faz tudo sem perguntar nada:
+
+**Windows:**
 
 ```powershell
-& ([scriptblock]::Create((irm https://bezu.dev/golive.ps1))) -Proxy "socks5://usuario:senha@host:1080"
+irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile $env:TEMP\glb.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb.ps1" -Mode Install -Mod Vencord -Yes
+```
+
+**Linux:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/golivebypass-installer.sh -o /tmp/glb.sh && chmod +x /tmp/glb.sh && /tmp/glb.sh --install --mod vencord --yes
+```
+
+Para apontar para um checkout que você já tem clonado (em vez de baixar tudo):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb.ps1" -Source "C:\caminho\do\Vencord" -Mod Vencord -Yes
 ```
 
 ```sh
-curl -fsSL https://bezu.dev/golive.sh -o golive.sh && sh golive.sh --proxy socks5://usuario:senha@host:1080
+/tmp/glb.sh --source ~/Vencord --mod vencord --install --yes
 ```
 
-> **Por que não `irm ... | iex` e `curl ... | bash`?** As duas formas curtas funcionam, mas em silêncio pela metade. No Windows, `iex` **ignora as opções** — um `-Proxy` no fim simplesmente não chega. No Linux é pior: o `bash` passa a ler o script pela entrada padrão, então o menu tenta ler a sua resposta e acaba consumindo a próxima linha do próprio script. A pergunta nunca aparece.
-
-**Roda em qualquer shell** — bash, zsh, sh, dash, ksh, fish, ou o que você tiver. O comando acima baixa o script e roda com `sh` (o instalador é POSIX, não depende de bash). A forma antiga `bash <(curl -fsSL ...)` só funciona em bash/zsh (usa process substitution) e, pior, o `bash` lendo o script pela entrada padrão consome a sua resposta do menu — por isso a pergunta nunca aparecia.
+> **Por que não `& ([scriptblock]::Create((irm ...)))`?** O instalador PowerShell tem
+> caracteres Unicode na TUI (setas `↑↓`, box-drawing `┌─└┐`, acentos), e o
+> `[scriptblock]::Create()` do PowerShell 5.1 falha em parsear scriptblock com Unicode
+> no meio — quebra com "Unexpected attribute 'CmdletBinding'" antes mesmo de rodar.
+> Daí o `-OutFile` + `powershell -ExecutionPolicy Bypass -File`: salva o script como
+> arquivo (parsing de arquivo é tolerante a Unicode) e roda com a ExecutionPolicy
+> liberada só para esse processo. Sem isso, a `ExecutionPolicy` padrão do Windows
+> (`Restricted`) também bloqueia o `.ps1` com `UnauthorizedAccess`.
+>
+> **Por que não `curl ... | bash`?** Em `bash` lendo o script pela entrada padrão, o
+> menu interativo tenta ler a sua resposta do stdin e acaba consumindo a próxima linha
+> do próprio script — a pergunta nunca aparece. A forma `bash <(curl ...)` (`process
+> substitution`) só funciona em bash/zsh e quebra no fish; além disso, com stdin sendo
+> o pipe do curl, a TUI também cai pro menu textual. Daí o `curl -o /tmp/glb.sh && chmod
+> +x && /tmp/glb.sh`: baixa como arquivo, torna executável, roda direto. Funciona em
+> qualquer shell e preserva o tty para a TUI.
 
 ### Baixando o arquivo
 
