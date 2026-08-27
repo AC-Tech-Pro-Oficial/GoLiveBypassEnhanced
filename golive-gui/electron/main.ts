@@ -274,6 +274,7 @@ function createWindow() {
   // Sem isto, um link com target="_blank" abre numa janela do Electron sem barra de endereco:
   // a pessoa nao ve para onde esta indo, e nao tem como voltar. Vale para o botao do Discord,
   // que ja existia, e para os creditos.
+  mainWindow.setTitle(`GoLiveBypass v${app.getVersion()}`);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url);
     return { action: "deny" };
@@ -422,10 +423,10 @@ async function refreshTray() {
     const status = IS_LINUX ? await linuxStatus() : getStatus();
     cachedStatus = status;
     const label = statusLabel(status);
-    tray.setToolTip(`GoLiveBypass — ${label}`);
+    tray.setToolTip(`GoLiveBypass v${app.getVersion()} — ${label}`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: `GoLiveBypass — ${label}`, enabled: false },
+        { label: `GoLiveBypass v${app.getVersion()} — ${label}`, enabled: false },
         { type: "separator" },
         { label: "Abrir", click: showWindow },
         {
@@ -1343,6 +1344,7 @@ ipcMain.handle("deactivate", async (event) => {
   refreshTray().catch(() => {});
 });
 ipcMain.handle("get-platform", () => (IS_LINUX ? "linux" : isMac ? "mac" : "windows"));
+ipcMain.handle("get-app-version", () => app.getVersion());
 ipcMain.handle("get-status", async () => {
   if (IS_LINUX) return linuxStatus();
   return getStatus();

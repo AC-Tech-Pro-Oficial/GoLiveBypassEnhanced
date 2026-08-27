@@ -8,6 +8,7 @@ declare global {
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
       getProxy: () => Promise<string>;
+      getVersion: () => Promise<string>;
       getPlatform: () => Promise<string>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
@@ -138,6 +139,7 @@ const conflictOverwriteBtn = document.getElementById('conflictOverwriteBtn') as 
 let detectedMod: string | null = null;
 const warningToast = document.getElementById('warningToast') as HTMLElement | null;
 const toastClose = document.getElementById('toastClose') as HTMLButtonElement | null;
+const appVersionEl = document.getElementById('appVersion');
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const themeBtn = document.getElementById('themeBtn') as HTMLButtonElement;
@@ -349,6 +351,7 @@ conflictOverwriteBtn?.addEventListener('click', async () => {
 // Inicialização
 applyPlatformCopy();
 initTheme();
+refreshVersion();
 updateStatus();
 refreshStartup();
 refreshProxy();
@@ -358,6 +361,17 @@ refreshTorStatus();
 // congela no que era verdade quando a janela abriu. A checagem custa um connect no loopback.
 setInterval(refreshTorStatus, 5000);
 fitWindowToContent();
+
+async function refreshVersion() {
+  try {
+    const ver = await window.api.getVersion();
+    if (appVersionEl && ver) {
+      appVersionEl.textContent = `v${ver}`;
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
 
 async function refreshStartup() {
   try {

@@ -7,6 +7,7 @@ import { ipcRenderer } from 'electron';
   deactivate: () => ipcRenderer.invoke('deactivate'),
   getStatus: () => ipcRenderer.invoke('get-status'),
   getProxy: () => ipcRenderer.invoke('get-proxy'),
+  getVersion: () => ipcRenderer.invoke('get-app-version'),
   getPlatform: () => ipcRenderer.invoke('get-platform'),
   getStartup: () => ipcRenderer.invoke('get-startup'),
   setStartup: (enabled: boolean) => ipcRenderer.invoke('set-startup', enabled),
