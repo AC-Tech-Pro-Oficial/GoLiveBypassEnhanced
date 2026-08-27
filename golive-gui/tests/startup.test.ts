@@ -31,8 +31,13 @@ describe("startup helper (source checks)", () => {
     // (instalado pelo usuario em Program Files). reg.exe interpreta a string
     // como valor REG_SZ: espacos sem aspas quebram a string em varios
     // argumentos. O prefixo \" ... \" garante que o caminho e
-    // interpretado como um unico valor.
-    expect(helper).toMatch(/\\"\$\{process\.execPath\}\\"/);
+    // interpretado como um unico valor. No Linux, process.execPath nao
+    // serve dentro de um AppImage (o caminho e o mountpoint FUSE temporario
+    // /tmp/.mount_GoLiveXXX/golive-gui que some quando o AppImage desmonta),
+    // entao o helper realExecPath() cai para a env APPIMAGE.
+    expect(helper).toMatch(/\\"\$\{realExecPath\(\)\}\\"/);
+    expect(helper).toContain("realExecPath");
+    expect(helper).toMatch(/APPIMAGE/);
   });
 
   it("inclui --hidden nos args (sobe so na bandeja)", () => {

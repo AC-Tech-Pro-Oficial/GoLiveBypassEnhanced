@@ -33,6 +33,26 @@ const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const ENTRY_NAME = "GoLiveBypass";
 
 /**
+ * Retorna o caminho do executavel que deve ser usado para iniciar o app no boot.
+ *
+ * No Linux, quando o app esta rodando de dentro de um AppImage, o `process.execPath`
+ * e o caminho dentro do mountpoint FUSE temporario (`/tmp/.mount_GoLiveXXX/golive-gui`),
+ * que NAO persiste entre sessoes -- o mountpoint e desmontado junto com o AppImage.
+ * A variavel de ambiente `APPIMAGE` (definida pelo runtime do AppImage) guarda o
+ * caminho real do .AppImage no disco, e e isso que o .desktop precisa usar.
+ *
+ * No Windows e macOS, `process.execPath` ja e o caminho certo (no portable, o
+ * proprio .exe; no macOS, o app.asar/Contents/MacOS/GoLiveBypass).
+ */
+function realExecPath(): string {
+  if (IS_LINUX) {
+    const appImage = process.env.APPIMAGE;
+    if (appImage && fs.existsSync(appImage)) return appImage;
+  }
+  return process.execPath;
+}
+
+/**
  * Marca o app para iniciar com o login do usuario.
  * - Windows: HKCU\...\Run via reg.exe (funciona em portable)
  * - macOS: app.setLoginItemSettings (funciona em dmg/zip)
@@ -50,7 +70,7 @@ export function setStartup(enabled: boolean): void {
       // interpreta a string como valor REG_SZ, e espacos sem aspas quebram
       // o registro. O prefixo " so serve se o valor comecar com aspas;
       // aqui o caminho e o valor inteiro do registro.
-      const value = `\"${process.execPath}\" --hidden`;
+      const value = `\"${realExecPath()}\" --hidden`;
       try {
         execFileSync("reg.exe", [
           "add",
@@ -95,7 +115,7 @@ export function setStartup(enabled: boolean): void {
           "Type=Application",
           "Name=GoLiveBypass",
           "Comment=Devolve o Go Live e a camera no Discord",
-          `Exec=${process.execPath} --hidden`,
+          `Exec=${realExecPath()} --hidden`,
           "X-GNOME-Autostart-enabled=true",
           "",
         ].join("\n"));

@@ -507,6 +507,12 @@ TOR_PORT="9060"
 TOR_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/Tor"
 TOR_EXE="$TOR_BASE/tor/tor"
 TOR_TORRC="$TOR_BASE/torrc"
+# A libevent do bundle (libevent 2.1 com evutil_secure_rng_add_bytes) nao e
+# mais encontrada em distros recentes -- Arch, Fedora 40+, etc -- e o ldd
+# resolve o simbolo na libevent do sistema, que aborta o tor com status 127.
+# O fix e apontar LD_LIBRARY_PATH para a pasta do bundle (mesma do que a
+# GUI Electron ja faz em golive-gui/electron/main.ts).
+TOR_LIBDIR="$TOR_BASE/tor"
 TOR_TARBALL="tor-expert-bundle-linux-x86_64-$TOR_BUNDLE_VERSION.tar.gz"
 TOR_URL="https://archive.torproject.org/tor-package-archive/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
 TOR_SHA256="147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d"
@@ -603,8 +609,10 @@ Description=GoLiveBypass Tor (SOCKS 127.0.0.1:$TOR_PORT)
 After=network.target
 
 [Service]
+Environment=LD_LIBRARY_PATH=$TOR_LIBDIR
 ExecStart=$TOR_EXE -f $TOR_TORRC
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target
@@ -612,7 +620,7 @@ EOF
         systemctl --user daemon-reload
         systemctl --user enable --now "$TOR_SERVICE" 2>/dev/null || {
             warn "Nao consegui ativar o servico do usuario. Tentando nohup."
-            nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
+            LD_LIBRARY_PATH="$TOR_LIBDIR" nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
         }
     elif command -v systemctl >/dev/null 2>&1; then
         # Estamos com sudo (a injecao do plugin pode pedir) e nao ha systemd user. A unit
@@ -626,8 +634,10 @@ After=network.target
 
 [Service]
 User=$real_user
+Environment=LD_LIBRARY_PATH=$TOR_LIBDIR
 ExecStart=$TOR_EXE -f $TOR_TORRC
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -635,11 +645,11 @@ EOF
         sudo systemctl daemon-reload
         sudo systemctl enable --now "$TOR_SERVICE" 2>/dev/null || {
             warn "Nao consegui ativar o servico do sistema. Tentando nohup."
-            nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
+            LD_LIBRARY_PATH="$TOR_LIBDIR" nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
         }
     else
         step "systemd nao encontrado; rodando o Tor em background (nao sobrevive ao boot)"
-        nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
+        LD_LIBRARY_PATH="$TOR_LIBDIR" nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
     fi
 
     step "Esperando o Tor subir"

@@ -48,6 +48,23 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   - Nota: o fix já estava aplicado em `main` antes desta versão (cherry-pick
     manual, sem o commit formal do PR). Esta entrada apenas documenta a
     equivalência com o upstream.
+- **Serviço do Tor embutido quebrava no boot do Linux** com `status=127`
+  em distros com libevent recente (Arch, Fedora 40+): o bundle
+  `tor-expert-bundle-13.5` foi compilado contra uma libevent 2.1 que ainda
+  exporta `evutil_secure_rng_add_bytes` (removido em versões mais novas), e
+  o `ld.so` resolvia para a libevent do sistema, fazendo o daemon abortar
+  antes de subir. O `golivebypass-installer.sh` e o `golivebypass-standalone.sh`
+  agora gravam `Environment=LD_LIBRARY_PATH=$TOR_LIBDIR` na unit do
+  systemd (user e system) e exportam a variável nos fallbacks `nohup`, e a
+  GUI Electron (que já fazia o mesmo em `main.ts`) continua o
+  comportamento. O `tor` da porta 9060 agora sobe limpo no logon.
+- **AppImage no Linux: `.desktop` de autostart apontava para o mountpoint
+  temporário** (`/tmp/.mount_GoLiveXXX/golive-gui`) que some junto com o
+  AppImage desmontado. O helper `realExecPath()` em `startup.ts` agora
+  prioriza a env `APPIMAGE` (definida pelo runtime do AppImage) quando
+  ela existe, garantindo que o `Exec=` do `.desktop` em
+  `~/.config/autostart/golivebypass.desktop` aponte para o `.AppImage`
+  real no disco.
 
 ## [1.1.9] - 2026-08-26
 
