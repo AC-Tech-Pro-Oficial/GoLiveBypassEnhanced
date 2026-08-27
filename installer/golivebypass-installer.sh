@@ -715,6 +715,17 @@ is_checkout() {
 # oficial do Arch e o RPM) traz SO um bootstrap: o app de verdade, com o app.asar, e baixado na
 # primeira execucao para dentro do HOME. Quem so olha /usr/share e /opt nao acha Discord nenhum
 # numa instalacao atual.
+# Detecta se um path de install eh um cliente paralelo (Vesktop/Equibop/Legcord)
+# e NAO o Discord puro. O Discord ja vem com o mod embutido no cliente, e o
+# instalador de mod nao injeta neles (o EquilotlCli da "Invalid Discord install"
+# porque o binario nao eh o Discord).
+is_parallel_install() {
+    case "$1" in
+        */vesktop|*/Vesktop|*/equibop|*/Equibop|*/legcord|*/Legcord) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 discord_resources() {
     local raiz sub base id
 
@@ -830,7 +841,30 @@ discord_resources() {
         done
     done
 
+    # Os loops acima listam tambem Equibop/Vesktop/Legcord (caminhos /usr/lib/equibop etc)
+    # porque o usuario pode ter esses clientes paralelos. Mas o instalador de mod
+    # (EquilotlCli) NAO injeta neles - o binario nao eh o Discord e o CLI da
+    # "Invalid Discord install". Filtramos no final, e criamos discord_installs()
+    # e parallel_installs() separados para o resto do script usar.
     return 0
+}
+
+# Versao filtrada do discord_resources: so Equibop/Vesktop/Legcord (clientes
+# paralelos, NAO injetaveis pelo instalador de mod). Usado pelo show_status
+# so para informacao.
+parallel_installs() {
+    discord_resources | while IFS= read -r resources; do
+        is_parallel_install "$resources" && printf '%s\n' "$resources"
+    done
+}
+
+# Versao filtrada do discord_resources: so Discord (sem Equibop/Vesktop/Legcord).
+# Usado pela injecao (install_target) e pelo show_status que precisa do count
+# correto de "Discord instalado".
+discord_installs() {
+    discord_resources | while IFS= read -r resources; do
+        is_parallel_install "$resources" || printf '%s\n' "$resources"
+    done
 }
 
 # O que passar em --location para o instalador do mod. Ele quer a pasta de cima, e no flatpak
@@ -1332,9 +1366,35 @@ inject_mod() {
 
     # So o ultimo elemento importa (achar o unico Discord): contar com wc e pegar a ultima
     # linha economiza o array, que nao existe no sh.
-    n="$(discord_resources | wc -l)"
+    # discord_installs (sem Equibop/Vesktop/Legcord) - so o que o instalador de
+    # mod pode injetar. Se o user so tem Equibop, n=0 e a injecao nao prossegue
+    # (o instalador de plugin, separado, eh o caminho certo nesse caso).
+    n="$(discord_installs | wc -l)"
+
+    # Caso comum: o user so tem Equibop/Vesktop/Legcord e nao tem Discord puro.
+    # discord_installs retorna 0, e nao ha o que injetar (o instalador de mod nao
+    # funciona em clientes paralelos - eles ja vem com o mod embutido). Falha
+    # com mensagem especifica apontando o caminho certo.
+    if [ "$n" -eq 0 ]; then
+        # Listar os paralelos para o user entender o que esta acontecendo
+        local parallels
+        parallels="$(parallel_installs)"
+        printf '\n'
+        printf '  %s[!]%s Nao encontrei o Discord puro instalado.\n' "$C_YELLOW" "$C_OFF"
+        if [ -n "$parallels" ]; then
+            printf '      Detectei so clientes paralelos (Vesktop/Equibop/Legcord):\n'
+            while IFS= read -r p; do
+                [ -z "$p" ] && continue
+                printf '        - %s\n' "$p"
+            done <<EOF
+$parallels
+EOF
+        fi
+        fail "Cliente paralelo nao eh injetado pelo instalador de mod. Use o instalador de plugin: baixe goLiveBypass-vencord.zip de https://github.com/bezumiya/GoLiveBypass/releases/latest e coloque em $root/src/userplugins/goLiveBypass/."
+    fi
+
     if [ "$n" -eq 1 ]; then
-        alvo="$(discord_resources | tail -1)"
+        alvo="$(discord_installs | tail -1)"
         loc="$(install_location "$alvo")"
     fi
 
@@ -1462,10 +1522,12 @@ set_plugin_settings() {
 show_status() {
     local root="${1:-}"
     local count mod plugin extra=""
-    count="$(discord_resources | wc -l)"
+    # So conta Discord (sem Equibop/Vesktop/Legcord). Os paralelos sao listados
+    # em separado abaixo se existirem.
+    count="$(discord_installs | wc -l)"
     mod="$(installed_mod || true)"
 
-    if discord_resources | grep -q '/com\.discordapp\.'; then extra=", flatpak"; fi
+    if discord_installs | grep -q '/com\.discordapp\.'; then extra=", flatpak"; fi
 
     printf '  %sDetectado:%s\n' "$C_BOLD" "$C_OFF"
     if [ "$count" -gt 0 ]; then
@@ -1485,6 +1547,20 @@ show_status() {
         fi
     else
         printf '  %s  Fonte     nao encontrado%s\n' "$C_DIM" "$C_OFF"
+    fi
+
+    # Clientes paralelos (Vesktop/Equibop/Legcord) so para informacao - o instalador
+    # de plugin GoLiveBypass (zip de release) serve tambem para eles.
+    local parallels
+    parallels="$(parallel_installs)"
+    if [ -n "$parallels" ]; then
+        printf '\n'
+        while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            printf '  %sParalelo   %s%s\n' "$C_DIM" "$p" "$C_OFF"
+        done <<EOF
+$parallels
+EOF
     fi
     printf '\n'
 }
