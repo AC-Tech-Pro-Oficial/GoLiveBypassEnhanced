@@ -4,6 +4,21 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [1.1.10] - Unreleased
+
+### Corrigido
+- **Refresh do Tor em modo `tor` segurava o gateway por até 12s** quando o
+  daemon oscilava: `refreshExit` chamava `detectTor()` com timeout de 6s
+  para o probe + 6s para `exitCountryTorCached`. Em modo `tor` o bypass
+  recusa saída direta (vazaria IP BR), então o Discord ficava preso em
+  "load infinito" até o refresh terminar. Agora o refresh usa probe curto
+  (3s) e o `currentExit` espera o refresh terminar em vez de recusar na
+  hora. ([#87](https://github.com/bezumiya/GoLiveBypass/issues/87),
+  [#89](https://github.com/bezumiya/GoLiveBypass/pull/89))
+  - Nota: o fix já estava aplicado em `main` antes desta versão (cherry-pick
+    manual, sem o commit formal do PR). Esta entrada apenas documenta a
+    equivalência com o upstream.
+
 ## [1.1.9] - 2026-08-26
 
 ### Adicionado
