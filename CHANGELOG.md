@@ -4,6 +4,51 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [1.1.10] - Unreleased
+
+### Adicionado
+- **Versão visível na UI**: número da versão agora aparece no header
+  (`Go Live · Brasil · v1.1.9`), no título da janela (`GoLiveBypass
+  v1.1.9`) e no tooltip + label do menu da bandeja do sistema.
+  ([#93](https://github.com/bezumiya/GoLiveBypass/pull/93))
+- **Toggle "Avisar sobre atualizações"**: switch na UI (mesmo padrão do
+  "Iniciar com Windows") + checkbox no menu da bandeja. Quando
+  desativado, o app não chama `checkForUpdatesAndNotify` nem exibe o
+  diálogo de update-downloaded. Persistido em `settings.json` como
+  `autoUpdate: boolean` (default `true`; settings corrompido → `true`
+  pelo fallback seguro).
+  ([#93](https://github.com/bezumiya/GoLiveBypass/pull/93))
+- **Fallback para Tor em modo `gratuitas`**: quando a lista de
+  `proxyList.txt` morre toda (`pickFreeExit` retorna null), o bypass
+  agora tenta o Tor local como fallback antes de cair para saída
+  direta. Antes, lista morta em modo `free` significava "load infinito"
+  no Discord (gateway conectava direto pelo IP BR). Fecha
+  [#85](https://github.com/bezumiya/GoLiveBypass/issues/85).
+  ([#86](https://github.com/bezumiya/GoLiveBypass/pull/86))
+- **Startup do Windows portable funcional**: o "Iniciar com Windows"
+  agora grava em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  via `reg.exe`, com aspas para suportar caminhos com espaço (`C:\Program
+  Files\`) e arg `--hidden` para subir só na bandeja. Antes o
+  `app.setLoginItemSettings` do Electron retornava sucesso silencioso
+  mas nada acontecia (delega ao instalador Squirrel/MSI, que não existe
+  em portable). Linux `.desktop` e macOS `setLoginItemSettings`
+  preservados. Fecha
+  [#84](https://github.com/bezumiya/GoLiveBypass/issues/84).
+  ([#86](https://github.com/bezumiya/GoLiveBypass/pull/86))
+
+### Corrigido
+- **Refresh do Tor em modo `tor` segurava o gateway por até 12s** quando o
+  daemon oscilava: `refreshExit` chamava `detectTor()` com timeout de 6s
+  para o probe + 6s para `exitCountryTorCached`. Em modo `tor` o bypass
+  recusa saída direta (vazaria IP BR), então o Discord ficava preso em
+  "load infinito" até o refresh terminar. Agora o refresh usa probe curto
+  (3s) e o `currentExit` espera o refresh terminar em vez de recusar na
+  hora. ([#87](https://github.com/bezumiya/GoLiveBypass/issues/87),
+  [#89](https://github.com/bezumiya/GoLiveBypass/pull/89))
+  - Nota: o fix já estava aplicado em `main` antes desta versão (cherry-pick
+    manual, sem o commit formal do PR). Esta entrada apenas documenta a
+    equivalência com o upstream.
+
 ## [1.1.9] - 2026-08-26
 
 ### Adicionado

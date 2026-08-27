@@ -912,39 +912,16 @@ async function detectTor(probeTimeoutMs) {
             continue;
         }
 
-        // No modo "tor" a checagem de geo nem roda: dos ~10.600 relays de saida do mundo,
-        // ~37 sao brasileiros (menos de 0.4%), e a checagem so pagava uma ida-e-volta pelo
-        // Tor (1-1.4s de RTT) para martelar um terceiro (ipwho.is) com IPs de saida do Tor
-        // compartilhados por milhares de usuarios -- cota que estoura sozinha e nao depende
-        // de nada que a gente fez. Quando estoura, a checagem falha pra sempre (sem TTL: o
-        // Tor troca de circuito a cada ~10min, entao um cache de horas descreveria uma saida
-        // que ja nao existe), e o modo tor ja aceitava pais desconhecido mesmo assim -- ou
-        // seja, a checagem quase nunca barra nada na pratica. Quem escolhe Tor esta pedindo
-        // uma saida que nao se identifica; nao sair pelo IP brasileiro o proprio Tor garante.
-        if (routeMode === "tor") {
-            const pais = await exitCountryTorCached(proxy, exitMs);
-            if (pais !== null && excludedCountries.has(pais)) {
-                log("Tor na porta " + port + " recusado: saida em " + pais);
-                continue;
-            }
-            log("Tor encontrado na porta " + port +
-                (pais === null ? " (geo nao verificada)" : ", saida em " + pais));
-            return proxy;
-        }
-
-        const country = await exitCountry(proxy);
-
-        if (country !== null && excludedCountries.has(country)) {
-            log("Tor na porta " + port + " recusado: saida em " + country);
+        // No modo "tor" a checagem de pais vem do cache (1 consulta / circuito).
+        // No modo "free"/"auto" (gratuitas) ela tenta uma vez por probe; o cache aqui
+        // tambem vale porque o exit do Tor nao muda com o modo de roteamento.
+        const pais = await exitCountryTorCached(proxy, 6000);
+        if (pais !== null && excludedCountries.has(pais)) {
+            log("Tor na porta " + port + " recusado: saida em " + pais);
             continue;
         }
-
-        if (country === null) {
-            log("Tor na porta " + port + " recusado: saida em pais desconhecido");
-            continue;
-        }
-
-        log("Tor encontrado na porta " + port + ", saida em " + country);
+        log("Tor encontrado na porta " + port +
+            (pais === null ? " (geo nao verificada)" : ", saida em " + pais));
         return proxy;
     }
 
@@ -1095,7 +1072,16 @@ async function chooseExit() {
 
     // Modo "free": pula o Tor (quem escolheu gratuitas nao quer depender de Tor).
     if (routeMode === "free") {
-        return await pickFreeExit();
+        const free = await pickFreeExit();
+        if (free !== null) return free;
+        // Sem gratuitas vivas (lista toda morta e o cache vazio): a sessao morreria
+        // direto pelo IP brasileiro, que e EXATAMENTE o "load infinito" da issue #85.
+        // Tenta o Tor como ultimo recurso antes de desistir -- o Tor ja esta rodando
+        // (a GUI sobe na inicializacao do modo tor e nao desliga se o usuario trocou
+        // para gratuitas), e com o fix de pais (PR #82) garante que exits BR sao
+        // recusados. Melhor um Tor lento que um Discord travado.
+        log("nenhuma gratuita viva, tentando o Tor local como fallback");
+        return await detectTor();
     }
 
     return await detectTor() || await pickFreeExit();
@@ -1463,7 +1449,18 @@ function refreshExit() {
         // Probe do Tor com timeout curto (3s) para o refresh nao segurar o gateway
         // por 12+ segundos quando o Tor esta morrendo (issue #87). O probe da escolha
         // inicial usa o timeout completo (6s) porque vale a pena esperar mais.
-        const fresh = routeMode === "tor" ? await detectTor(3000) : await pickFreeExit();
+        // Modo "free"/"auto" tenta gratuitas; se nao houver nenhuma viva, cai pro Tor
+        // (que esta rodando de qualquer jeito) em vez de devolver null e abrir direto.
+        let fresh = null;
+        if (routeMode === "tor") {
+            fresh = await detectTor(3000);
+        } else {
+            fresh = await pickFreeExit();
+            if (fresh === null) {
+                log("gratuitas mortas, tentando Tor local como fallback");
+                fresh = await detectTor();
+            }
+        }
         if (fresh !== null) {
             settleExit(fresh);
             log("saida nova encontrada: " + safeProxy(fresh));
