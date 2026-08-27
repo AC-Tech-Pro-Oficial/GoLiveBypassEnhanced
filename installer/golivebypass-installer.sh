@@ -1335,34 +1335,47 @@ inject_parallel() {
     parallels="$(parallel_installs)"
     [ -n "$parallels" ] || return 1
 
-    local n
-    n="$(printf '%s\n' "$parallels" | grep -c .)"
-    if [ "$n" -eq 1 ]; then
-        target="$parallels"
-    elif [ "$ASSUME_YES" -eq 0 ] && tui_is_interactive; then
-        local choices=()
-        while IFS= read -r p; do
-            [ -z "$p" ] && continue
-            choices+=("$p")
-        done <<EOF
+    # Sem TUI complexa aqui: TUI exige tty limpo e o user ja teve problema
+    # com tui_menu nao pegar a tecla direito. Lista numerada e prompt simples.
+    local i=1 n=0
+    local -a targets
+    while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        targets[$i]="$p"
+        i=$((i+1))
+    done <<EOF
 $parallels
 EOF
-        local choice
-        choice="$(tui_menu "Em qual cliente paralelo injetar?" "${choices[@]}")"
-        local i=1
-        while IFS= read -r p; do
-            [ -z "$p" ] && continue
-            if [ "$i" = "$choice" ]; then target="$p"; break; fi
-            i=$((i+1))
-        done <<EOF
-$parallels
-EOF
+    n=$((i-1))
+
+    if [ "$n" -eq 0 ]; then
+        return 1
+    fi
+
+    # Se --yes ou soh um, pega o primeiro
+    if [ "$ASSUME_YES" -eq 1 ] || [ "$n" -eq 1 ]; then
+        target="${targets[1]}"
     else
-        target="$(printf '%s\n' "$parallels" | head -1)"
+        # Prompt numerico simples
+        echo
+        echo "  Mais de um cliente paralelo detectado. Escolha qual patchear:"
+        local j
+        for j in $(seq 1 "$n"); do
+            echo "    [$j] ${targets[$j]}"
+        done
+        echo "    [Enter = 1 (primeiro)]"
+        local choice
+        printf "  Escolha: "
+        read -r choice || choice=""
+        case "$choice" in
+            [0-9]*) target="${targets[$choice]}" ;;
+            *) target="${targets[1]}" ;;
+        esac
     fi
 
     [ -n "$target" ] || return 1
 
+    # Mapear path -> nome do cliente e arquivo asar a usar
     case "$target" in
         */equibop|*/Equibop)
             client_name="Equibop"; asar="$root/dist/equibop.asar"; app_path="$target/app.asar" ;;
@@ -1370,34 +1383,38 @@ EOF
             client_name="Vesktop"; asar="$root/dist/vesktop.asar"; app_path="$target/app.asar" ;;
         */legcord|*/Legcord)
             client_name="Legcord"; asar="$root/dist/legcord.asar"; app_path="$target/app.asar" ;;
-        *) fail "Cliente paralelo desconhecido em $target" ;;
+        *) printf "  [!] Cliente paralelo desconhecido: %s\n" "$target"; return 1 ;;
     esac
 
     if [ ! -f "$asar" ]; then
-        fail "Build nao gerou $asar. Rode 'pnpm build' em $root e tente de novo."
+        printf "  [!] Build nao gerou %s. Rode 'pnpm build' em %s e tente de novo.\n" "$asar" "$root"
+        return 1
     fi
 
+    # Backup do original (idempotente: pula se ja existe)
     if [ ! -f "$target/_app.asar" ]; then
-        if [ ! -w "$target" ]; then
-            step "Backup do app.asar original (precisa de sudo)"
-            sudo cp "$app_path" "$target/_app.asar" || fail "Nao consegui fazer backup."
-            sudo chown "$(id -u):$(id -g)" "$target/_app.asar" 2>/dev/null || true
+        if [ -w "$target" ]; then
+            cp "$app_path" "$target/_app.asar" || { printf "  [!] Nao consegui fazer backup\n"; return 1; }
         else
-            cp "$app_path" "$target/_app.asar" || fail "Nao consegui fazer backup"
+            step "Backup do app.asar original (precisa de sudo)"
+            sudo cp "$app_path" "$target/_app.asar" || { printf "  [!] Sudo falhou no backup. Tente manualmente:\n  sudo cp %s %s/_app.asar\n" "$app_path" "$target"; return 1; }
+            sudo chown "$(id -u):$(id -g)" "$target/_app.asar" 2>/dev/null || true
         fi
         ok "Backup criado em $target/_app.asar"
     else
         step "Backup ja existe em $target/_app.asar"
     fi
 
-    if [ ! -w "$target" ]; then
-        step "Copiando $client_name com patcher (precisa de sudo)"
-        sudo cp "$asar" "$app_path" || fail "Nao consegui copiar. Verifique permissoes."
-        sudo chown "$(id -u):$(id -g)" "$app_path" 2>/dev/null || true
+    # Copia o asar novo
+    if [ -w "$target" ]; then
+        cp "$asar" "$app_path" || { printf "  [!] Nao consegui copiar\n"; return 1; }
     else
-        cp "$asar" "$app_path" || fail "Nao consegui copiar"
+        step "Copiando $client_name com patcher (precisa de sudo)"
+        sudo cp "$asar" "$app_path" || { printf "  [!] Sudo falhou no copy. Tente manualmente:\n  sudo cp %s %s\n" "$asar" "$app_path"; return 1; }
+        sudo chown "$(id -u):$(id -g)" "$app_path" 2>/dev/null || true
     fi
     ok "$client_name patchado: $app_path"
+    return 0
 }
 
 # --location poupa a pergunta do instalador do mod quando so ha um Discord, e de quebra deixa
