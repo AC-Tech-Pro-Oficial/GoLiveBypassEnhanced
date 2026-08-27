@@ -192,9 +192,12 @@ report_send() {
 
 report_error() {
     local titulo="$1" desc=""
-    # pega a ultima mensagem de erro visivel (passthrough) + cauda de logs
-    if [ -f "$INSTALL_DIR/golivebypass.log" ]; then
-        desc="$(tail -n 40 "$INSTALL_DIR/golivebypass.log" 2>/dev/null || true)"
+    # INSTALL_DIR nao eh setado neste script (era de uma versao antiga da GUI). O log
+    # do bypass fica em ${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/golivebypass.log,
+    # o mesmo que a GUI e o standalone usam. Fallback para o path do log se existir.
+    local logdir="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass"
+    if [ -f "$logdir/golivebypass.log" ]; then
+        desc="$(tail -n 40 "$logdir/golivebypass.log" 2>/dev/null || true)"
     fi
     if [ -n "$desc" ]; then
         printf '  %s[!]%s Ocorreu um erro. Enviando relatorio automatico (issue no GitHub)...%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
