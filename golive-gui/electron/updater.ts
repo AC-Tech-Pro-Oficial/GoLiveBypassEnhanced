@@ -212,7 +212,10 @@ export function isQuittingForUpdate() {
 
 // ------------------------------------------------------------------ API publica
 
-export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
+export function setupUpdater(
+  getMainWindow: () => BrowserWindow | null,
+  isAutoUpdateEnabled: () => boolean = () => true,
+) {
   // Dev (npm run dev): o app roda fora do pacote, sem o app-update.yml embutido.
   // O electron-updater usa o dev-app-update.yml na raiz do projeto + esta flag.
   const isDev = !app.isPackaged;
@@ -243,6 +246,7 @@ export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
     // O download corre sozinho em background; ao terminar, avisa o usuario e
     // so instala com o OK dele — atualizar sem avisar derruba o app na hora.
     autoUpdater.on("update-downloaded", (info) => {
+      if (!isAutoUpdateEnabled()) return;
       updateReady = true;
       const win = getMainWindow();
       const choice = win
@@ -267,17 +271,23 @@ export function setupUpdater(getMainWindow: () => BrowserWindow | null) {
       }
     });
 
-    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    if (isAutoUpdateEnabled()) {
+      autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    }
     return;
   }
 
   // Windows portable: checagem periodica em background.
-  setInterval(() => void checkWindowsUpdate(getMainWindow), CHECK_INTERVAL_MS);
-  void checkWindowsUpdate(getMainWindow);
+  setInterval(() => void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled), CHECK_INTERVAL_MS);
+  void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled);
 }
 
-async function checkWindowsUpdate(getMainWindow: () => BrowserWindow | null) {
+export async function checkWindowsUpdate(
+  getMainWindow: () => BrowserWindow | null,
+  isAutoUpdateEnabled: () => boolean = () => true,
+) {
   if (checking || updateReady) return;
+  if (!isAutoUpdateEnabled()) return;
   if (Date.now() - lastCheckAt < 60_000) return; // no minimo 1min entre checagens
   checking = true;
   lastCheckAt = Date.now();

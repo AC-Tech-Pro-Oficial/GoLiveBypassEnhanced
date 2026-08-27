@@ -274,6 +274,7 @@ function createWindow() {
   // Sem isto, um link com target="_blank" abre numa janela do Electron sem barra de endereco:
   // a pessoa nao ve para onde esta indo, e nao tem como voltar. Vale para o botao do Discord,
   // que ja existia, e para os creditos.
+  mainWindow.setTitle(`GoLiveBypass v${app.getVersion()}`);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url);
     return { action: "deny" };
@@ -396,6 +397,7 @@ function showWindow() {
     mainWindow.focus();
     // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
     mainWindow.webContents.send("refresh-startup");
+    mainWindow.webContents.send("refresh-auto-update");
     refreshWindowStatus();
   } else {
     createWindow();
@@ -422,10 +424,10 @@ async function refreshTray() {
     const status = IS_LINUX ? await linuxStatus() : getStatus();
     cachedStatus = status;
     const label = statusLabel(status);
-    tray.setToolTip(`GoLiveBypass — ${label}`);
+    tray.setToolTip(`GoLiveBypass v${app.getVersion()} — ${label}`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: `GoLiveBypass — ${label}`, enabled: false },
+        { label: `GoLiveBypass v${app.getVersion()} — ${label}`, enabled: false },
         { type: "separator" },
         { label: "Abrir", click: showWindow },
         {
@@ -438,6 +440,17 @@ async function refreshTray() {
           type: "checkbox",
           checked: getStartup(),
           click: (item) => setStartup(item.checked),
+        },
+        {
+          label: "Avisar sobre atualizações",
+          type: "checkbox",
+          checked: readAutoUpdate(),
+          click: (item) => {
+            saveAutoUpdate(item.checked);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("refresh-auto-update");
+            }
+          },
         },
         { type: "separator" },
         // Sair pela bandeja / barra de menus reverte so o que e nosso.
@@ -589,7 +602,7 @@ if (!gotLock) {
     app.on("activate", showWindow);
     // Checa por atualizacao na release do GitHub (Windows portable: baixa e substitui;
     // Mac/Linux: autoUpdater nativo). Roda sozinho e em silencio se nao houver nada.
-    setupUpdater(() => mainWindow);
+    setupUpdater(() => mainWindow, () => readAutoUpdate());
   });
 }
 
@@ -1343,6 +1356,7 @@ ipcMain.handle("deactivate", async (event) => {
   refreshTray().catch(() => {});
 });
 ipcMain.handle("get-platform", () => (IS_LINUX ? "linux" : isMac ? "mac" : "windows"));
+ipcMain.handle("get-app-version", () => app.getVersion());
 ipcMain.handle("get-status", async () => {
   if (IS_LINUX) return linuxStatus();
   return getStatus();
@@ -2127,7 +2141,37 @@ function readNetMode(): string {
   }
 }
 
+export function saveAutoUpdate(enabled: boolean) {
+  try {
+    const dir = settingsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...atual, autoUpdate: enabled }, null, 4));
+  } catch (error) {
+    console.error("[settings] nao consegui salvar preferencia de atualizacao:", error);
+  }
+}
+
+export function readAutoUpdate(): boolean {
+  try {
+    const file = path.join(settingsDir(), "settings.json");
+    if (!fs.existsSync(file)) return true;
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return typeof data.autoUpdate === "boolean" ? data.autoUpdate : true;
+  } catch {
+    return true;
+  }
+}
+
 // Detecta Tor disponivel: o embutido (porta dedicada) ou um Tor do sistema (portas classicas).
+
+// IPC de autoUpdate
+ipcMain.handle("get-auto-update", () => readAutoUpdate());
+ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
+  saveAutoUpdate(enabled !== false);
+  refreshTray().catch(() => {});
+});
 
 // IPC do modo de rede + Tor embutido.
 ipcMain.handle("get-net-mode", () => readNetMode());

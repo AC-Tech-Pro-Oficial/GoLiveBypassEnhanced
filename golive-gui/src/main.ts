@@ -8,9 +8,12 @@ declare global {
       deactivate: () => Promise<void>;
       getStatus: () => Promise<string>;
       getProxy: () => Promise<string>;
+      getVersion: () => Promise<string>;
       getPlatform: () => Promise<string>;
       getStartup: () => Promise<boolean>;
       setStartup: (enabled: boolean) => Promise<void>;
+      getAutoUpdate: () => Promise<boolean>;
+      setAutoUpdate: (enabled: boolean) => Promise<void>;
       getNetMode: () => Promise<string>;
       setNetMode: (mode: string) => Promise<string>;
       getTorStatus: () => Promise<{ presente: boolean; ativo: boolean; porta: number }>;
@@ -48,6 +51,7 @@ declare global {
       onLogChunk: (callback: (chunk: string) => void) => void;
       onDevLogWindowClosed: (callback: () => void) => void;
       onRefreshStartup: (callback: () => void) => void;
+      onRefreshAutoUpdate: (callback: () => void) => void;
       onRefreshStatus: (callback: () => void) => void;
       onTorWatchdogRecuperado: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
@@ -138,8 +142,10 @@ const conflictOverwriteBtn = document.getElementById('conflictOverwriteBtn') as 
 let detectedMod: string | null = null;
 const warningToast = document.getElementById('warningToast') as HTMLElement | null;
 const toastClose = document.getElementById('toastClose') as HTMLButtonElement | null;
+const appVersionEl = document.getElementById('appVersion');
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
+const autoUpdateToggle = document.getElementById('autoUpdateToggle') as HTMLInputElement | null;
 const themeBtn = document.getElementById('themeBtn') as HTMLButtonElement;
 
 let currentState = 'INACTIVE';
@@ -349,8 +355,10 @@ conflictOverwriteBtn?.addEventListener('click', async () => {
 // Inicialização
 applyPlatformCopy();
 initTheme();
+refreshVersion();
 updateStatus();
 refreshStartup();
+refreshAutoUpdate();
 refreshProxy();
 refreshNetMode();
 refreshTorStatus();
@@ -359,9 +367,30 @@ refreshTorStatus();
 setInterval(refreshTorStatus, 5000);
 fitWindowToContent();
 
+async function refreshVersion() {
+  try {
+    const ver = await window.api.getVersion();
+    if (appVersionEl && ver) {
+      appVersionEl.textContent = `v${ver}`;
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 async function refreshStartup() {
   try {
     startupToggle.checked = await window.api.getStartup();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function refreshAutoUpdate() {
+  try {
+    if (autoUpdateToggle) {
+      autoUpdateToggle.checked = await window.api.getAutoUpdate();
+    }
   } catch (err) {
     console.error(err);
   }
@@ -537,6 +566,14 @@ if (vpsGuide) {
 startupToggle.addEventListener('change', async () => {
   await window.api.setStartup(startupToggle.checked);
 });
+
+autoUpdateToggle?.addEventListener('change', async () => {
+  if (autoUpdateToggle) {
+    await window.api.setAutoUpdate(autoUpdateToggle.checked);
+  }
+});
+
+window.api.onRefreshAutoUpdate?.(refreshAutoUpdate);
 
 // ---------------------------------------------------------------------------
 // Modo desenvolvedor: so o toggle aqui. Logs e report ficam numa janela aparte.
