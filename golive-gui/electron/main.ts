@@ -397,6 +397,7 @@ function showWindow() {
     mainWindow.focus();
     // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
     mainWindow.webContents.send("refresh-startup");
+    mainWindow.webContents.send("refresh-auto-update");
     refreshWindowStatus();
   } else {
     createWindow();
@@ -439,6 +440,17 @@ async function refreshTray() {
           type: "checkbox",
           checked: getStartup(),
           click: (item) => setStartup(item.checked),
+        },
+        {
+          label: "Avisar sobre atualizações",
+          type: "checkbox",
+          checked: readAutoUpdate(),
+          click: (item) => {
+            saveAutoUpdate(item.checked);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("refresh-auto-update");
+            }
+          },
         },
         { type: "separator" },
         // Sair pela bandeja / barra de menus reverte so o que e nosso.
@@ -590,7 +602,7 @@ if (!gotLock) {
     app.on("activate", showWindow);
     // Checa por atualizacao na release do GitHub (Windows portable: baixa e substitui;
     // Mac/Linux: autoUpdater nativo). Roda sozinho e em silencio se nao houver nada.
-    setupUpdater(() => mainWindow);
+    setupUpdater(() => mainWindow, () => readAutoUpdate());
   });
 }
 
@@ -2129,7 +2141,37 @@ function readNetMode(): string {
   }
 }
 
+export function saveAutoUpdate(enabled: boolean) {
+  try {
+    const dir = settingsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...atual, autoUpdate: enabled }, null, 4));
+  } catch (error) {
+    console.error("[settings] nao consegui salvar preferencia de atualizacao:", error);
+  }
+}
+
+export function readAutoUpdate(): boolean {
+  try {
+    const file = path.join(settingsDir(), "settings.json");
+    if (!fs.existsSync(file)) return true;
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return typeof data.autoUpdate === "boolean" ? data.autoUpdate : true;
+  } catch {
+    return true;
+  }
+}
+
 // Detecta Tor disponivel: o embutido (porta dedicada) ou um Tor do sistema (portas classicas).
+
+// IPC de autoUpdate
+ipcMain.handle("get-auto-update", () => readAutoUpdate());
+ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
+  saveAutoUpdate(enabled !== false);
+  refreshTray().catch(() => {});
+});
 
 // IPC do modo de rede + Tor embutido.
 ipcMain.handle("get-net-mode", () => readNetMode());
