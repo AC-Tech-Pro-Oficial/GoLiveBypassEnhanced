@@ -598,6 +598,14 @@ function Install-Injection($resources) {
     $original = Join-Path $resources '_app.asar'
     $patcher = Join-Path $InstallDir $PatcherName
 
+    # Vencord/Equicord deixam o _app.asar DELES na frente (o backup que eles fizeram do
+    # original), e o fluxo so limpa isso para o estado OutroMod. Sem restaurar aqui, o
+    # Rename-Item abaixo explode com "Cannot create a file when that file already exists":
+    # o -Force do Rename-Item nao sobrescreve destino existente, so atributos escondidos
+    # (issue #103). Tambem cobre corrida com o updater/patchNewerSiblings entre a checagem
+    # de estado e este ponto.
+    if (Test-Path -LiteralPath $original) { Remove-Injection $resources | Out-Null }
+
     Rename-Item -LiteralPath $asar -NewName '_app.asar' -Force
     try {
         New-Item -ItemType Directory -Path $asar -Force | Out-Null

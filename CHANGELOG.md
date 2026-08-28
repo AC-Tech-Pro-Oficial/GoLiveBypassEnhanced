@@ -65,6 +65,15 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   ela existe, garantindo que o `Exec=` do `.desktop` em
   `~/.config/autostart/golivebypass.desktop` aponte para o `.AppImage`
   real no disco.
+- **Standalone Windows falhava ao substituir Vencord/Equicord** com
+  `Cannot create a file when that file already exists`: nesses estados o
+  `_app.asar` (backup do original feito pelo mod) já existe, e o fluxo só
+  chamava `Remove-Injection` para o estado `OutroMod`. O `Rename-Item
+  -Force` do `Install-Injection` não sobrescreve destino existente no
+  Windows (`-Force` só afeta atributos escondidos). Agora o
+  `Install-Injection` restaura o original antes de renomear, cobrindo
+  também corrida com o updater entre a checagem de estado e a injeção.
+  Fecha [#103](https://github.com/bezumiya/GoLiveBypass/issues/103).
 
 ## [1.1.9] - 2026-08-26
 
