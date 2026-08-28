@@ -74,6 +74,21 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   `Install-Injection` restaura o original antes de renomear, cobrindo
   também corrida com o updater entre a checagem de estado e a injeção.
   Fecha [#103](https://github.com/bezumiya/GoLiveBypass/issues/103).
+- **Instalador/standalone quebravam com caminho nulo e viravam issue
+  falsa no GitHub**: funções utilitárias (`Test-DiscordResourcesReady`,
+  `Get-InjectedPath`, `Save-Text`, `Find-Checkout*`, `Install-Patcher`)
+  passavam variáveis não inicializadas para `Join-Path`/`Split-Path`/
+  `Test-Path`, estourando `Não é possível associar o argumento ao
+  parâmetro 'Path' porque ele é nulo` — e o filtro de auto-report só
+  reconhecia a mensagem sem acentos, então esse erro de ambiente abria
+  issue como se fosse bug. Agora há checagens defensivas de `$null`/
+  string vazia nas funções de resolução de caminho, fallback para
+  `$USERPROFILE\AppData\Local` e `[IO.Path]::GetTempPath()`, o
+  `Install-Patcher` do standalone baixa o `golivebypass.js` do GitHub
+  quando rodado via `irm | iex` (sem `$PSScriptRoot`), e o
+  `Test-ShouldReport` aceita as variantes acentuadas (PT-BR e EN).
+  Fecha [#99](https://github.com/bezumiya/GoLiveBypass/issues/99).
+  ([#107](https://github.com/bezumiya/GoLiveBypass/pull/107))
 
 ## [1.1.9] - 2026-08-26
 
