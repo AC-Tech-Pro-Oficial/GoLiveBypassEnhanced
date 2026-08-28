@@ -307,6 +307,8 @@ function Tui-GetKey {
                 if ($k.KeyChar -eq 'j') { return 'down' }
                 if ($k.KeyChar -eq 'k') { return 'up' }
                 if ($k.KeyChar -eq 'q') { return 'esc' }
+                if ($k.KeyChar -eq ' ') { return 'space' }
+                if ($k.KeyChar -eq 'a') { return 'all' }
                 return 'other'
             }
         }
@@ -366,6 +368,67 @@ function Tui-Menu([string]$title, [string[]]$items) {
         Tui-ShowCursor
     }
     if ($sel -ge 0) { return $sel + 1 } else { return 0 }
+}
+
+function Tui-MenuMulti([string]$title, [string[]]$items) {
+    # Multi-selecao estilo checkbox (escolher QUAL Discord patchear): Espaco
+    # marca/desmarca, 'a' marca/desmarca todos, Enter confirma (exige >= 1),
+    # Esc cancela. Devolve os indices (1..N) marcados em ordem, ou nada se
+    # cancelado.
+    if (-not (Test-TuiInteractive)) { return $null }
+    $sel = 0
+    $n = $items.Count
+    $marks = New-Object bool[] $n
+    Tui-HideCursor
+    try {
+        while ($true) {
+            Tui-ClearBelow 1
+            Write-Host "`r" -NoNewline
+            $top = '─' * (62 - 8)
+            Write-Host "$($script:TuiBg)$($script:TuiRset)┌─ $($script:TuiAccent)$title$($script:TuiRset) ─$($script:TuiDim)$top$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            for ($i = 0; $i -lt $n; $i++) {
+                $txt = $items[$i]
+                $pad = ' ' * [Math]::Max(0, (62 - 8 - $txt.Length))
+                $box = if ($marks[$i]) { '[x]' } else { '[ ]' }
+                $cor = if ($marks[$i]) { $script:TuiFg } else { $script:TuiDim }
+                if ($i -eq $sel) {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiAccent)$box$($script:TuiRset) $($script:TuiBold)$txt$($script:TuiRset)$pad │$($script:TuiRset)" -NoNewline
+                } else {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiDim)$box$($script:TuiRset) $cor$txt$($script:TuiRset)$pad │$($script:TuiRset)" -NoNewline
+                }
+                Write-Host ''
+            }
+            Write-Host "$($script:TuiBg)└$('─' * (62 - 2))┘$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            Write-Host "  $($script:TuiDim)[↑↓] navegar · [Espaço] marcar · [a] todos · [Enter] confirmar · [Esc] cancelar$($script:TuiRset)" -NoNewline
+            $key = Tui-GetKey
+            if ($key -eq 'space') { $marks[$sel] = -not $marks[$sel]; continue }
+            if ($key -eq 'all') {
+                $tudoMarcado = $true
+                foreach ($m in $marks) { if (-not $m) { $tudoMarcado = $false; break } }
+                $novo = -not $tudoMarcado
+                for ($i = 0; $i -lt $n; $i++) { $marks[$i] = $novo }
+                continue
+            }
+            switch ($key) {
+                'up'   { if ($sel -gt 0) { $sel-- } }
+                'down' { if ($sel -lt $n - 1) { $sel++ } }
+            }
+            if ($key -eq 'esc') { $sel = -1; break }
+            if ($key -eq 'enter') {
+                $algum = $false
+                foreach ($m in $marks) { if ($m) { $algum = $true; break } }
+                if ($algum) { break }
+            }
+        }
+    } finally {
+        Tui-ShowCursor
+    }
+    if ($sel -lt 0) { return $null }
+    $out = @()
+    for ($i = 0; $i -lt $n; $i++) { if ($marks[$i]) { $out += ($i + 1) } }
+    return $out
 }
 
 function Tui-Input([string]$label, [string]$initial = '') {
@@ -615,6 +678,89 @@ function Test-InjectedFromCheckout($root) {
     return $false
 }
 
+# Clientes paralelos no Windows (Vesktop/Equibop/Legcord): mesmo padrao
+# electron-builder do Discord. O instalador de mod deles nao reconhece esses
+# clientes (recebem copia do dist\<cliente>.asar), os oficiais recebem pnpm
+# inject --location.
+$ParallelNames = @('Vesktop', 'Equibop', 'Legcord')
+
+function Get-PatchTargets {
+    # Oficiais + paralelos num formato so (Flavour|Resources|Tipo): 'O' recebe
+    # pnpm inject --location, 'P' recebe a copia do asar do mod.
+    $targets = @()
+    foreach ($install in (Get-DiscordResources)) {
+        $targets += [pscustomobject]@{ Flavour = $install.Flavour; Resources = $install.Resources; Tipo = 'O' }
+    }
+    if ($env:LOCALAPPDATA) {
+        foreach ($name in $ParallelNames) {
+            foreach ($base in @((Join-Path $env:LOCALAPPDATA $name), (Join-Path $env:LOCALAPPDATA "Programs\$name"))) {
+                if (-not (Test-Path -LiteralPath $base)) { continue }
+                # Padrao Squirrel: app-<versao>\resources. Direto: <base>\resources.
+                $candidate = Join-Path $base 'resources'
+                if (-not (Test-DiscordResourcesReady $candidate)) {
+                    $versions = Get-ChildItem -LiteralPath $base -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
+                        Sort-Object Name -Descending
+                    foreach ($ver in $versions) {
+                        $c = Join-Path $ver.FullName 'resources'
+                        if (Test-DiscordResourcesReady $c) { $candidate = $c; break }
+                    }
+                }
+                if (Test-DiscordResourcesReady $candidate) {
+                    $targets += [pscustomobject]@{ Flavour = $name; Resources = $candidate; Tipo = 'P' }
+                    break
+                }
+            }
+        }
+    }
+    return $targets
+}
+
+function Select-InjectionTargets($targets) {
+    # 1 alvo: sem pergunta (como antes). -Yes: todos os oficiais (paralelos so
+    # quando nao existe oficial — comportamento de antes do seletor). Com TTY e
+    # mais de um: multi-select - um, varios ou todos; Esc cancela.
+    if (-not $targets -or @($targets).Count -le 1) { return $targets }
+    if ($Yes -or -not (Test-TuiInteractive)) {
+        $oficiais = @($targets | Where-Object { $_.Tipo -eq 'O' })
+        if ($oficiais.Count -gt 0) { return $oficiais }
+        return $targets
+    }
+    $labels = foreach ($t in $targets) {
+        $suf = if ($t.Tipo -eq 'P') { ' (cliente paralelo)' } else { '' }
+        "$($t.Flavour)$suf"
+    }
+    $escolha = Tui-MenuMulti 'Quais Discords recebem o plugin?' $labels
+    if (-not $escolha) { throw 'Cancelado.' }
+    $escolhidos = @()
+    foreach ($i in $escolha) { $escolhidos += $targets[$i - 1] }
+    return $escolhidos
+}
+
+function Copy-PatchParallel($root, $resources) {
+    # Patch direto em cliente paralelo: o build do mod gera dist\<cliente>.asar;
+    # copia sobre o app.asar do cliente, com backup _app.asar (idempotente).
+    $nome = $null; $asar = $null
+    switch -Regex ($resources) {
+        '(?i)equibop' { $nome = 'Equibop'; $asar = Join-Path $root 'dist\equibop.asar' }
+        '(?i)vesktop' { $nome = 'Vesktop'; $asar = Join-Path $root 'dist\vesktop.asar' }
+        '(?i)legcord' { $nome = 'Legcord'; $asar = Join-Path $root 'dist\legcord.asar' }
+        default { Write-Warn "Cliente paralelo desconhecido: $resources"; return $false }
+    }
+    if (-not (Test-Path -LiteralPath $asar)) {
+        Write-Warn "O build nao gerou $asar. Rode 'pnpm build' no checkout e tente de novo."
+        return $false
+    }
+    $appAsar = Join-Path $resources 'app.asar'
+    $backup = Join-Path $resources '_app.asar'
+    if (-not (Test-Path -LiteralPath $backup) -and (Test-Path -LiteralPath $appAsar)) {
+        Copy-Item -LiteralPath $appAsar -Destination $backup
+        Write-Ok "Backup criado em $backup"
+    }
+    Copy-Item -LiteralPath $asar -Destination $appAsar -Force
+    Write-Ok "$nome patcheado: $appAsar"
+    return $true
+}
+
 function Show-ModChoice {
     if ($Mod) { return $Mod }
 
@@ -840,14 +986,30 @@ function Build-Mod($root) {
     }
 }
 
-function Invoke-Injection($root) {
+function Invoke-Injection($root, $targets) {
     if (-not $root) { throw 'Caminho do checkout invalido para injetar o mod.' }
     Push-Location -LiteralPath $root
     try {
         Stop-Discord
-        Write-Step 'Injetando no Discord'
-        & pnpm inject
-        if ($LASTEXITCODE -ne 0) { throw 'pnpm inject falhou' }
+        $falha = $false
+        foreach ($t in @($targets)) {
+            if ($t.Tipo -eq 'P') {
+                if (-not (Copy-PatchParallel $root $t.Resources)) { $falha = $true }
+                continue
+            }
+            Write-Step "Injetando no $($t.Flavour)"
+            # O --location espera a pasta de cima (a do app): e de la que o
+            # instalador do mod descobre a instalacao (e o flatpak).
+            $loc = Split-Path -Parent $t.Resources
+            & pnpm run inject -- --location $loc
+            if ($LASTEXITCODE -ne 0) {
+                # Nem todo pnpm come o -- : cai no caminho de sempre (o instalador
+                # do mod pergunta) — espelho do run_inject do .sh.
+                & pnpm inject
+                if ($LASTEXITCODE -ne 0) { $falha = $true }
+            }
+        }
+        if ($falha) { throw 'Falha ao injetar em algum dos Discords escolhidos.' }
     } finally {
         Pop-Location
     }
@@ -884,9 +1046,19 @@ function Invoke-Install($root) {
     Copy-Plugin $root
     Build-Mod $root
 
-    $weInjected = -not (Test-InjectedFromCheckout $root)
-    if ($weInjected) {
-        Invoke-Injection $root
+    $targets = @(Select-InjectionTargets @(Get-PatchTargets))
+    $oficiais = @($targets | Where-Object { $_.Tipo -eq 'O' })
+    $paralelos = @($targets | Where-Object { $_.Tipo -eq 'P' })
+
+    # Ja injetado = TODOS os oficiais escolhidos ja apontam para este checkout.
+    $oficialPendente = $false
+    foreach ($t in $oficiais) {
+        $inj = Get-InjectedPath $t.Resources
+        if (-not $inj -or -not $inj.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $oficialPendente = $true }
+    }
+
+    if ($oficialPendente -or $paralelos.Count -gt 0) {
+        Invoke-Injection $root $targets
     } else {
         Write-Step 'O Discord ja carrega deste checkout, so reiniciando'
         Stop-Discord
@@ -1591,7 +1763,7 @@ function Invoke-Update {
     }
 
     Build-Mod $root
-    if (-not (Test-InjectedFromCheckout $root)) { Invoke-Injection $root }
+    if (-not (Test-InjectedFromCheckout $root)) { Invoke-Injection $root @((Get-PatchTargets) | Where-Object { $_.Tipo -eq 'O' }) }
 
     Write-Host ''
     Write-Ok "Atualizado para v$($release.Tag). Reinicie o Discord para carregar a nova versao."

@@ -35,6 +35,16 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   preservados. Fecha
   [#84](https://github.com/bezumiya/GoLiveBypass/issues/84).
   ([#86](https://github.com/bezumiya/GoLiveBypass/pull/86))
+- **Escolha de qual Discord patchear na TUI e no CLI**: com mais de uma
+  instalação (Discord oficial, PTB, Canary, Vesktop, Equibop, Legcord), os
+  quatro instaladores agora perguntam quais recebem o patch — um, vários ou
+  todos — em vez de patchear tudo sem avisar (standalone) ou delegar a
+  escolha ao instalador do próprio mod, que só patcheia um e não conhece
+  clientes paralelos (plugin). Multi-select estilo checkbox no menu (Espaço
+  marca, `a` marca todos) e entrada textual (`1,3`, `2-4`, `t`) em terminal
+  pequeno. Com uma instalação só, nada muda; `-Yes`/sem TTY continuam
+  agindo em todos (a GUI não é afetada). A detecção de clientes paralelos
+  agora existe também no Windows.
 
 ### Corrigido
 - **Refresh do Tor em modo `tor` segurava o gateway por até 12s** quando o

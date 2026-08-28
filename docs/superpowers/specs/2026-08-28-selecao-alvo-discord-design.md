@@ -47,7 +47,9 @@ installer) e escolha única (não atende "vários ou todos").
   chamador aborta com `Cancelado.` (filtro de reporte já cobre).
 - Fallback sem TTY: lista numerada + uma linha de entrada — `1,3`, `3-4`,
   `t`/`todos`, Enter = todos. Parser de ranges simples e testável.
-- Item 1 da lista: `Todos os Discords (N)` — atalho que marca tudo.
+- Nota de implementação: a lista NÃO tem item-pseudo "Todos" — o atalho do
+  rodapé `[a] todos` marca/desmarca tudo (mais limpo que um checkbox que
+  espelha os outros).
 
 ### 2. Seleção de alvos (função por script)
 

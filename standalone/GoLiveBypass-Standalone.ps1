@@ -295,6 +295,8 @@ function Tui-GetKey {
                 if ($k.KeyChar -eq 'j') { return 'down' }
                 if ($k.KeyChar -eq 'k') { return 'up' }
                 if ($k.KeyChar -eq 'q') { return 'esc' }
+                if ($k.KeyChar -eq ' ') { return 'space' }
+                if ($k.KeyChar -eq 'a') { return 'all' }
                 return 'other'
             }
         }
@@ -339,6 +341,67 @@ function Tui-Menu([string]$title, [string[]]$items) {
         Tui-ShowCursor
     }
     if ($sel -ge 0) { return $sel + 1 } else { return 0 }
+}
+
+function Tui-MenuMulti([string]$title, [string[]]$items) {
+    # Multi-selecao estilo checkbox (escolher QUAL Discord patchear): Espaco
+    # marca/desmarca, 'a' marca/desmarca todos, Enter confirma (exige >= 1),
+    # Esc cancela. Devolve os indices (1..N) marcados em ordem, ou nada se
+    # cancelado.
+    if (-not (Test-TuiInteractive)) { return $null }
+    $sel = 0
+    $n = $items.Count
+    $marks = New-Object bool[] $n
+    Tui-HideCursor
+    try {
+        while ($true) {
+            Tui-ClearBelow 1
+            Write-Host "`r" -NoNewline
+            $top = '─' * (62 - 8)
+            Write-Host "$($script:TuiBg)$($script:TuiRset)┌─ $($script:TuiAccent)$title$($script:TuiRset) ─$($script:TuiDim)$top$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            for ($i = 0; $i -lt $n; $i++) {
+                $txt = $items[$i]
+                $pad = ' ' * [Math]::Max(0, (62 - 8 - $txt.Length))
+                $box = if ($marks[$i]) { '[x]' } else { '[ ]' }
+                $cor = if ($marks[$i]) { $script:TuiFg } else { $script:TuiDim }
+                if ($i -eq $sel) {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiAccent)$box$($script:TuiRset) $($script:TuiBold)$txt$($script:TuiRset)$pad │$($script:TuiRset)" -NoNewline
+                } else {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiDim)$box$($script:TuiRset) $cor$txt$($script:TuiRset)$pad │$($script:TuiRset)" -NoNewline
+                }
+                Write-Host ''
+            }
+            Write-Host "$($script:TuiBg)└$('─' * (62 - 2))┘$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            Write-Host "  $($script:TuiDim)[↑↓] navegar · [Espaço] marcar · [a] todos · [Enter] confirmar · [Esc] cancelar$($script:TuiRset)" -NoNewline
+            $key = Tui-GetKey
+            if ($key -eq 'space') { $marks[$sel] = -not $marks[$sel]; continue }
+            if ($key -eq 'all') {
+                $tudoMarcado = $true
+                foreach ($m in $marks) { if (-not $m) { $tudoMarcado = $false; break } }
+                $novo = -not $tudoMarcado
+                for ($i = 0; $i -lt $n; $i++) { $marks[$i] = $novo }
+                continue
+            }
+            switch ($key) {
+                'up'   { if ($sel -gt 0) { $sel-- } }
+                'down' { if ($sel -lt $n - 1) { $sel++ } }
+            }
+            if ($key -eq 'esc') { $sel = -1; break }
+            if ($key -eq 'enter') {
+                $algum = $false
+                foreach ($m in $marks) { if ($m) { $algum = $true; break } }
+                if ($algum) { break }
+            }
+        }
+    } finally {
+        Tui-ShowCursor
+    }
+    if ($sel -lt 0) { return $null }
+    $out = @()
+    for ($i = 0; $i -lt $n; $i++) { if ($marks[$i]) { $out += ($i + 1) } }
+    return $out
 }
 
 function Tui-Input([string]$label, [string]$initial = '') {
@@ -445,6 +508,70 @@ function Get-InjectionState($resources) {
     if ($content -match '(?i)vesktop')  { return 'OutroMod' }
     if ($content -match '(?i)legcord')  { return 'OutroMod' }
     return 'OutroMod'
+}
+
+# Clientes paralelos no Windows (Vesktop/Equibop/Legcord): mesmo padrao
+# electron-builder do Discord. O .sh ja cobre isso no Linux; aqui e o espelho
+# Windows (relato: Discord oficial + Vesktop com conta secundaria).
+$ParallelNames = @('Vesktop', 'Equibop', 'Legcord')
+
+function Get-PatchTargets {
+    # Oficiais + paralelos num formato so (Flavour|Resources|Paralelo) para o
+    # seletor e para os loops de Install/Uninstall.
+    $targets = @()
+    foreach ($install in (Get-DiscordResources)) {
+        $targets += [pscustomobject]@{ Flavour = $install.Flavour; Resources = $install.Resources; Paralelo = $false }
+    }
+    if ($env:LOCALAPPDATA) {
+        foreach ($name in $ParallelNames) {
+            foreach ($base in @((Join-Path $env:LOCALAPPDATA $name), (Join-Path $env:LOCALAPPDATA "Programs\$name"))) {
+                if (-not (Test-Path -LiteralPath $base)) { continue }
+                # Padrao Squirrel: app-<versao>\resources. Direto: <base>\resources.
+                $candidate = Join-Path $base 'resources'
+                if (-not (Test-DiscordResourcesReady $candidate)) {
+                    $versions = Get-ChildItem -LiteralPath $base -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
+                        Sort-Object Name -Descending
+                    foreach ($ver in $versions) {
+                        $c = Join-Path $ver.FullName 'resources'
+                        if (Test-DiscordResourcesReady $c) { $candidate = $c; break }
+                    }
+                }
+                if (Test-DiscordResourcesReady $candidate) {
+                    $targets += [pscustomobject]@{ Flavour = $name; Resources = $candidate; Paralelo = $true }
+                    break
+                }
+            }
+        }
+    }
+    return $targets
+}
+
+function Get-StateLabel($resources) {
+    switch (Get-InjectionState $resources) {
+        'Vanilla'  { 'sem nada instalado' }
+        'Nosso'    { 'com o GoLiveBypass standalone' }
+        'Vencord'  { 'com Vencord' }
+        'Equicord' { 'com Equicord' }
+        default    { 'com Equicord/Vencord (ou outro mod)' }
+    }
+}
+
+function Select-PatchTargets($targets, [string]$acao) {
+    # 1 alvo: sem pergunta (como antes). -Yes ou sem TTY: todos (comportamento
+    # de antes do seletor). Com TTY e mais de um: multi-select - um, varios ou
+    # todos; Esc cancela a operacao.
+    if (-not $targets -or @($targets).Count -le 1) { return $targets }
+    if ($Yes -or -not (Test-TuiInteractive)) { return $targets }
+
+    $labels = foreach ($t in $targets) {
+        $suf = if ($t.Paralelo) { ' (cliente paralelo)' } else { '' }
+        "$($t.Flavour)$suf - $(Get-StateLabel $t.Resources)"
+    }
+    $escolha = Tui-MenuMulti "Quais Discords quer $acao?" $labels
+    if (-not $escolha) { throw 'Cancelado.' }
+    $escolhidos = @()
+    foreach ($i in $escolha) { $escolhidos += $targets[$i - 1] }
+    return $escolhidos
 }
 
 function Stop-Discord {
@@ -722,7 +849,7 @@ Write-Host ''
 
 if ($Mode -eq 'Status') { Show-Status; return }
 
-$installs = Get-DiscordResources
+$installs = @(Get-PatchTargets)
 if (-not $installs) { Write-Bad 'Nao achei nenhum Discord instalado.'; return }
 
 # corpo principal protegido: qualquer erro nao tratado vira report automatico
@@ -762,7 +889,10 @@ if ($Mode -eq 'Install' -and (Test-TuiInteractive)) {
 
 if ($Mode -eq 'Uninstall') {
     Stop-Discord
-    foreach ($install in $installs) {
+    # O seletor pergunta so quando ha mais de um Discord; -Yes e entrada nao
+    # interativa (GUI) continuam agindo em todos.
+    $alvos = @(Select-PatchTargets $installs 'remover o bypass de')
+    foreach ($install in $alvos) {
         if ((Get-InjectionState $install.Resources) -ne 'Nosso') {
             Write-Warn "$($install.Flavour) nao tem o standalone, deixando como esta."
             continue
@@ -775,7 +905,10 @@ if ($Mode -eq 'Uninstall') {
     return
 }
 
-foreach ($install in $installs) {
+# Selecao de alvos: 1 alvo = sem pergunta (como antes); varios = escolher quais
+# recebem o patch (um, varios ou todos).
+$alvos = @(Select-PatchTargets $installs 'patchear')
+foreach ($install in $alvos) {
     $state = Get-InjectionState $install.Resources
     Write-Host "  $($install.Flavour): $state" -ForegroundColor White
 

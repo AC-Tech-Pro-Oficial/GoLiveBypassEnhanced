@@ -316,6 +316,8 @@ tui_getkey() {
         6a) printf 'down\n' ;;               # j
         6b) printf 'up\n' ;;                 # k
         71) printf 'esc\n' ;;                # q
+        20) printf 'space\n' ;;              # espaco (marcar)
+        61) printf 'a\n' ;;                  # a (marcar todos)
         *) printf 'other\n' ;;
     esac
 }
@@ -378,6 +380,97 @@ tui_menu() {
     tui_mouse_off
     tui_show_cursor
     if [ "$sel" -ge 0 ] && [ "$sel" -lt "$n" ]; then printf '%d\n' $((sel+1)); else printf '0\n'; fi
+}
+
+# tui_menu_multi <title> <items...> → imprime os indices marcados (1..N) separados
+# por espaco, ou "0" para cancelar. Multi-selecao para escolher QUAL Discord
+# patchear: Espaco marca/desmarca, 'a' marca/desmarca todos, Enter confirma
+# (exige >= 1), Esc cancela.
+tui_menu_multi() {
+    local title="$1"; shift
+    local n sel key i txt j pad marks marca_txt dim
+    n=$#
+    sel=0
+    marks=""
+    i=0; while [ "$i" -lt "$n" ]; do marks="${marks}0"; i=$((i+1)); done
+    tui_mouse_on
+    tui_hide_cursor
+    tui_raw_begin
+    tui_size
+    local w=62
+    local total_rows top margin_col margin_row r
+    total_rows=$((n + 5))
+    margin_col=$(( ( TUI_COLS - w ) / 2 ))
+    [ "$margin_col" -lt 1 ] && margin_col=1
+    margin_row=$(( ( TUI_ROWS - total_rows ) / 2 ))
+    [ "$margin_row" -lt 1 ] && margin_row=1
+    while :; do
+        tui_clear_below 1
+        top=""
+        i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+        r=$margin_row
+        tui_cursor $r $margin_col
+        printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$TUI_BG" "$TUI_RSET" "$TUI_ACCENT" "$title" "$TUI_RSET" "$TUI_DIM2" "$top" "$TUI_RSET" >&2
+        i=0
+        for txt in "$@"; do
+            r=$((r+1))
+            tui_cursor $r $margin_col
+            local marca antes novo
+            marca="$(printf '%s' "$marks" | cut -c $((i+1)))"
+            if [ "$marca" = "1" ]; then marca_txt="[x]"; dim="$TUI_FG"; else marca_txt="[ ]"; dim="$TUI_DIM2"; fi
+            pad=""
+            j=0; while [ "$j" -lt $((w-10-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
+            if [ "$i" -eq "$sel" ]; then
+                printf '%s│ %s%s%s %s%s%s%s%s│%s\n' "$TUI_BG" "$TUI_ACCENT" "$marca_txt" "$TUI_RSET" "$TUI_BOLD" "$txt" "$TUI_RSET" "$pad" "$TUI_RSET" >&2
+            else
+                printf '%s│ %s%s%s %s%s%s%s│%s\n' "$TUI_BG" "$TUI_DIM2" "$marca_txt" "$TUI_RSET" "$dim" "$txt" "$TUI_RSET" "$pad" "$TUI_RSET" >&2
+            fi
+            i=$((i+1))
+        done
+        r=$((r+1))
+        tui_cursor $r $margin_col
+        printf '%s└%s┘%s\n' "$TUI_BG" "$(printf '─%.0s' $(seq_like 1 $((w-2))))" "$TUI_RSET" >&2
+        r=$((r+1))
+        tui_cursor $r $margin_col
+        printf '%s  %s[↑↓] navegar · [Espaço] marcar · [a] todos · [Enter] confirmar · [Esc] cancelar%s' "$TUI_BG" "$TUI_DIM2" "$TUI_RSET" >&2
+        key="$(tui_getkey)"
+        case "$key" in
+            up)   [ "$sel" -gt 0 ] && sel=$((sel-1)) ;;
+            down) [ "$sel" -lt $((n-1)) ] && sel=$((sel+1)) ;;
+            space)
+                marca="$(printf '%s' "$marks" | cut -c $((sel+1)))"
+                if [ "$marca" = "1" ]; then novo="0"; else novo="1"; fi
+                if [ "$sel" -gt 0 ]; then antes="$(printf '%s' "$marks" | cut -c 1-$sel)"; else antes=""; fi
+                marks="$antes$novo$(printf '%s' "$marks" | cut -c $((sel+2))-"")"
+                ;;
+            a)
+                local tudo=1 j2
+                j2=0; while [ "$j2" -lt "$n" ]; do
+                    [ "$(printf '%s' "$marks" | cut -c $((j2+1)))" = "1" ] || tudo=0
+                    j2=$((j2+1))
+                done
+                marks=""
+                j2=0; while [ "$j2" -lt "$n" ]; do
+                    if [ "$tudo" -eq 1 ]; then marks="${marks}0"; else marks="${marks}1"; fi
+                    j2=$((j2+1))
+                done
+                ;;
+            enter)
+                case "$marks" in *1*) break ;; esac
+                ;;
+            esc) sel=-1; break ;;
+        esac
+    done
+    tui_raw_end
+    tui_mouse_off
+    tui_show_cursor
+    if [ "$sel" -lt 0 ]; then printf '0\n'; return; fi
+    local out="" j3
+    j3=0; while [ "$j3" -lt "$n" ]; do
+        if [ "$(printf '%s' "$marks" | cut -c $((j3+1)))" = "1" ]; then out="$out $((j3+1))"; fi
+        j3=$((j3+1))
+    done
+    printf '%s\n' "$out"
 }
 
 # seq_like 1 N → 1 2 3 ... N (POSIX, sem `seq`).
@@ -1332,55 +1425,16 @@ build_mod() {
     (cd "$root" && pnpm build) || fail "pnpm build falhou"
 }
 
-# Patch direto em cliente paralelo (Equibop/Vesktop/Legcord) com source local.
+# Patch direto em UM cliente paralelo (Equibop/Vesktop/Legcord) com source local.
 # O instalador de mod do Equicord (EquilotlCli) nao reconhece esses clientes
 # (FindDiscords() soh olha LinuxDiscordNames) - pnpm inject mostra so "Custom
 # Location" e falha. Esse caminho copia o dist/<cliente>.asar (gerado pelo
 # build do Equicord) sobre o app.asar do cliente, com backup automatico.
-inject_parallel() {
-    local root="$1"
-    local parallels target="" asar="" client_name="" app_path=""
-
-    parallels="$(parallel_installs)"
-    [ -n "$parallels" ] || return 1
-
-    # Sem TUI complexa aqui: TUI exige tty limpo e o user ja teve problema
-    # com tui_menu nao pegar a tecla direito. Lista numerada e prompt simples.
-    local i=1 n=0
-    local -a targets
-    while IFS= read -r p; do
-        [ -z "$p" ] && continue
-        targets[$i]="$p"
-        i=$((i+1))
-    done <<EOF
-$parallels
-EOF
-    n=$((i-1))
-
-    if [ "$n" -eq 0 ]; then
-        return 1
-    fi
-
-    # Se --yes ou soh um, pega o primeiro
-    if [ "$ASSUME_YES" -eq 1 ] || [ "$n" -eq 1 ]; then
-        target="${targets[1]}"
-    else
-        # Prompt numerico simples
-        echo
-        echo "  Mais de um cliente paralelo detectado. Escolha qual patchear:"
-        local j
-        for j in $(seq 1 "$n"); do
-            echo "    [$j] ${targets[$j]}"
-        done
-        echo "    [Enter = 1 (primeiro)]"
-        local choice
-        printf "  Escolha: "
-        read -r choice || choice=""
-        case "$choice" in
-            [0-9]*) target="${targets[$choice]}" ;;
-            *) target="${targets[1]}" ;;
-        esac
-    fi
+# $2 = pasta do cliente (termina em /vesktop|/equibop|/legcord, com app.asar dentro).
+# (Extrato do antigo inject_parallel: o seletor novo escolhe varios alvos.)
+patch_parallel_one() {
+    local root="$1" target="$2"
+    local asar="" client_name="" app_path=""
 
     [ -n "$target" ] || return 1
 
@@ -1466,86 +1520,221 @@ run_inject_root() {
     return "$rc"
 }
 
+# Rótulo curto de um alvo, para o seletor. O nome vem do caminho (o installer
+# nao tem a deteccao de flavour que o standalone tem).
+label_alvo() { # $1 = resources
+    local nome
+    case "$1" in
+        *discordptb*|*DiscordPTB*)          nome="Discord PTB" ;;
+        *discordcanary*|*DiscordCanary*)    nome="Discord Canary" ;;
+        *com.discordapp.Discord*|*discord*|*Discord*) nome="Discord" ;;
+        *equibop*|*Equibop*)                nome="Equibop" ;;
+        *vesktop*|*Vesktop*)                nome="Vesktop" ;;
+        *legcord*|*Legcord*)                nome="Legcord" ;;
+        *)                                  nome="$(basename "$(dirname "$1")")" ;;
+    esac
+    printf '%s (%s)' "$nome" "$(dirname "$1")"
+}
+
+# parse_selecao <entrada> <total> → imprime os indices escolhidos, um por linha.
+# "t"/"todos"/vazio = todos. Aceita "1,3", "2-4" e misturas ("1,3-4"). Invalido
+# devolve codigo 1 e nada na saida.
+parse_selecao() {
+    local entrada="$1" total="$2" tok a b res=""
+    case "$entrada" in
+        ""|"t"|"T"|"todos"|"Todos"|"TODOS") printf '%s\n' "$(seq_like 1 "$total" | sed 's/ *$//')"; return 0 ;;
+    esac
+    for tok in $(printf '%s' "$entrada" | tr ',;' '  '); do
+        case "$tok" in
+            *-*)
+                a="${tok%%-*}"; b="${tok#*-}"
+                case "$a$b" in *[!0-9]*) return 1 ;; esac
+                [ "$a" -ge 1 ] && [ "$b" -le "$total" ] && [ "$a" -le "$b" ] || return 1
+                res="$res $(seq_like "$a" "$b")"
+                ;;
+            *)
+                case "$tok" in ''|*[!0-9]*) return 1 ;; esac
+                [ "$tok" -ge 1 ] && [ "$tok" -le "$total" ] || return 1
+                res="$res $tok"
+                ;;
+        esac
+    done
+    res="${res# }"; res="${res% }"
+    printf '%s\n' "$res"
+}
+
+# escolher_alvos_inject <oficiais> <paralelos> → imprime os alvos escolhidos no
+# formato "O|<resources>" (oficial, recebe pnpm inject --location) ou "P|<res>"
+# (paralelo, patch direto). Pergunta so quando ha mais de um alvo no total.
+# -Yes ou entrada nao-interativa: todos os oficiais (e so ha paralelos quando
+# nao existe oficial — comportamento de antes do seletor).
+escolher_alvos_inject() {
+    local oficiais="$1" paralelos="$2"
+    local no np total resp i tipo res linha tentativa
+    no=0; np=0
+    [ -n "$oficiais" ] && no="$(printf '%s\n' "$oficiais" | grep -c . || true)"
+    [ -n "$paralelos" ] && np="$(printf '%s\n' "$paralelos" | grep -c . || true)"
+    total=$((no + np))
+
+    if [ "$total" -le 1 ]; then
+        [ -n "$oficiais" ] && printf 'O|%s\n' "$oficiais"
+        [ -n "$paralelos" ] && printf 'P|%s\n' "$paralelos"
+        return 0
+    fi
+
+    if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
+        if [ -n "$oficiais" ]; then
+            printf 'O|%s\n' "$oficiais"
+        else
+            printf 'P|%s\n' "$paralelos"
+        fi
+        return 0
+    fi
+
+    # Monta os rotulos na MESMA ordem da saida (oficiais primeiro, depois paralelos).
+    set --
+    while IFS= read -r linha; do
+        [ -n "$linha" ] && set -- "$@" "O|$(label_alvo "$linha")"
+    done <<EOF
+$oficiais
+EOF
+    while IFS= read -r linha; do
+        [ -n "$linha" ] && set -- "$@" "P|$(label_alvo "$linha")"
+    done <<EOF
+$paralelos
+EOF
+
+    if tui_is_interactive; then
+        resp="$(tui_menu_multi "Quais Discords recebem o plugin?" "$@")"
+        if [ "$resp" = "0" ]; then
+            warn "Cancelado."
+            exit 1
+        fi
+    else
+        # Terminal sem espaco para a TUI: lista numerada e entrada textual.
+        tentativa=0
+        while [ "$tentativa" -lt 3 ]; do
+            i=0
+            for linha in "$@"; do
+                i=$((i+1))
+                printf '    [%d] %s\n' "$i" "${linha#*|}" >&2
+            done
+            printf '  Escolha (ex.: 1,3 · 2-4 · t = todos · Enter = todos): ' >&2
+            read -r resp || resp=""
+            if resp="$(parse_selecao "$resp" "$total")"; then break; fi
+            warn "Escolha invalida."
+            tentativa=$((tentativa+1))
+        done
+        [ "$tentativa" -lt 3 ] || resp="$(seq_like 1 "$total")"
+    fi
+
+    # Repercorre na mesma ordem e imprime so os escolhidos, com o prefixo de tipo.
+    i=0
+    for linha in "$@"; do
+        i=$((i+1))
+        case " $resp " in
+            *" $i "*) printf '%s\n' "$linha" ;;
+        esac
+    done
+}
+
 inject_mod() {
     local root="$1"
-    local alvo="" loc="" id="" n
+    local oficiais paralelos escolhidos tipo alvo loc id falha injetou_oficial
 
-    # So o ultimo elemento importa (achar o unico Discord): contar com wc e pegar a ultima
-    # linha economiza o array, que nao existe no sh.
-    # discord_installs (sem Equibop/Vesktop/Legcord) - so o que o instalador de
-    # mod pode injetar. Se o user so tem Equibop, n=0 e a injecao nao prossegue
-    # (o instalador de plugin, separado, eh o caminho certo nesse caso).
-    n="$(discord_installs | wc -l)"
+    oficiais="$(discord_installs)"
+    paralelos="$(parallel_installs)"
 
     # Caso comum: o user so tem Equibop/Vesktop/Legcord e nao tem Discord puro.
-    # discord_installs retorna 0, e nao ha o que injetar (o instalador de mod nao
-    # funciona em clientes paralelos - eles ja vem com o mod embutido). Falha
-    # com mensagem especifica apontando o caminho certo.
-    if [ "$n" -eq 0 ]; then
-        # Nao achou Discord puro, mas pode ter Equibop/Vesktop/Legcord. Esses
-        # clientes paralelos nao sao reconhecidos pelo instalador de mod
-        # (EquilotlCli soh olha "discord"/"discordptb"/"discordcanary"/flatpak),
-        # mas o build do Equicord gera dist/<cliente>.asar que pode ser copiado
-        # direto para o app.asar do cliente (com backup automatico).
-        local parallels
-        parallels="$(parallel_installs)"
-        if [ -n "$parallels" ]; then
-            printf '\n'
-            printf '  %s[!]%s Nao encontrei o Discord puro, mas achei clientes paralelos:\n' "$C_YELLOW" "$C_OFF"
-            while IFS= read -r p; do
-                [ -z "$p" ] && continue
-                printf '        - %s\n' "$p"
-            done <<EOF
-$parallels
-EOF
-            if [ "$ASSUME_YES" -eq 1 ] || confirm "Injetar em um dos clientes acima (patch direto, vai pedir sudo)"; then
-                inject_parallel "$root" || fail "Patch direto falhou."
-                # Marca injecao como OK para o do_install seguir
-                return 0
-            fi
+    # O instalador de mod nao funciona em clientes paralelos (eles ja vem com o
+    # mod embutido): patch direto do dist/<cliente>.asar, agora multi-alvo.
+    if [ -z "$oficiais" ]; then
+        if [ -z "$paralelos" ]; then
+            fail "Discord puro nao encontrado, e nenhum cliente paralelo disponivel para patch direto. Instale o Discord (ou use o instalador de plugin goLiveBypass-vencord.zip, que convive com mod)."
         fi
-        fail "Discord puro nao encontrado, e nenhum cliente paralelo disponivel para patch direto. Instale o Discord (ou use o instalador de plugin goLiveBypass-vencord.zip, que convive com mod)."
+        printf '\n'
+        printf '  %s[!]%s Nao encontrei o Discord puro, mas achei clientes paralelos:\n' "$C_YELLOW" "$C_OFF"
+        while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            printf '        - %s\n' "$p"
+        done <<EOF
+$paralelos
+EOF
+        if [ "$ASSUME_YES" -ne 1 ] && ! confirm "Injetar em algum dos clientes acima (patch direto, vai pedir sudo)"; then
+            fail "Discord puro nao encontrado, e nenhum cliente paralelo disponivel para patch direto. Instale o Discord (ou use o instalador de plugin goLiveBypass-vencord.zip, que convive com mod)."
+        fi
+        escolhidos="$(escolher_alvos_inject "" "$paralelos")"
+        falha=0
+        while IFS='|' read -r tipo alvo; do
+            [ -z "$alvo" ] && continue
+            patch_parallel_one "$root" "$alvo" || falha=1
+        done <<EOF
+$escolhidos
+EOF
+        [ "$falha" -eq 0 ] || fail "Patch direto falhou."
+        # Marca injecao como OK para o do_install seguir
+        return 0
     fi
 
-    if [ "$n" -eq 1 ]; then
-        alvo="$(discord_installs | tail -1)"
-        loc="$(install_location "$alvo")"
-    fi
-
-    if [ -n "$alvo" ] && id="$(flatpak_app_id "$alvo")"; then
-        step "Discord instalado por flatpak ($id)"
-    fi
+    # Selecao de alvos: 1 alvo = auto (como antes); varios = nosso seletor
+    # (oficiais + paralelos), no lugar da lista do proprio instalador do mod,
+    # que so patcheia um e nao conhece clientes paralelos.
+    escolhidos="$(escolher_alvos_inject "$oficiais" "$paralelos")"
 
     stop_discord
 
-    # Fora do HOME a injecao precisa de raiz, e o instalador do mod nao pede sozinho: ele so
-    # falha com permissao negada. Perguntar antes vale mais que falhar e mandar tentar de novo.
-    if [ -n "$alvo" ] && [ ! -w "$alvo" ]; then
-        printf '  %sO Discord esta em %s, fora do seu HOME.%s\n' "$C_DIM" "$alvo" "$C_OFF" >&2
-        confirm "A injecao ai precisa de sudo. Posso rodar com sudo?" \
-            || fail "Sem sudo nao da para injetar nesse Discord. Rode: cd $root && sudo pnpm inject"
-        step "Injetando no Discord"
-        run_inject_root "$root" "$loc" || true
-    else
-        step "Injetando no Discord (pode pedir sua senha do sudo)"
-        run_inject "$root" "$loc" || true
+    injetou_oficial=0
+    falha=0
+    while IFS='|' read -r tipo alvo; do
+        [ -z "$alvo" ] && continue
+        case "$tipo" in
+            O)
+                if id="$(flatpak_app_id "$alvo")"; then
+                    step "Discord instalado por flatpak ($id)"
+                fi
+                # Fora do HOME a injecao precisa de raiz, e o instalador do mod nao pede
+                # sozinho: ele so falha com permissao negada. Perguntar antes vale mais que
+                # falhar e mandar tentar de novo.
+                if [ ! -w "$alvo" ]; then
+                    printf '  %sO Discord esta em %s, fora do seu HOME.%s\n' "$C_DIM" "$alvo" "$C_OFF" >&2
+                    confirm "A injecao ai precisa de sudo. Posso rodar com sudo?" \
+                        || { warn "Pulei $alvo -- sem sudo nao da para injetar."; continue; }
+                    step "Injetando no Discord"
+                    loc="$(install_location "$alvo")"
+                    run_inject_root "$root" "$loc" || true
+                else
+                    step "Injetando no Discord (pode pedir sua senha do sudo)"
+                    loc="$(install_location "$alvo")"
+                    run_inject "$root" "$loc" || true
 
-        # O instalador do mod tambem cai aqui quando o Discord escolhido na lista dele estava
-        # fora do HOME, e ai o sudo so aparece como opcao depois.
-        if ! injected_from_checkout "$root" && confirm "Nao pegou. Tentar de novo com sudo?"; then
-            run_inject_root "$root" "$loc" || true
-        fi
-    fi
+                    # O instalador do mod tambem cai aqui quando o Discord escolhido estava
+                    # fora do HOME, e ai o sudo so aparece como opcao depois.
+                    if ! injected_from_checkout "$root" && confirm "Nao pegou. Tentar de novo com sudo?"; then
+                        run_inject_root "$root" "$loc" || true
+                    fi
+                fi
+                injetou_oficial=1
+                ;;
+            P)
+                patch_parallel_one "$root" "$alvo" || falha=1
+                ;;
+        esac
+    done <<EOF
+$escolhidos
+EOF
 
     # O pnpm inject sai com 0 mesmo quando o instalador do mod falha, entao o codigo de saida
     # nao serve de prova. Conferir se a injecao realmente passou a apontar para este checkout.
-    injected_from_checkout "$root" || fail "A injecao nao pegou. Se o Discord estiver em /usr/share, /opt ou num flatpak, rode: cd $root && sudo pnpm inject"
+    if [ "$injetou_oficial" -eq 1 ]; then
+        injected_from_checkout "$root" || fail "A injecao nao pegou. Se o Discord estiver em /usr/share, /opt ou num flatpak, rode: cd $root && sudo pnpm inject"
 
-    # De novo por conta propria, e nao so confiando no instalador do mod: ele so libera o
-    # sandbox quando descobre sozinho que aquilo e um flatpak, e o comando e idempotente.
-    if id="$(injected_flatpak_id "$root")"; then
-        grant_flatpak_access "$id" "$root/dist"
+        # De novo por conta propria, e nao so confiando no instalador do mod: ele so libera o
+        # sandbox quando descobre sozinho que aquilo e um flatpak, e o comando e idempotente.
+        if id="$(injected_flatpak_id "$root")"; then
+            grant_flatpak_access "$id" "$root/dist"
+        fi
     fi
+    [ "$falha" -eq 0 ] || warn "Algum cliente paralelo nao foi patcheado -- os outros continuam."
 }
 
 checkout_mod() {

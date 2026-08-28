@@ -294,6 +294,8 @@ st_tui_getkey() {
         6a) printf 'down\n' ;;
         6b) printf 'up\n' ;;
         71) printf 'esc\n' ;;
+        20) printf 'space\n' ;;
+        61) printf 'a\n' ;;
         *) printf 'other\n' ;;
     esac
 }
@@ -361,6 +363,97 @@ st_tui_menu() {
     st_tui_mouse_off
     st_tui_show_cursor
     if [ "$sel" -ge 0 ] && [ "$sel" -lt "$n" ]; then printf '%d\n' $((sel+1)); else printf '0\n'; fi
+}
+
+# st_tui_multi <title> <items...> → imprime os indices marcados (1..N) separados
+# por espaco, ou "0" para cancelar. Multi-selecao para escolher QUAL Discord
+# patchear: Espaco marca/desmarca, 'a' marca/desmarca todos, Enter confirma
+# (exige >= 1), Esc cancela.
+st_tui_multi() {
+    local title="$1"; shift
+    local n sel key i txt j pad marks marca_txt dim
+    n=$#
+    sel=0
+    marks=""
+    i=0; while [ "$i" -lt "$n" ]; do marks="${marks}0"; i=$((i+1)); done
+    st_tui_mouse_on
+    st_tui_hide_cursor
+    st_tui_raw_begin
+    st_tui_size
+    local w=62
+    local total_rows top margin_col margin_row r
+    total_rows=$((n + 5))
+    margin_col=$(( ( ST_COLS - w ) / 2 ))
+    [ "$margin_col" -lt 1 ] && margin_col=1
+    margin_row=$(( ( ST_ROWS - total_rows ) / 2 ))
+    [ "$margin_row" -lt 1 ] && margin_row=1
+    while :; do
+        printf '\033[1;0H\033[J' >&2
+        top=""
+        i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+        r=$margin_row
+        st_tui_cursor $r $margin_col
+        printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$ST_BG" "$ST_RSET" "$ST_ACCENT" "$title" "$ST_RSET" "$ST_DIM2" "$top" "$ST_RSET" >&2
+        i=0
+        for txt in "$@"; do
+            r=$((r+1))
+            st_tui_cursor $r $margin_col
+            local marca antes novo
+            marca="$(printf '%s' "$marks" | cut -c $((i+1)))"
+            if [ "$marca" = "1" ]; then marca_txt="[x]"; dim="$ST_FG"; else marca_txt="[ ]"; dim="$ST_DIM2"; fi
+            pad=""
+            j=0; while [ "$j" -lt $((w-10-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
+            if [ "$i" -eq "$sel" ]; then
+                printf '%s│ %s%s%s %s%s%s%s%s│%s\n' "$ST_BG" "$ST_ACCENT" "$marca_txt" "$ST_RSET" "$ST_BOLD" "$txt" "$ST_RSET" "$pad" "$ST_RSET" >&2
+            else
+                printf '%s│ %s%s%s %s%s%s%s│%s\n' "$ST_BG" "$ST_DIM2" "$marca_txt" "$ST_RSET" "$dim" "$txt" "$ST_RSET" "$pad" "$ST_RSET" >&2
+            fi
+            i=$((i+1))
+        done
+        r=$((r+1))
+        st_tui_cursor $r $margin_col
+        printf '%s└%s┘%s\n' "$ST_BG" "$(printf '─%.0s' $(st_seq 1 $((w-2))))" "$ST_RSET" >&2
+        r=$((r+1))
+        st_tui_cursor $r $margin_col
+        printf '%s  %s[↑↓] navegar · [Espaço] marcar · [a] todos · [Enter] confirmar · [Esc] cancelar%s' "$ST_BG" "$ST_DIM2" "$ST_RSET" >&2
+        key="$(st_tui_getkey)"
+        case "$key" in
+            up)   [ "$sel" -gt 0 ] && sel=$((sel-1)) ;;
+            down) [ "$sel" -lt $((n-1)) ] && sel=$((sel+1)) ;;
+            space)
+                marca="$(printf '%s' "$marks" | cut -c $((sel+1)))"
+                if [ "$marca" = "1" ]; then novo="0"; else novo="1"; fi
+                if [ "$sel" -gt 0 ]; then antes="$(printf '%s' "$marks" | cut -c 1-$sel)"; else antes=""; fi
+                marks="$antes$novo$(printf '%s' "$marks" | cut -c $((sel+2))-"")"
+                ;;
+            a)
+                local tudo=1 j2
+                j2=0; while [ "$j2" -lt "$n" ]; do
+                    [ "$(printf '%s' "$marks" | cut -c $((j2+1)))" = "1" ] || tudo=0
+                    j2=$((j2+1))
+                done
+                marks=""
+                j2=0; while [ "$j2" -lt "$n" ]; do
+                    if [ "$tudo" -eq 1 ]; then marks="${marks}0"; else marks="${marks}1"; fi
+                    j2=$((j2+1))
+                done
+                ;;
+            enter)
+                case "$marks" in *1*) break ;; esac
+                ;;
+            esc) sel=-1; break ;;
+        esac
+    done
+    st_tui_raw_end
+    st_tui_mouse_off
+    st_tui_show_cursor
+    if [ "$sel" -lt 0 ]; then printf '0\n'; return; fi
+    local out="" j3
+    j3=0; while [ "$j3" -lt "$n" ]; do
+        if [ "$(printf '%s' "$marks" | cut -c $((j3+1)))" = "1" ]; then out="$out $((j3+1))"; fi
+        j3=$((j3+1))
+    done
+    printf '%s\n' "$out"
 }
 
 # st_tui_confirm <question> → 0 sim, 1 nao
@@ -1193,6 +1286,112 @@ if [ "$MODE" = "install" ] && st_tui_is_interactive; then
 fi
 
 aviso_empacotado
+
+# ---- selecao de alvos (escolher QUAL Discord patchear) --------------------
+# rotulo_flavour <flav> → nome legivel para o seletor.
+rotulo_flavour() {
+    case "$1" in
+        discord)       printf 'Discord' ;;
+        discordptb)    printf 'Discord PTB' ;;
+        discordcanary) printf 'Discord Canary' ;;
+        vesktop)       printf 'Vesktop' ;;
+        equibop)       printf 'Equibop' ;;
+        legcord)       printf 'Legcord' ;;
+        *)             printf '%s' "$1" ;;
+    esac
+}
+
+# estado_label <resources> → estado da injecao em texto.
+estado_label() {
+    case "$(injection_state "$1")" in
+        nosso)    printf 'com o GoLiveBypass standalone' ;;
+        outromod) printf 'com Equicord/Vencord' ;;
+        *)        printf 'sem nada instalado' ;;
+    esac
+}
+
+# parse_selecao <entrada> <total> → imprime os indices escolhidos, um por linha.
+# "t"/"todos"/vazio = todos. Aceita "1,3", "2-4" e misturas. Invalido = codigo 1.
+parse_selecao() {
+    local entrada="$1" total="$2" tok a b res=""
+    case "$entrada" in
+        ""|"t"|"T"|"todos"|"Todos"|"TODOS") printf '%s\n' "$(st_seq 1 "$total" | sed 's/ *$//')"; return 0 ;;
+    esac
+    for tok in $(printf '%s' "$entrada" | tr ',;' '  '); do
+        case "$tok" in
+            *-*)
+                a="${tok%%-*}"; b="${tok#*-}"
+                case "$a$b" in *[!0-9]*) return 1 ;; esac
+                [ "$a" -ge 1 ] && [ "$b" -le "$total" ] && [ "$a" -le "$b" ] || return 1
+                res="$res $(st_seq "$a" "$b")"
+                ;;
+            *)
+                case "$tok" in ''|*[!0-9]*) return 1 ;; esac
+                [ "$tok" -ge 1 ] && [ "$tok" -le "$total" ] || return 1
+                res="$res $tok"
+                ;;
+        esac
+    done
+    res="${res# }"; res="${res% }"
+    printf '%s\n' "$res"
+}
+
+# escolher_alvos <acao> → filtra $FOUND pela escolha do usuario. 1 alvo: sem
+# pergunta. -Yes ou entrada nao-interativa: todos (comportamento de antes do
+# seletor). Com TTY e mais de um: multi-select (TUI) ou entrada textual.
+escolher_alvos() {
+    local acao="$1" total resp linha i tentativa
+    total="$(printf '%s\n' "$FOUND" | grep -c . || true)"
+    [ "$total" -le 1 ] && { printf '%s\n' "$FOUND"; return 0; }
+    if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then printf '%s\n' "$FOUND"; return 0; fi
+
+    if st_tui_is_interactive; then
+        set --
+        while IFS='|' read -r linha; do
+            [ -z "$linha" ] && continue
+            case "$linha" in *'|'*) set -- "$@" "$(rotulo_flavour "$(printf '%s' "$linha" | cut -d'|' -f2)") - $(estado_label "$(printf '%s' "$linha" | cut -d'|' -f1)")" ;; esac
+        done <<EOF
+$FOUND
+EOF
+        resp="$(st_tui_multi "Quais Discords quer $acao?" "$@")"
+        if [ "$resp" = "0" ]; then
+            printf '  %sCancelado.%s\n' "$C_DIM" "$C_OFF" >&2
+            exit 0
+        fi
+    else
+        # Terminal sem espaco para a TUI: lista numerada e entrada textual.
+        tentativa=0
+        while [ "$tentativa" -lt 3 ]; do
+            i=0
+            while IFS='|' read -r linha; do
+                [ -z "$linha" ] && continue
+                i=$((i+1))
+                printf '    [%d] %s - %s\n' "$i" "$(rotulo_flavour "$(printf '%s' "$linha" | cut -d'|' -f2)")" "$(estado_label "$(printf '%s' "$linha" | cut -d'|' -f1)")" >&2
+            done <<EOF
+$FOUND
+EOF
+            printf '  Escolha (ex.: 1,3 · 2-4 · t = todos · Enter = todos): ' >&2
+            read -r resp || resp=""
+            if resp="$(parse_selecao "$resp" "$total")"; then break; fi
+            warn "Escolha invalida."
+            tentativa=$((tentativa+1))
+        done
+        [ "$tentativa" -lt 3 ] || resp="$(st_seq 1 "$total")"
+    fi
+
+    # Filtra $FOUND pelos indices escolhidos (na mesma ordem da lista).
+    i=0
+    while IFS='|' read -r linha; do
+        [ -z "$linha" ] && continue
+        i=$((i+1))
+        case " $resp " in
+            *" $i "*) printf '%s\n' "$linha" ;;
+        esac
+    done <<EOF
+$FOUND
+EOF
+}
+
 FOUND="$(discord_dirs)"
 [ -n "$FOUND" ] || fail "Nao achei nenhum Discord instalado."
 
@@ -1230,6 +1429,9 @@ fi
 
 if [ "$MODE" = "uninstall" ]; then
     stop_discord
+    # O seletor pergunta so quando ha mais de um Discord; -Yes e entrada nao
+    # interativa (GUI) continuam agindo em todos.
+    FOUND="$(escolher_alvos "remover o bypass de")"
     failed=0
     # Arquivo em vez de pipe: o while dentro de um pipe roda em subshell, e o "failed"
     # nao voltaria para o pai. Com redirecionamento, o laco roda no shell principal.
@@ -1299,6 +1501,9 @@ if [ "$MODE" = "install" ] && st_tui_is_interactive; then
     esac
 fi
 
+# Selecao de alvos: 1 alvo = sem pergunta (como antes); varios = escolher quais
+# recebem o patch (um, varios ou todos).
+FOUND="$(escolher_alvos patchear)"
 printf '%s\n' "$FOUND" > "$lista"
 while IFS='|' read -r resources flav detect id; do
     state="$(injection_state "$resources")"
