@@ -143,8 +143,10 @@ function Test-ShouldReport([string]$msg) {
     if ($msg -like '*cadeia de caracteres vazia*') { return $false }
     if ($msg -like '*empty string*') { return $false }
     if ($msg -like 'Illegal characters in path*') { return $false }
+    if ($msg -like '*associar*par*metro*') { return $false }
+    if ($msg -like '*Cannot bind argument*') { return $false }
+    if ($msg -like '*porque ele ? nulo*' -or $msg -like '*because it is null*') { return $false }
     if ($msg -like 'Nao e possivel associar*') { return $false }
-    if ($msg -like 'Cannot bind argument*') { return $false }
     if ($msg -like 'O Discord nao fechou*') { return $false }
     # input / uso do usuario
     if ($msg -like 'Opcao desconhecida: *') { return $false }
@@ -335,15 +337,19 @@ function Tui-Done { Write-Host "$($script:TuiBg)$([char]27)[2K`r$($script:TuiOk)
 # =========================================================================== /TUI
 
 function Save-Text($path, $text) {
+    if (-not $path) { return }
     $dir = Split-Path -Parent $path
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     [IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Get-RepoFile($relativePath) {
     if ($PSScriptRoot) {
-        $local = Join-Path (Split-Path -Parent $PSScriptRoot) ($relativePath -replace '/', '\')
-        if (Test-Path -LiteralPath $local) { return [IO.File]::ReadAllText($local) }
+        $parent = Split-Path -Parent $PSScriptRoot
+        if ($parent) {
+            $local = Join-Path $parent ($relativePath -replace '/', '\')
+            if (Test-Path -LiteralPath $local) { return [IO.File]::ReadAllText($local) }
+        }
     }
 
     try {
@@ -405,6 +411,7 @@ function Test-ModCheckout($path) {
 }
 
 function Test-DiscordResourcesReady($resources) {
+    if (-not $resources) { return $false }
     $asar = Join-Path $resources 'app.asar'
     $original = Join-Path $resources '_app.asar'
     return (Test-Path -LiteralPath $asar) -or (Test-Path -LiteralPath $original)
@@ -412,6 +419,7 @@ function Test-DiscordResourcesReady($resources) {
 
 function Get-DiscordResources {
     $found = @()
+    if (-not $env:LOCALAPPDATA) { return $found }
     foreach ($name in $DiscordNames) {
         $root = Join-Path $env:LOCALAPPDATA $name
         if (-not (Test-Path -LiteralPath $root)) { continue }
@@ -423,6 +431,7 @@ function Get-DiscordResources {
             } }
 
         foreach ($app in $apps) {
+            if (-not $app -or -not $app.FullName) { continue }
             $resources = Join-Path $app.FullName 'resources'
             if (Test-DiscordResourcesReady $resources) {
                 $found += $resources
@@ -436,7 +445,7 @@ function Get-InjectedPath($resources) {
     # O instalador do Equicord e o do Vencord trocam o app.asar por um stub cujo index.js so
     # faz require da pasta de build. Numa instalacao a partir do fonte esse require aponta
     # direto para <checkout>\dist\desktop, que e a forma mais confiavel de achar o checkout.
-
+    if (-not $resources) { return $null }
     $candidates = @()
 
     $stub = Join-Path $resources 'app.asar'
@@ -481,13 +490,16 @@ function Find-CheckoutFromInjection {
         if (-not $injected) { continue }
 
         # <checkout>\dist\desktop -> <checkout>
-        $root = Split-Path -Parent (Split-Path -Parent $injected)
-        if (Test-ModCheckout $root) { return $root }
+        $parent1 = Split-Path -Parent $injected
+        if (-not $parent1) { continue }
+        $root = Split-Path -Parent $parent1
+        if ($root -and (Test-ModCheckout $root)) { return $root }
     }
     return $null
 }
 
 function Find-CheckoutOnDisk {
+    if (-not $env:USERPROFILE) { return $null }
     $roots = @($env:USERPROFILE)
     foreach ($sub in @('Documents', 'Desktop', 'Downloads', 'dev', 'repos', 'projects', 'git', 'source', 'source\repos')) {
         $roots += (Join-Path $env:USERPROFILE $sub)
@@ -505,7 +517,7 @@ function Find-CheckoutOnDisk {
             Where-Object { $_.Name -match '^(Equicord|Vencord)$' }
 
         foreach ($dir in $candidates) {
-            if (Test-ModCheckout $dir.FullName) { return $dir.FullName }
+            if ($dir -and $dir.FullName -and (Test-ModCheckout $dir.FullName)) { return $dir.FullName }
         }
     }
 
@@ -515,7 +527,7 @@ function Find-CheckoutOnDisk {
         Select-Object -First 20
 
     foreach ($dir in $deep) {
-        if (Test-ModCheckout $dir.FullName) { return $dir.FullName }
+        if ($dir -and $dir.FullName -and (Test-ModCheckout $dir.FullName)) { return $dir.FullName }
     }
 
     return $null
@@ -543,6 +555,7 @@ function Find-Checkout {
 }
 
 function Test-InjectedFromCheckout($root) {
+    if (-not $root) { return $false }
     foreach ($resources in Get-DiscordResources) {
         $injected = Get-InjectedPath $resources
         if ($injected -and $injected.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $true }
@@ -732,6 +745,7 @@ function Stop-Discord {
 }
 
 function Copy-Plugin($root) {
+    if (-not $root) { throw 'Caminho do checkout invalido para copiar o plugin.' }
     $target = Join-Path $root "src\userplugins\$PluginDirName"
     Write-Step "Instalando o plugin em $target"
 
@@ -757,6 +771,7 @@ function Copy-Plugin($root) {
 }
 
 function Build-Mod($root) {
+    if (-not $root) { throw 'Caminho do checkout invalido para compilar o mod.' }
     Push-Location -LiteralPath $root
     try {
         if (-not (Test-Path -LiteralPath (Join-Path $root 'node_modules'))) {
@@ -774,6 +789,7 @@ function Build-Mod($root) {
 }
 
 function Invoke-Injection($root) {
+    if (-not $root) { throw 'Caminho do checkout invalido para injetar o mod.' }
     Push-Location -LiteralPath $root
     try {
         Stop-Discord
@@ -999,7 +1015,8 @@ function Select-Target($root) {
 # =============================================================== Tor embutido
 
 function Get-TorBaseDir {
-    return (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor')
+    $localApp = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
+    return (Join-Path $localApp 'GoLiveBypass\Tor')
 }
 
 function Get-TorExe {
@@ -1052,7 +1069,8 @@ function Install-Tor {
     if (-not (Test-Path -LiteralPath $exe)) {
         Write-Step 'Baixando o Tor (tor-expert-bundle 13.5, ~30 MB)'
         $asset = $TorUrls.Values | Select-Object -First 1
-        $archive = Join-Path $env:TEMP $asset.Url.Split('/')[-1]
+        $temp = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $archive = Join-Path $temp $asset.Url.Split('/')[-1]
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $asset.Url -OutFile $archive
         } catch {
@@ -1392,6 +1410,7 @@ function Get-LatestRelease {
 # Le a versao do manifest.json em $root/src/userplugins/$PluginDirName.
 # Devolve $null se nao existir.
 function Get-InstalledPluginVersion($root) {
+    if (-not $root) { return $null }
     $manifest = Join-Path $root "src\userplugins\$PluginDirName\manifest.json"
     if (-not (Test-Path -LiteralPath $manifest)) { return $null }
     try {
@@ -1418,6 +1437,7 @@ function Compare-Version($installed, $latest) {
 # Faz backup do plugin atual em $root/src/userplugins/.$PluginDirName.bak/
 # com timestamp YYYYMMDDHHMMSS, mantendo so os 3 mais recentes.
 function Backup-Plugin($root) {
+    if (-not $root) { return }
     $target = Join-Path $root "src\userplugins\$PluginDirName"
     if (-not (Test-Path -LiteralPath $target)) { return }
 

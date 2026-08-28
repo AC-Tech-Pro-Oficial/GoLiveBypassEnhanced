@@ -14,7 +14,8 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$REPO = "/tmp/golive-test"  # caminho do repo no ambiente de teste
+$REPO = if (Test-Path -LiteralPath "/tmp/golive-test") { "/tmp/golive-test" } else { Split-Path -Parent $PSScriptRoot }
+if (-not $REPO) { $REPO = (Get-Location).Path }
 
 # 1. Sintaxe do PowerShell
 Write-Host ""
@@ -36,8 +37,9 @@ $content = Get-Content -LiteralPath (Join-Path $REPO "installer/GoLiveBypass-Ins
 $idx = $content.LastIndexOf("Show-Banner")
 if ($idx -lt 0) { Write-Host "  [FAIL] Show-Banner nao encontrado"; exit 1 }
 $truncated = $content.Substring(0, $idx)
-$tempScript = Join-Path "/tmp/golive-test" "golive-truncated-installer.ps1"
-Set-Content -LiteralPath $tempScript -Value $truncated
+$tempDir = if (Test-Path -LiteralPath "/tmp/golive-test") { "/tmp/golive-test" } else { [System.IO.Path]::GetTempPath() }
+$tempScript = Join-Path $tempDir "golive-truncated-installer.ps1"
+Set-Content -LiteralPath $tempScript -Value $truncated -Encoding UTF8
 . $tempScript
 
 $pass = 0

@@ -40,7 +40,8 @@ if ($Proxy -ne '' -and $Proxy -notmatch '^(socks5|socks4|https?)://(?:.+@)?[^:/@
     exit 1
 }
 
-$InstallDir = Join-Path $env:LOCALAPPDATA 'GoLiveBypass'
+$LocalApp = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
+$InstallDir = Join-Path $LocalApp 'GoLiveBypass'
 $PatcherName = 'golivebypass.js'
 $DiscordFlavours = @('Discord', 'DiscordPTB', 'DiscordCanary')
 $StubPackage = '{"name":"discord","main":"index.js","version":"1.0.0"}'
@@ -130,8 +131,10 @@ function Test-ShouldReport([string]$msg) {
     if ($msg -like '*cadeia de caracteres vazia*') { return $false }
     if ($msg -like '*empty string*') { return $false }
     if ($msg -like 'Illegal characters in path*') { return $false }
+    if ($msg -like '*associar*par*metro*') { return $false }
+    if ($msg -like '*Cannot bind argument*') { return $false }
+    if ($msg -like '*porque ele ? nulo*' -or $msg -like '*because it is null*') { return $false }
     if ($msg -like 'Nao e possivel associar*') { return $false }
-    if ($msg -like 'Cannot bind argument*') { return $false }
     if ($msg -like 'O Discord nao fechou*') { return $false }
     # input / uso do usuario
     if ($msg -like 'Opcao desconhecida: *') { return $false }
@@ -295,6 +298,7 @@ function Tui-Confirm([string]$question) {
 # =========================================================================== /TUI
 
 function Test-DiscordResourcesReady($resources) {
+    if (-not $resources) { return $false }
     $asar = Join-Path $resources 'app.asar'
     $original = Join-Path $resources '_app.asar'
     return (Test-Path -LiteralPath $asar) -or (Test-Path -LiteralPath $original)
@@ -304,6 +308,7 @@ function Test-DiscordResourcesReady($resources) {
 # completa: durante um update o Squirrel cria a pasta nova antes de copiar app.asar.
 function Get-DiscordResources {
     $found = @()
+    if (-not $env:LOCALAPPDATA) { return $found }
     foreach ($flavour in $DiscordFlavours) {
         $root = Join-Path $env:LOCALAPPDATA $flavour
         if (-not (Test-Path -LiteralPath $root)) { continue }
@@ -314,6 +319,7 @@ function Get-DiscordResources {
 
         $resources = $null
         foreach ($ver in $versions) {
+            if (-not $ver -or -not $ver.FullName) { continue }
             $candidate = Join-Path $ver.FullName 'resources'
             if (Test-DiscordResourcesReady $candidate) {
                 $resources = $candidate
@@ -346,6 +352,7 @@ function Get-DiscordResources {
 # com texto especifico. Vesktop/Equibop/Legcord sao clientes paralelos - o user
 # perde a identidade do cliente mas nao tem plugins de Vencord perdidos.
 function Get-InjectionState($resources) {
+    if (-not $resources) { return 'Vanilla' }
     $asar = Join-Path $resources 'app.asar'
     $original = Join-Path $resources '_app.asar'
 
@@ -406,14 +413,23 @@ function Stop-Discord {
 }
 
 function Install-Patcher {
-    $source = Join-Path $PSScriptRoot $PatcherName
-    if (-not (Test-Path -LiteralPath $source)) {
-        throw "Nao achei $PatcherName ao lado deste script."
+    $source = if ($PSScriptRoot) { Join-Path $PSScriptRoot $PatcherName } else { Join-Path (Get-Location).Path $PatcherName }
+    $code = $null
+    if (Test-Path -LiteralPath $source) {
+        $code = [IO.File]::ReadAllText($source)
+    } else {
+        Write-Step "Baixando $PatcherName do GitHub"
+        $url = "https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/standalone/$PatcherName"
+        try {
+            $code = (Invoke-WebRequest -UseBasicParsing -Uri $url).Content
+        } catch {
+            throw "Nao achei $PatcherName localmente e nao consegui baixar do GitHub: $($_.Exception.Message)"
+        }
     }
 
     if (-not (Test-Path -LiteralPath $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
-    Copy-Item -LiteralPath $source -Destination (Join-Path $InstallDir $PatcherName) -Force
-    Write-Ok "Bypass copiado para $InstallDir"
+    [IO.File]::WriteAllText((Join-Path $InstallDir $PatcherName), $code, (New-Object Text.UTF8Encoding $false))
+    Write-Ok "Bypass gravado em $InstallDir"
 
     # As configuracoes ficam fora da pasta do Discord de proposito: uma atualizacao do Discord
     # apaga resources/ inteiro, e levaria a proxy do usuario junto.
@@ -468,7 +484,8 @@ function Install-Tor {
 
     if (-not (Test-Path -LiteralPath $TorExe)) {
         Write-Step "Baixando o Tor ($TorArchiveName, ~30 MB)"
-        $archive = Join-Path $env:TEMP $TorArchiveName
+        $temp = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $archive = Join-Path $temp $TorArchiveName
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $TorUrl -OutFile $archive
         } catch {
@@ -576,6 +593,7 @@ function Remove-Tor {
 }
 
 function Install-Injection($resources) {
+    if (-not $resources) { throw 'Caminho de instalacao invalido.' }
     $asar = Join-Path $resources 'app.asar'
     $original = Join-Path $resources '_app.asar'
     $patcher = Join-Path $InstallDir $PatcherName
@@ -595,6 +613,7 @@ function Install-Injection($resources) {
 }
 
 function Remove-Injection($resources) {
+    if (-not $resources) { return $false }
     $asar = Join-Path $resources 'app.asar'
     $original = Join-Path $resources '_app.asar'
 

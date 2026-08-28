@@ -98,13 +98,12 @@ should_report() {
         "O Discord nao fechou"*) return 1 ;;
         # Argumento vazio/ilegal passado pro instalador (input ruim do usuario, nao bug):
         # ver notas no installer.ps1.
-        *"cancelada pelo usu"*) return 1 ;;
-        *"canceled by the user"*) return 1 ;;
-        *"interrompido"*) return 1 ;;
-        *"terminated"*) return 1 ;;
         *"cadeia de caracteres vazia"*) return 1 ;;
         *"empty string"*) return 1 ;;
         *"Illegal characters in path"*) return 1 ;;
+        *"associar"*"metro"*) return 1 ;;
+        *"porque ele "*" nulo"*) return 1 ;;
+        *"because it is null"*) return 1 ;;
         *"Nao e possivel associar"*) return 1 ;;
         *"Cannot bind argument"*) return 1 ;;
         # --- input / uso do usuario ---
