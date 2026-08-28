@@ -89,6 +89,25 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   `Test-ShouldReport` aceita as variantes acentuadas (PT-BR e EN).
   Fecha [#99](https://github.com/bezumiya/GoLiveBypass/issues/99).
   ([#107](https://github.com/bezumiya/GoLiveBypass/pull/107))
+- **Cold start no modo `gratuitas` nascia direto (IP bloqueado)**: com listas
+  públicas instáveis, as candidatas não ficavam prontas dentro do prazo de
+  12s e a 1ª conexão do gateway saía direta — sessão bloqueada + 2 reloads
+  (o "carregando infinitamente" da #98). Agora, estourado o prazo com o
+  cache frio (sem saídas validadas em `state.json`), o bypass tenta o
+  fallback do Tor local — o mesmo do #85 — antes do direct; sem Tor,
+  comporta-se como antes. Cache quente, modo `tor` e saída manual
+  inalterados. Mitiga
+  [#98](https://github.com/bezumiya/GoLiveBypass/issues/98).
+- **Relatórios de bug do instalador/standalone chegavam sem log nem
+  metadata**: o payload usava `includeLogs`, campo que a API nem lê — issues
+  como a #94 chegavam com log vazio e sem contexto. Agora o payload segue o
+  formato da GUI (`log` + `meta`), com o tipo da exceção, o 1º frame do
+  stack e a flag `caminho_8_3` (variáveis gravadas na forma 8.3 curta, tipo
+  `C:\Users\CSAR~1`, que deixam de resolver quando a geração de nomes curtos
+  está desligada no Windows — a causa provável da #94). O caminho base
+  (`LOCALAPPDATA`/`TEMP`) agora é validado de verdade: se a variável existir
+  mas não resolver, cai para o caminho canônico do Windows. Mitiga
+  [#94](https://github.com/bezumiya/GoLiveBypass/issues/94).
 
 ## [1.1.9] - 2026-08-26
 

@@ -173,6 +173,40 @@ try {
     $InstallDir = $origInstallDir
 }
 
+Write-Host "`n-- 2.4 Get-EffectiveLocalApp / Get-ReportMeta (caminho 8.3, issue #94) --" -ForegroundColor Yellow
+
+$origLocalAppData = $env:LOCALAPPDATA
+try {
+    # LOCALAPPDATA apontando para caminho que NAO existe (forma 8.3 orfa): tem que
+    # cair para o fallback que resolve, nunca devolver o caminho quebrado.
+    $env:LOCALAPPDATA = Join-Path ([System.IO.Path]::GetTempPath()) "nao-existe-$(Get-Random)"
+    $fallback = Get-EffectiveLocalApp
+    Assert-Equal (Test-Path -LiteralPath $fallback) $true "Get-EffectiveLocalApp cai para fallback resolvivel com LOCALAPPDATA orfao"
+    Assert-Equal ($fallback -eq $env:LOCALAPPDATA) $false "Get-EffectiveLocalApp nao devolve o caminho orfao"
+
+    # LOCALAPPDATA valido: devolvido sem mudanca.
+    $valido = [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
+    $env:LOCALAPPDATA = $valido
+    Assert-Equal (Get-EffectiveLocalApp) $valido "Get-EffectiveLocalApp devolve LOCALAPPDATA valido sem alteracao"
+} finally {
+    $env:LOCALAPPDATA = $origLocalAppData
+}
+
+try {
+    # Get-ReportMeta: flag caminho_8_3 marca variaveis gravadas na forma curta
+    # (ex. C:\Users\CSAR~1) -- o cenario reportado na issue #94.
+    $env:LOCALAPPDATA = 'C:\Users\CSAR~1\AppData\Local'
+    $metaCurto = Get-ReportMeta $null
+    Assert-Equal $metaCurto['caminho_8_3'] 'sim' "Get-ReportMeta marca caminho_8_3=sim para forma curta"
+
+    $env:LOCALAPPDATA = $origLocalAppData
+    $metaNormal = Get-ReportMeta $null
+    Assert-Equal $metaNormal['caminho_8_3'] 'nao' "Get-ReportMeta marca caminho_8_3=nao para forma longa"
+    Assert-Equal ($null -eq $metaNormal['excecao']) $true "Get-ReportMeta sem ErrorRecord nao define 'excecao'"
+} finally {
+    $env:LOCALAPPDATA = $origLocalAppData
+}
+
 # Cleanup temp files
 Remove-Item -LiteralPath $tempInstaller, $tempStandalone -Force -ErrorAction SilentlyContinue
 

@@ -47,6 +47,22 @@ $PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypa
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
 
+# O caminho base tem que RESOLVER, nao apenas existir na variavel (mesmo raciocinio do
+# standalone): perfil com nome acentuado/especial pode ter %LOCALAPPDATA% gravado na
+# forma 8.3 curta (ex. C:\Users\CSAR~1\AppData\Local), que para de resolver quando a
+# geracao de nomes curtos esta desligada no Windows (#94: "Nao existe um objeto no
+# caminho especificado C:\Users\CSAR~1"). A cadeia cai para o GetFolderPath (caminho
+# longo canonico) e por ultimo monta a partir do USERPROFILE.
+function Get-EffectiveLocalApp {
+    if ($env:LOCALAPPDATA -and (Test-Path -LiteralPath $env:LOCALAPPDATA)) { return $env:LOCALAPPDATA }
+    try {
+        $shell = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if ($shell -and (Test-Path -LiteralPath $shell)) { return $shell }
+    } catch { }
+    if ($env:USERPROFILE) { return (Join-Path $env:USERPROFILE 'AppData\Local') }
+    return $env:LOCALAPPDATA
+}
+
 $Mods = @{
     Equicord = @{ Git = 'https://github.com/Equicord/Equicord'; Label = 'Equicord'; Note = 'recomendado, inclui tudo do Vencord e mais plugins' }
     Vencord  = @{ Git = 'https://github.com/Vendicated/Vencord'; Label = 'Vencord'; Note = 'o original, mais enxuto' }
@@ -89,10 +105,14 @@ function Confirm-Action($question) {
 $script:BugApiUrl = 'https://api.skyplaceia.com/bugs/v1/reports'
 $script:BugApiToken = 'c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511'
 
-function Invoke-BugReport([string]$title, [string]$description) {
+function Invoke-BugReport([string]$title, [string]$description, [string]$log = '', [hashtable]$meta = @{}) {
     if ($Yes) { return }  # automacao: nao spammar a API
     $desc = Invoke-SanitizeBug $description
-    $body = @{ title = $title; description = $desc; includeLogs = $true } | ConvertTo-Json
+    # Mesma forma do payload da GUI (golive-gui/electron/bugreport.ts): {title,
+    # description, log, meta}. O formato antigo (includeLogs) nunca foi lido pela
+    # API -- os reports do instalador/standalone chegavam no GitHub com log e
+    # metadata vazios (ex.: issue #94).
+    $body = @{ title = $title; description = $desc; log = $log; meta = $meta } | ConvertTo-Json
     try {
         Invoke-RestMethod -Method Post -Uri $script:BugApiUrl -Body $body -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($script:BugApiToken)" } -TimeoutSec 15 -ErrorAction Stop | Out-Null
         Write-Host ''
@@ -112,19 +132,50 @@ function Invoke-SanitizeBug([string]$text) {
     return $text
 }
 
-function Invoke-SendAutoReport([string]$summary, [string]$extra = '') {
+# Metadata do report, mesmo espirito da GUI (bugreport.ts montarMeta): so flags de
+# diagnostico, sem caminhos completos do usuario. caminho_8_3 marca variaveis de
+# ambiente gravadas na forma curta (ex. C:\Users\CSAR~1) -- o cenario da issue #94.
+function Get-ReportMeta($ErrorRecord) {
+    $short = $false
+    foreach ($v in @($env:LOCALAPPDATA, $env:USERPROFILE, $env:TEMP)) {
+        if ($v -and $v -match '~\d($|\\)') { $short = $true; break }
+    }
+    $meta = @{
+        versao                = 'instalador'
+        plataforma            = "win32-$env:PROCESSOR_ARCHITECTURE"
+        locale                = "$(if ($PSUICulture -and $PSUICulture.Name) { $PSUICulture.Name } else { '?' })"
+        localappdata_presente = "$(if ($env:LOCALAPPDATA) { 'sim' } else { 'nao' })"
+        caminho_8_3           = "$(if ($short) { 'sim' } else { 'nao' })"
+    }
+    if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $meta['excecao'] = $ErrorRecord.Exception.GetType().FullName
+    }
+    return $meta
+}
+
+function Invoke-SendAutoReport([string]$summary, [string]$extra = '', $ErrorRecord = $null) {
     if ($Yes) { return }
     $desc = "$extra`n`n--- logs ---`n"
+    $tail = ''
     try {
-        $logDir = Join-Path $env:LOCALAPPDATA 'GoLiveBypass'
+        $logDir = Join-Path (Get-EffectiveLocalApp) 'GoLiveBypass'
         foreach ($log in @('golivebypass.log', 'gui.log')) {
             $lp = Join-Path $logDir $log
             if (Test-Path -LiteralPath $lp) {
-                $desc += (Get-Content -LiteralPath $lp -Tail 40 -ErrorAction SilentlyContinue | Out-String)
+                $tail += (Get-Content -LiteralPath $lp -Tail 40 -ErrorAction SilentlyContinue | Out-String)
             }
         }
     } catch { }
-    Invoke-BugReport $summary $desc
+    if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $frame = ''
+        try {
+            $st = $ErrorRecord.Exception.StackTrace
+            if ($st) { $frame = (($st -split "`n") | Select-Object -First 1).Trim() }
+        } catch { }
+        $desc += "`n`nexcecao: " + $ErrorRecord.Exception.GetType().FullName
+        if ($frame) { $desc += "`nframe: " + $frame }
+    }
+    Invoke-BugReport $summary $desc $tail (Get-ReportMeta $ErrorRecord)
 }
 
 # Test-ShouldReport <mensagem>: $false se a mensagem NAO deve abrir issue.
@@ -419,9 +470,10 @@ function Test-DiscordResourcesReady($resources) {
 
 function Get-DiscordResources {
     $found = @()
-    if (-not $env:LOCALAPPDATA) { return $found }
+    $localApp = Get-EffectiveLocalApp
+    if (-not $localApp) { return $found }
     foreach ($name in $DiscordNames) {
-        $root = Join-Path $env:LOCALAPPDATA $name
+        $root = Join-Path $localApp $name
         if (-not (Test-Path -LiteralPath $root)) { continue }
 
         $apps = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
@@ -1015,8 +1067,7 @@ function Select-Target($root) {
 # =============================================================== Tor embutido
 
 function Get-TorBaseDir {
-    $localApp = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
-    return (Join-Path $localApp 'GoLiveBypass\Tor')
+    return (Join-Path (Get-EffectiveLocalApp) 'GoLiveBypass\Tor')
 }
 
 function Get-TorExe {
@@ -1069,7 +1120,7 @@ function Install-Tor {
     if (-not (Test-Path -LiteralPath $exe)) {
         Write-Step 'Baixando o Tor (tor-expert-bundle 13.5, ~30 MB)'
         $asset = $TorUrls.Values | Select-Object -First 1
-        $temp = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $temp = if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
         $archive = Join-Path $temp $asset.Url.Split('/')[-1]
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $asset.Url -OutFile $archive
@@ -1632,7 +1683,7 @@ try {
     # Report automatico (se nao for automacao): a issue abre no GitHub.
     # Erros de uso (dependencia, CLI typo, path errado, ferramenta externa) nao viram issue.
     if (Test-ShouldReport $_.Exception.Message) {
-        Invoke-SendAutoReport "Falha no instalador GoLiveBypass: $($_.Exception.Message)" $_.Exception.Message
+        Invoke-SendAutoReport "Falha no instalador GoLiveBypass: $($_.Exception.Message)" $_.Exception.Message $_
     }
     exit 1
 }

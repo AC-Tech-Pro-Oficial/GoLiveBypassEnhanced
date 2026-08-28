@@ -1007,6 +1007,22 @@ async function pickFreeExit() {
     return pool[0].proxy;
 }
 
+// O pool esta frio quando nao ha state.json valido: ausente, corrompido, vazio ou
+// fora da idade maxima. Leitura barata de proposito -- sem probe, sem quarentena --
+// porque quem usa e o estouro do prazo de espera, onde cada milissegundo ja virou
+// "Discord carregando". Lista publica de SOCKS5 e ruim por natureza (#95: dezenas de
+// tunel.falha em sequencia), entao "pool frio" e o cenario comum de primeira abertura.
+function poolFrio() {
+    if (pool.length > 0) return false; // esta sessao ja achou saidas; nao e cold start
+    const state = readJson(STATE_FILE, null);
+    if (state === null || typeof state.at !== "number") return true;
+    if (Date.now() - state.at > CACHE_MAX_AGE_MS) return true;
+    const itens = Array.isArray(state.pool)
+        ? state.pool.filter(e => e && typeof e.proxy === "string")
+        : (typeof state.proxy === "string" ? [1] : []); // formato antigo, uma saida so
+    return itens.length === 0;
+}
+
 async function cachedExit() {
     // No modo "tor" saida guardada nao vale nada: o cache so guarda gratuitas, e deixar
     // ele vencer a escolha fazia o gateway NASCER por proxy gratuita com o Tor de pe
@@ -1376,8 +1392,10 @@ function _testMarkGatewayDirect() {
 }
 
 // Uma conexao de gateway que chega antes de existir saida espera aqui, e nao para sempre:
-// estourado o prazo ela sai direta. Discord aberto sem bypass e ruim; Discord que nao abre e
-// muito pior, e foi o pior defeito que este projeto ja teve.
+// estourado o prazo ela sai direta -- exceto no cold start do modo "gratuitas", onde o
+// fallback do Tor local (#85) entra antes do direct (ver poolFrio). Discord aberto sem
+// bypass e ruim; Discord que nao abre e muito pior, e foi o pior defeito que este projeto
+// ja teve.
 function currentExit() {
     if (exitSettled) return Promise.resolve(chosenExit);
 
@@ -1394,6 +1412,34 @@ function currentExit() {
         const refreshRunning = routeMode === "tor" ? refreshingExit : null;
 
         const timer = setTimeout(() => {
+            // Cold start no modo "gratuitas": com lista publica, as candidatas comumente
+            // nao ficam prontas dentro do prazo (#98: saida escolhida so aos 20s, conexao
+            // nasceu direta aos 13s). Em vez de nascer direta -- IP BR, sessao bloqueada,
+            // reload a toa -- tenta o MESMO fallback do #85: o Tor local. O detectTor so
+            // testa portas que ja existem (nunca sobe/para daemon); sem Tor, cai direta
+            // como sempre. A preferencia por gratuitas fica intacta: se o pickFreeExit em
+            // curso entregar uma saida depois, ela assume as conexoes novas sem religar
+            // a sessao ativa.
+            if (routeMode === "free" && poolFrio()) {
+                log("gratuitas nao ficaram prontas a tempo (" + Math.round(prazo / 1000) + "s); tentando o Tor local antes de sair direta");
+                detectTor(3000).then(tor => {
+                    if (exitSettled) return; // uma saida gratuita chegou nesse meio-tempo
+                    if (tor !== null) {
+                        settleExit(tor); // entrega pra quem espera e vira a saida ativa
+                        return;
+                    }
+                    log("sem Tor local tambem; esta conexao vai sair direta");
+                    const index = waitingForExit.indexOf(deliver);
+                    if (index >= 0) waitingForExit.splice(index, 1);
+                    resolve(null);
+                }).catch(() => {
+                    if (exitSettled) return;
+                    const index = waitingForExit.indexOf(deliver);
+                    if (index >= 0) waitingForExit.splice(index, 1);
+                    resolve(null);
+                });
+                return;
+            }
             const index = waitingForExit.indexOf(deliver);
             if (index >= 0) waitingForExit.splice(index, 1);
             log(routeMode === "tor"

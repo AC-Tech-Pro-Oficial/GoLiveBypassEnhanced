@@ -40,7 +40,22 @@ if ($Proxy -ne '' -and $Proxy -notmatch '^(socks5|socks4|https?)://(?:.+@)?[^:/@
     exit 1
 }
 
-$LocalApp = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
+# O caminho base tem que RESOLVER, nao apenas existir na variavel: perfil com nome
+# acentuado/especial pode ter %LOCALAPPDATA% gravado na forma 8.3 curta (ex.
+# C:\Users\CSAR~1\AppData\Local), que para de resolver quando a geracao de nomes
+# curtos esta desligada no Windows (#94: "Nao existe um objeto no caminho
+# especificado C:\Users\CSAR~1"). A cadeia cai entao para o GetFolderPath, que
+# devolve o caminho longo canonico, e por ultimo monta a partir do USERPROFILE.
+function Get-EffectiveLocalApp {
+    if ($env:LOCALAPPDATA -and (Test-Path -LiteralPath $env:LOCALAPPDATA)) { return $env:LOCALAPPDATA }
+    try {
+        $shell = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if ($shell -and (Test-Path -LiteralPath $shell)) { return $shell }
+    } catch { }
+    if ($env:USERPROFILE) { return (Join-Path $env:USERPROFILE 'AppData\Local') }
+    return $env:LOCALAPPDATA
+}
+$LocalApp = Get-EffectiveLocalApp
 $InstallDir = Join-Path $LocalApp 'GoLiveBypass'
 $PatcherName = 'golivebypass.js'
 $DiscordFlavours = @('Discord', 'DiscordPTB', 'DiscordCanary')
@@ -75,10 +90,14 @@ function Confirm-Action($question) {
 $script:BugApiUrl = 'https://api.skyplaceia.com/bugs/v1/reports'
 $script:BugApiToken = 'c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511'
 
-function Invoke-BugReport([string]$title, [string]$description) {
+function Invoke-BugReport([string]$title, [string]$description, [string]$log = '', [hashtable]$meta = @{}) {
     if ($Yes) { return }  # automacao: nao spammar a API
     $desc = Invoke-SanitizeBug $description
-    $body = @{ title = $title; description = $desc; includeLogs = $true } | ConvertTo-Json
+    # Mesma forma do payload da GUI (golive-gui/electron/bugreport.ts): {title,
+    # description, log, meta}. O formato antigo (includeLogs) nunca foi lido pela
+    # API -- os reports do standalone chegavam no GitHub com log e metadata vazios
+    # (ex.: issue #94).
+    $body = @{ title = $title; description = $desc; log = $log; meta = $meta } | ConvertTo-Json
     try {
         Invoke-RestMethod -Method Post -Uri $script:BugApiUrl -Body $body -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($script:BugApiToken)" } -TimeoutSec 15 -ErrorAction Stop | Out-Null
         Write-Host ''
@@ -104,8 +123,39 @@ function Invoke-SanitizeBug([string]$text) {
     return $text
 }
 
-function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
+# Metadata do report, mesmo espirito da GUI (bugreport.ts montarMeta): so flags de
+# diagnostico, sem caminhos completos do usuario. caminho_8_3 marca variaveis de
+# ambiente gravadas na forma curta (ex. C:\Users\CSAR~1) -- o cenario da issue #94.
+function Get-ReportMeta($ErrorRecord) {
+    $short = $false
+    foreach ($v in @($env:LOCALAPPDATA, $env:USERPROFILE, $env:TEMP)) {
+        if ($v -and $v -match '~\d($|\\)') { $short = $true; break }
+    }
+    $modo = 'gratuitas'
+    try {
+        $settingsFile = Join-Path $LocalApp 'GoLiveBypass\settings.json'
+        if (Test-Path -LiteralPath $settingsFile) {
+            $rm = (Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json).routeMode
+            if ($rm) { $modo = $rm }
+        }
+    } catch { }
+    $meta = @{
+        versao                = 'standalone'
+        plataforma            = "win32-$env:PROCESSOR_ARCHITECTURE"
+        locale                = "$(if ($PSUICulture -and $PSUICulture.Name) { $PSUICulture.Name } else { '?' })"
+        modoRoteamento        = $modo
+        localappdata_presente = "$(if ($env:LOCALAPPDATA) { 'sim' } else { 'nao' })"
+        caminho_8_3           = "$(if ($short) { 'sim' } else { 'nao' })"
+    }
+    if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $meta['excecao'] = $ErrorRecord.Exception.GetType().FullName
+    }
+    return $meta
+}
+
+function Invoke-AutoBugReport([string]$summary, [string]$extra = '', $ErrorRecord = $null) {
     # Erros de uso (dependencia, CLI typo, path errado, ferramenta externa) nao viram issue.
+    # O filtro roda sobre a mensagem crua; tipo/stack entram depois, so no texto do report.
     if (-not (Test-ShouldReport $extra)) { return }
     # monta a descricao: extra + cauda do log (se existir)
     $logPath = Join-Path $InstallDir 'golivebypass.log'
@@ -113,8 +163,18 @@ function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
     if (Test-Path -LiteralPath $logPath) {
         $tail = (Get-Content -LiteralPath $logPath -Tail 40 -ErrorAction SilentlyContinue | Out-String)
     }
-    if ($extra -or $tail) {
-        Invoke-BugReport $summary ($extra + "`n`n--- log ---`n" + $tail)
+    $desc = $extra
+    if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $frame = ''
+        try {
+            $st = $ErrorRecord.Exception.StackTrace
+            if ($st) { $frame = (($st -split "`n") | Select-Object -First 1).Trim() }
+        } catch { }
+        $desc += "`n`nexcecao: " + $ErrorRecord.Exception.GetType().FullName
+        if ($frame) { $desc += "`nframe: " + $frame }
+    }
+    if ($desc -or $tail) {
+        Invoke-BugReport $summary $desc $tail (Get-ReportMeta $ErrorRecord)
     }
 }
 
@@ -308,9 +368,9 @@ function Test-DiscordResourcesReady($resources) {
 # completa: durante um update o Squirrel cria a pasta nova antes de copiar app.asar.
 function Get-DiscordResources {
     $found = @()
-    if (-not $env:LOCALAPPDATA) { return $found }
+    if (-not $LocalApp) { return $found }
     foreach ($flavour in $DiscordFlavours) {
-        $root = Join-Path $env:LOCALAPPDATA $flavour
+        $root = Join-Path $LocalApp $flavour
         if (-not (Test-Path -LiteralPath $root)) { continue }
 
         $versions = Get-ChildItem -LiteralPath $root -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
@@ -484,7 +544,7 @@ function Install-Tor {
 
     if (-not (Test-Path -LiteralPath $TorExe)) {
         Write-Step "Baixando o Tor ($TorArchiveName, ~30 MB)"
-        $temp = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $temp = if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
         $archive = Join-Path $temp $TorArchiveName
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $TorUrl -OutFile $archive
@@ -777,5 +837,5 @@ Write-Host ''
 } catch {
     Write-Host ''
     Write-Bad "Erro: $($_.Exception.Message)"
-    Invoke-AutoBugReport 'Falha no GoLiveBypass standalone' $_.Exception.Message
+    Invoke-AutoBugReport 'Falha no GoLiveBypass standalone' $_.Exception.Message $_
 }
