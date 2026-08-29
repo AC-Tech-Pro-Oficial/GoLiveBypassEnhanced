@@ -900,10 +900,14 @@ function poolStatus() {
 
 async function detectTor(probeTimeoutMs) {
     // No modo "tor" o endereco vem das settings (a GUI sobe o proprio Tor). Nos outros
-    // modos, procura as portas classicas de clientes Tor da maquina.
+    // modos, comeca pelo endereco gravado nas settings e depois varre as portas
+    // classicas de clientes Tor da maquina. O torAddr existe mesmo em free/auto: a
+    // GUI grava a porta do Tor EMBUTIDO dela (9060) na injecao, e o fallback das
+    // gratuitas (lista toda morta) precisa achar esse Tor -- varrer so as portas
+    // classicas perdia um Tor vivo na 9060 e o gateway saia direto (issue #121).
     const candidatas = routeMode === "tor"
         ? [TOR_ADDR]
-        : TOR_PORTS.map(port => "127.0.0.1:" + port);
+        : [...new Set([TOR_ADDR, ...TOR_PORTS.map(port => "127.0.0.1:" + port)])];
 
     // Quando o refresh chama o detectTor (Tor morreu no meio da sessao e o batimento
     // detectou), o probe do Tor pode estar em estado intermediario (SOCKS5 aceita mas

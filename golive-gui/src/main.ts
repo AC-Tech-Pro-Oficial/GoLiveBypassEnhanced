@@ -15,7 +15,7 @@ declare global {
       getAutoUpdate: () => Promise<boolean>;
       setAutoUpdate: (enabled: boolean) => Promise<void>;
       getNetMode: () => Promise<string>;
-      setNetMode: (mode: string) => Promise<string>;
+      setNetMode: (mode: string) => Promise<{ mode: string; reescritos: number }>;
       getTorStatus: () => Promise<{ presente: boolean; ativo: boolean; porta: number }>;
       installTor: () => Promise<{ ok: boolean; porta?: number; error?: string }>;
       testProxy: (proxy: string) => Promise<{
@@ -524,6 +524,23 @@ async function refreshTorStatus() {
   aplicarTravaDoTor();
 }
 
+// Troca de modo com o bypass ativo: o main reescreve o settings.json dentro do asar
+// injetado, mas o runtime so rele no proximo start do Discord. O hint avisa disso
+// quando a reescrita aconteceu (reescritos > 0 = havia injecao nossa no disco).
+const netModeHint = document.getElementById('netModeHint') as HTMLElement | null;
+let netModeHintTimer: number | undefined;
+function mostrarNetModeHint(reescritos: number) {
+  if (!netModeHint) return;
+  if (reescritos > 0) {
+    netModeHint.textContent = 'Novo modo salvo — vale no próximo start do Discord (ou desative/ative pra aplicar agora).';
+    netModeHint.hidden = false;
+    if (netModeHintTimer) window.clearTimeout(netModeHintTimer);
+    netModeHintTimer = window.setTimeout(() => { netModeHint.hidden = true; }, 9000);
+  } else {
+    netModeHint.hidden = true;
+  }
+}
+
 for (const btn of segBtns) {
   btn.addEventListener('click', () => {
     const mode = btn.dataset.mode!;
@@ -531,7 +548,7 @@ for (const btn of segBtns) {
 
     if (mode === 'tor') {
       // Prepara o Tor (baixa/sobe) — o padrao. Nao espera: o status atualiza.
-      window.api.setNetMode('tor').catch(() => {});
+      window.api.setNetMode('tor').then((r) => mostrarNetModeHint(r.reescritos)).catch(() => {});
       // Trava o botao na hora: ate o Tor estar de pe, injetar so deixaria o Discord sem
       // conectar. O refreshTorStatus (a cada 5s) libera quando ele subir.
       torPronto = false;
@@ -546,13 +563,13 @@ for (const btn of segBtns) {
       }).catch(() => {});
       fitWindowToContent();
     } else if (mode === 'free') {
-      window.api.setNetMode('free').catch(() => {});
+      window.api.setNetMode('free').then((r) => mostrarNetModeHint(r.reescritos)).catch(() => {});
       // Fora do modo Tor nao ha o que esperar: devolve o botao.
       aplicarTravaDoTor();
       updateStatus();
     } else {
       // Personalizado: volta ao auto com a proxy do campo.
-      window.api.setNetMode('auto').catch(() => {});
+      window.api.setNetMode('auto').then((r) => mostrarNetModeHint(r.reescritos)).catch(() => {});
       aplicarTravaDoTor();
       updateStatus();
       fitWindowToContent();

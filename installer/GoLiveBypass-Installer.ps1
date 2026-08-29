@@ -992,9 +992,15 @@ function Invoke-Injection($root, $targets) {
     try {
         Stop-Discord
         $falha = $false
+        # Detalhe por alvo: sem isto o relato automatico chegava so com a mensagem
+        # generica e o log do RUNTIME (que nada diz sobre a injecao) -- issue #120.
+        $detalhes = [System.Collections.Generic.List[string]]::new()
         foreach ($t in @($targets)) {
             if ($t.Tipo -eq 'P') {
-                if (-not (Copy-PatchParallel $root $t.Resources)) { $falha = $true }
+                if (-not (Copy-PatchParallel $root $t.Resources)) {
+                    $falha = $true
+                    $detalhes.Add("cliente paralelo ($($t.Resources)): patch direto falhou (motivo no aviso acima)")
+                }
                 continue
             }
             Write-Step "Injetando no $($t.Flavour)"
@@ -1006,10 +1012,17 @@ function Invoke-Injection($root, $targets) {
                 # Nem todo pnpm come o -- : cai no caminho de sempre (o instalador
                 # do mod pergunta) — espelho do run_inject do .sh.
                 & pnpm inject
-                if ($LASTEXITCODE -ne 0) { $falha = $true }
+                if ($LASTEXITCODE -ne 0) {
+                    $falha = $true
+                    $detalhes.Add("$($t.Flavour): pnpm inject saiu com codigo $LASTEXITCODE ($($t.Resources))")
+                }
             }
         }
-        if ($falha) { throw 'Falha ao injetar em algum dos Discords escolhidos.' }
+        if ($falha) {
+            $msg = 'Falha ao injetar em algum dos Discords escolhidos.'
+            if ($detalhes.Count -gt 0) { $msg = "$msg -- " + ($detalhes -join '; ') }
+            throw $msg
+        }
     } finally {
         Pop-Location
     }

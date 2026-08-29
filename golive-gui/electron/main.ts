@@ -982,6 +982,42 @@ function writeInjection(asar: string, proxyAddress: string) {
   });
 }
 
+// Troca de modo com o bypass ativo: o runtime le as settings UMA VEZ, no boot do
+// Discord, e o settings.json dentro do asar so era reescrito na ATIVACAO. Quem
+// trocava de modo no seletor ficava com o runtime no modo velho atraves de
+// reinicios do Discord (issue #121: GUI em tor, runtime em free, 80 candidatas
+// mortas, gateway direto). Reescrever so o settings.json deixa o disco verdadeiro
+// para o proximo start. No Linux nao precisa: o runtime le o settings
+// compartilhado, que o saveNetMode ja atualizou. Devolve quantos installs
+// reescreveu (0 = bypass inativo, o modo entra na proxima ativacao).
+function updateInjectedNetSettings(mode: string): number {
+  if (IS_LINUX) return 0;
+  let reescritos = 0;
+  for (const install of getDiscordInstalls()) {
+    const asar = path.join(install.resources, "app.asar");
+    const settingsPath = path.join(asar, "settings.json");
+    const ok = withNoAsar(() => {
+      try {
+        if (!diskFs.existsSync(path.join(install.resources, "_app.asar"))) return false;
+        if (!isOurInjection(install.resources)) return false;
+        let atual: Record<string, unknown> = {};
+        try {
+          atual = JSON.parse(diskFs.readFileSync(settingsPath, "utf8"));
+        } catch {}
+        diskFs.writeFileSync(
+          settingsPath,
+          JSON.stringify({ ...atual, routeMode: mode, torAddr: `127.0.0.1:${torPortaEmUso}` }),
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (ok) reescritos++;
+  }
+  return reescritos;
+}
+
 async function activateBypass(event: any, proxyAddress: string = "", confirmOverride: boolean = false) {
   const installs = getDiscordInstalls();
   if (installs.length === 0) {
@@ -2166,7 +2202,10 @@ ipcMain.handle("set-net-mode", (_event, mode: unknown) => {
   // A UI manda "auto" para o modo Personalizado (o campo de proxy define a saida).
   const m = typeof mode === "string" && ["auto", "tor", "free"].includes(mode) ? mode : "tor";
   saveNetMode(m);
-  return m;
+  // No modo tor so reescrevo a injecao com o Tor de pe: apontar o runtime pra uma
+  // porta morta faria o gateway segurar (recusa direta) ate o Tor subir.
+  const reescritos = m !== "tor" || torVerificado ? updateInjectedNetSettings(m) : 0;
+  return { mode: m, reescritos };
 });
 ipcMain.handle("get-tor-status", async () => {
   // "Presente" cobre os dois casos em que nao ha nada a baixar: o nosso ja extraido e um tor
@@ -2874,14 +2913,41 @@ ipcMain.handle("get-proxy", () => {
   return "";
 });
 
+// O modo que o runtime VAI ler. No Linux e o settings compartilhado; no Windows/mac
+// e o settings.json DENTRO do asar injetado — o arquivo compartilhado la e so a
+// preferencia da GUI, e o report dizia "tor" com o runtime rodando free (issue #121).
+function readRuntimeRouteMode(): string {
+  if (IS_LINUX) {
+    const v = readSharedSettings().routeMode;
+    return typeof v === "string" ? v : "";
+  }
+  for (const install of getDiscordInstalls()) {
+    const nosso = withNoAsar(() => {
+      if (!diskFs.existsSync(path.join(install.resources, "_app.asar"))) return false;
+      return isOurInjection(install.resources);
+    });
+    if (!nosso) continue;
+    try {
+      const data = withNoAsar(() =>
+        JSON.parse(
+          diskFs.readFileSync(path.join(install.resources, "app.asar", "settings.json"), "utf8"),
+        ),
+      );
+      return typeof data?.routeMode === "string" ? data.routeMode : "";
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
 ipcMain.handle("report-bug", async (_event, payload: unknown) => {
   const p = (payload ?? {}) as { title?: string; description?: string; includeLogs?: boolean };
   const netMode = readNetMode();
-  // O modo que o runtime VAI ler (disco), nao so o do seletor: o bug report classico da
-  // issue #108 dizia "tor" com o settings.json sem routeMode e o runtime no "auto".
-  const routeModeDisco = typeof readSharedSettings().routeMode === "string"
-    ? String(readSharedSettings().routeMode)
-    : "";
+  // O modo que o runtime VAI ler (o que esta gravado na injecao), nao so o do
+  // seletor: o bug report classico da issue #108 dizia "tor" com o runtime no
+  // "auto", e o da #121 dizia "tor" com o runtime em "free".
+  const routeModeDisco = readRuntimeRouteMode();
   let statusBypass = "INACTIVE";
   try {
     statusBypass = IS_LINUX ? await linuxStatus() : getStatus();
