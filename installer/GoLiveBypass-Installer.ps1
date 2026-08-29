@@ -1010,9 +1010,12 @@ function Invoke-Injection($root, $targets) {
                 continue
             }
             Write-Step "Injetando no $($t.Flavour)"
-            # O --location espera a pasta de cima (a do app): e de la que o
-            # instalador do mod descobre a instalacao (e o flatpak).
-            $loc = Split-Path -Parent $t.Resources
+            # O --location espera a RAIZ da instalacao (...\Discord), nao o app-1.0.x:
+            # e de la que o instalador do mod varre os app-*\resources. Espelho do
+            # install_location() do .sh (dois dirnames). Passar o app-1.0.x fazia o
+            # injector nao achar a instalacao e toda instalacao nova pela linha de
+            # comando falhar (relato 1.1.11-beta.1).
+            $loc = Split-Path -Parent (Split-Path -Parent $t.Resources)
             & pnpm run inject -- --location $loc
             if ($LASTEXITCODE -ne 0) {
                 # Nem todo pnpm come o -- : cai no caminho de sempre (o instalador
