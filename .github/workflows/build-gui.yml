@@ -86,12 +86,17 @@ jobs:
 
       - name: Determinar versao da tag
         id: version
+        env:
+          # GITHUB_REF_NAME no workflow_dispatch e a BRANCH de disparo (ex.: main),
+          # nao a tag. O nome dos assets tem que sair do input, senao o bypass puro
+          # vai para a release como "GoLiveBypass-main-bypass.js".
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           # Semver: v1.2.3 -> 1.2.3
-          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "version=${RELEASE_TAG#v}" >> $GITHUB_OUTPUT
+          echo "tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
           # Bypass standalone tem versao no nome (download manual, sem auto-update).
-          echo "bypass_basename=GoLiveBypass-${GITHUB_REF_NAME#v}-bypass" >> $GITHUB_OUTPUT
+          echo "bypass_basename=GoLiveBypass-${RELEASE_TAG#v}-bypass" >> $GITHUB_OUTPUT
           # Userplugin tem nome fixo (igual ao assetName do manifest.json) para que o
           # Vencord sempre baixe o asset mais recente independente da tag.
           echo "vencord_basename=goLiveBypass-vencord" >> $GITHUB_OUTPUT
