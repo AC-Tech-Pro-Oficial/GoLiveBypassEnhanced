@@ -76,6 +76,15 @@ const STOCK_COOLDOWN_MS = 3 * 60_000;
 // falhar faria o Chromium desistir do roteador inteiro.
 const RELAY_TIMEOUT_MS = 2500;
 
+// Prazo do tunel no modo tor, pelo contrario, folgado: o SOCKS CONNECT do Tor constroi
+// circuito novo quando o anterior expirou (MaxCircuitDirtiness ~10 min) e isso leva 5-30s --
+// o SocksTimeout do Tor e 60s+. Com o prazo de saida gratuita (2.5s) o cliente abortava uma
+// conexao que o Tor completaria segundos depois, e o gateway so reconectava no proximo ciclo
+// de backoff (janelas de minutos sem gateway na issue #122). No tor nao existe alternativa
+// (nunca sai direto), entao esperar nao custa nada: o cliente do gateway ja recebeu a
+// resposta do SOCKS e espera pacientemente o handshake.
+const TOR_RELAY_TIMEOUT_MS = 30_000;
+
 // De quanto em quanto tempo as saidas sao reconferidas com a sessao ja aberta. O refreshExit
 // conserta depois que uma conexao falha; o batimento existe para que ela nao chegue a falhar.
 // Trinta segundos e curto o bastante para a reserva estar quente quando o gateway reconectar,
@@ -1628,6 +1637,23 @@ async function beat() {
 async function checkPool() {
     const active = chosenExit;
 
+    // Modo tor: a saida e UNICA e o batimento nunca a derruba. O Tor renova os
+    // circuitos a cada ~10 min (MaxCircuitDirtiness) e o probe de 4s falha durante
+    // a construcao do circuito novo — derrubar a saida nesse falso negativo criava
+    // a janela de recusa do gateway: reconexao segurada ate um probe passar,
+    // repetida a cada rotacao (log da issue #122 mostra 30 e 57 MINUTOS sem ver o
+    // gateway). Agora o probe e so informativo, com timeout folgado pra construcao
+    // de circuito; a reconexao tenta o tunel direto e passa quando o circuito fica
+    // pronto. A morte REAL do daemon e tratada pelo listening() do detectTor no
+    // refreshExit — e pelo watchdog da GUI, que ressuscita o processo.
+    if (routeMode === "tor") {
+        if (active === null) return; // o beat ja tenta o detectTor nesse caso
+        const ok = await probe(active, HEARTBEAT_TIMEOUT_MS * 4) !== null;
+        if (ok) missedBeats.delete(active);
+        else log("batimento do Tor falhou (circuito construindo?); mantendo a saida");
+        return;
+    }
+
     // A ativa entra na rodada mesmo estando fora do pote: proxy do settings.json e Tor local
     // nunca sao guardados, e sao exatamente os que a pessoa mais sente quando caem.
     const targets = [];
@@ -1889,9 +1915,11 @@ async function openThroughPool(target) {
     if (active === null) return null;
 
     // A ativa sozinha primeiro: ela e o IP que o servidor ja viu nesta sessao, e trocar sem
-    // precisar seria pedir uma reavaliacao a toa.
+    // precisar seria pedir uma reavaliacao a toa. No modo tor o prazo e o folgado
+    // (TOR_RELAY_TIMEOUT_MS): construcao de circuito do Tor nao pode ser abortada.
     const tAtiva = Date.now();
-    const direto = await openTunnel(active, target.host, target.port, RELAY_TIMEOUT_MS);
+    const prazoTunel = routeMode === "tor" ? TOR_RELAY_TIMEOUT_MS : RELAY_TIMEOUT_MS;
+    const direto = await openTunnel(active, target.host, target.port, prazoTunel);
     if (direto !== null) {
         markGatewayRouted();
         log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(active) + " via=ativa latencia=" + (Date.now() - tAtiva) + "ms");

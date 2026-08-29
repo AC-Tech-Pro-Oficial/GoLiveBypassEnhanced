@@ -31,6 +31,8 @@ O motor de voz/vídeo do Discord é um binário WASM fechado. Uma reconexão do 
 
 Consequência prática: qualquer mecanismo que troque a saída ativa sem necessidade (heartbeat/RTT sendo "esperto" demais) é pior que não trocar. Isso é especialmente traiçoeiro com um proxy privado multiplexado (várias portas do mesmo servidor): o RTT entre portas é quase idêntico, então o filtro que deveria impedir troca por ruído (`SWAP_RESERVA_RAZAO`) quase nunca barra nada, e a "proteção" vira o próprio motivo da queda. Por isso `stockReserves`/`trySwapByRtt` ignoram saída manual — só a morte real (sem resposta em 2 batimentos) troca.
 
+**Rotação de circuito do Tor (issue #122):** o Tor renova circuitos a cada ~10 min (`MaxCircuitDirtiness`) e um SOCKS CONNECT durante a construção do circuito novo leva 5-30s (o `SocksTimeout` do Tor é 60s+). Por isso, no modo tor, o batimento é **informativo** (nunca derruba a saída única — falso negativo do probe de 4s era garantia de janela de recusa a cada rotação, com janelas de 30-57 min sem gateway no log da issue) e o relay do gateway usa `TOR_RELAY_TIMEOUT_MS` (30s), não o prazo de 2.5s pensado para gratuita. A morte real do daemon é detectada pelo `listening()` no `detectTor` (chamado do `refreshExit`) e pelo watchdog da GUI.
+
 ## 6. Dificuldades técnicas conhecidas
 - **EBUSY/EPERM no Windows:** o Electron (GUI) e o próprio Discord travam `app.asar` para leitura. A GUI usa `withNoAsar(fn)` (`process.noAsar = true`) para renomear/escrever `.asar` sem `EBUSY`.
 - **Encerramento seguro:** mexer no Discord com ele aberto quebra a instalação — é obrigatório matar todos os processos (`Discord.exe`, todas as *flavours*) antes de injetar ou desinjetar.
