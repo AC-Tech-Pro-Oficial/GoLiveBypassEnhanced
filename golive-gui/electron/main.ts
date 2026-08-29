@@ -203,7 +203,7 @@ function isPermissionError(e: any) {
  * nao existe. No Mac usamos wasOpenedAtLogin porque o openAsHidden morreu
  * no macOS 13 :( Nos dois casos sobe so o icone, sem abrir janela no login.
  */
-import { getStartup, setStartup, launchedHidden } from "./startup";
+import { getStartup, setStartup, launchedHidden, syncStartupEntry } from "./startup";
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -556,6 +556,11 @@ if (!gotLock) {
 
     // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
     if (!launchedHidden()) createWindow();
+    // Autostart: se a entrada de Run existe, garante que aponta para o exe ATUAL.
+    // O valor congela o caminho de quando o toggle foi ativado; portable renomeado/
+    // movido = boot falha em silencio com o checkbox marcado. Reescrever a cada
+    // abertura cura (reg add idempotente). (issue: "nao abre mesmo ativando")
+    syncStartupEntry();
     // No KDE o watcher da bandeja (StatusNotifier) pode demorar a subir no login; esperar
     // evita o Tray cair para o GtkStatusIcon, que o Plasma 6 nao exibe.
     waitForStatusNotifier().then(createTray);

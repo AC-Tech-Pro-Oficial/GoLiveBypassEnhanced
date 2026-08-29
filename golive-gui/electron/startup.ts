@@ -176,6 +176,23 @@ export function getStartup(): boolean {
 }
 
 /**
+ * Reescreve a entrada de Run com o caminho ATUAL do exe, se a entrada existir.
+ *
+ * O valor da Run key congela o caminho de quando o usuario ativou o toggle — e o
+ * portable muda de lugar o tempo todo (baixa na Downloads, move para o Desktop,
+ * renomeia, o updater substitui). O Windows falha em SILENCIO quando o caminho do
+ * valor nao existe mais: o app simplesmente nao abre no boot, com o checkbox
+ * marcado — getStartup() so confere se a ENTRADA existe, nao se o caminho dela e
+ * valido. Rodar isto a cada abertura do app cura todos esses casos (um reg add
+ * idempotente, custo desprezivel) e devolve a flag --hidden se ela se perdeu.
+ */
+export function syncStartupEntry(): void {
+  if (!IS_WINDOWS) return;
+  if (!getStartup()) return;
+  setStartup(true);
+}
+
+/**
  * Detecta se o app foi iniciado pelo autostart (Run key no Windows,
  * openAsHidden do macOS, ou o .desktop do Linux). Usado para nao abrir a
  * janela visivel em boots automaticos -- o usuario so precisa do icone

@@ -1388,7 +1388,6 @@ Log notice stdout
 
 function Set-RunKey($exe, $torrc) {
     try {
-        $command = "`"$exe`" -f `"$torrc`""
         # ATENCAO: nada de "New-Item -Path <chave> -Force" aqui. No provider de
         # registro (diferente do de arquivos) o -Force numa chave que ja existe
         # APAGA a chave e recria vazia, levando junto todas as entradas de
@@ -1398,8 +1397,18 @@ function Set-RunKey($exe, $torrc) {
         if (-not (Test-Path -LiteralPath $key)) {
             New-Item -Path $key -Force | Out-Null
         }
+        # O tor.exe e binario CONSOLE: a Run key apontando direto para ele abre uma
+        # janela de terminal visivel a cada logon. O wrapper .vbs via wscript.exe
+        # (aplicacao GUI-subsystem) lanca o tor com janela 0 = invisivel, sem o
+        # flash de console.
+        $vbs = Join-Path (Split-Path -Parent $torrc) 'GoLiveBypassTor.vbs'
+        $inner = "`"$exe`" -f `"$torrc`"".Replace('"', '""')
+        # Unicode (UTF-16 com BOM): wscript detecta o BOM e le caminhos com acento
+        # que o ANSI do sistema nao representaria.
+        [System.IO.File]::WriteAllText($vbs, "CreateObject(`"WScript.Shell`").Run `"$inner`", 0, False", [System.Text.Encoding]::Unicode)
+        $command = "`"$env:SystemRoot\System32\wscript.exe`" `"$vbs`""
         Set-ItemProperty -Path $key -Name 'GoLiveBypassTor' -Value $command
-        Write-Ok 'Tor registrado para subir no proximo logon (GoLiveBypassTor).'
+        Write-Ok 'Tor registrado para subir no proximo logon, sem janela de terminal (GoLiveBypassTor).'
         return $true
     } catch {
         Write-Warn "Nao consegui registrar a inicializacao: $($_.Exception.Message)"
@@ -1414,6 +1423,10 @@ function Remove-Tor {
     try {
         $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
         Remove-ItemProperty -Path $key -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
+    } catch { }
+    # O wrapper invisivel que o Set-RunKey gravou ao lado do torrc tambem sai.
+    try {
+        Remove-Item -LiteralPath (Join-Path (Get-TorBaseDir) 'GoLiveBypassTor.vbs') -Force -ErrorAction SilentlyContinue
     } catch { }
 
     if (Test-Path -LiteralPath $exe) {

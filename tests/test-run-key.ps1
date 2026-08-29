@@ -107,8 +107,13 @@ function Test-SetRunKey($label, $path, $callArgs) {
     Assert-True ($names -contains 'GoLiveBypassTor') "$label grava GoLiveBypassTor"
     Assert-Equal (Get-ValueOrNull $ScratchKey 'Spotify') 'spotify.exe --autostart' `
         "$label nao altera o valor do vizinho Spotify"
-    Assert-True ((Get-ValueOrNull $ScratchKey 'GoLiveBypassTor') -like '*tor.exe*') `
-        "$label aponta GoLiveBypassTor para o tor.exe"
+    Assert-True ((Get-ValueOrNull $ScratchKey 'GoLiveBypassTor') -like '*wscript.exe*') `
+        "$label lanca o Tor via wscript (sem janela de terminal no logon)"
+    $vbsPath = Join-Path (Split-Path -Parent $TorTorrc) 'GoLiveBypassTor.vbs'
+    Assert-True (Test-Path -LiteralPath $vbsPath) "$label gera o wrapper .vbs invisivel"
+    $vbsContent = Get-Content -LiteralPath $vbsPath -Raw
+    Assert-True ($vbsContent -like '*tor.exe*') "$label vbs aponta para o tor.exe"
+    Assert-True ($vbsContent -like '*, 0, False*') "$label vbs lanca o tor com janela oculta"
 
     # 4. Chave ausente: ainda precisa ser criada (a intencao original do -Force).
     Reset-ScratchKey -Absent
@@ -127,6 +132,10 @@ Write-Host " Set-RunKey: regressao do startup do usuario" -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 
 try {
+    # O Set-RunKey agora grava o wrapper .vbs ao lado do torrc falso: a pasta de
+    # teste precisa existir para o WriteAllText nao falhar.
+    New-Item -ItemType Directory -Path 'C:\GoLiveBypassTest' -Force | Out-Null
+
     # Standalone: Set-RunKey sem parametros, le $TorExe/$TorTorrc do escopo.
     Test-SetRunKey 'Standalone' $standalonePath @()
 
@@ -134,6 +143,7 @@ try {
     Test-SetRunKey 'Instalador' $installerPath @($TorExe, $TorTorrc)
 } finally {
     Remove-Item -LiteralPath $ScratchRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'C:\GoLiveBypassTest' -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "`n========================================================" -ForegroundColor Cyan
