@@ -41,13 +41,23 @@ const ENTRY_NAME = "GoLiveBypass";
  * A variavel de ambiente `APPIMAGE` (definida pelo runtime do AppImage) guarda o
  * caminho real do .AppImage no disco, e e isso que o .desktop precisa usar.
  *
- * No Windows e macOS, `process.execPath` ja e o caminho certo (no portable, o
- * proprio .exe; no macOS, o app.asar/Contents/MacOS/GoLiveBypass).
+ * No Windows o portable NAO usa o process.execPath (veja realExecPath): ele aponta
+ * para a extracao temporaria. No macOS, o app.asar/Contents/MacOS/GoLiveBypass.
  */
 function realExecPath(): string {
   if (IS_LINUX) {
     const appImage = process.env.APPIMAGE;
     if (appImage && fs.existsSync(appImage)) return appImage;
+  }
+  // O portable do Windows se auto-extrai num dir %TEMP% aleatorio a CADA execucao:
+  // o process.execPath dentro do app e o exe EXTRAIDO. Gravar a Run key com ele
+  // morria quando o temp era limpo (Storage Sense/CCleaner) e apontava o boot para
+  // uma copia velha depois de update — o "nao abre mesmo ativando" dos usuarios do
+  // portable. O PORTABLE_EXECUTABLE_FILE e o exe ORIGINAL que o usuario rodou (o
+  // updater ja usa a mesma variavel para se substituir).
+  if (IS_WINDOWS && process.env.PORTABLE_EXECUTABLE_FILE &&
+      fs.existsSync(process.env.PORTABLE_EXECUTABLE_FILE)) {
+    return process.env.PORTABLE_EXECUTABLE_FILE;
   }
   return process.execPath;
 }
