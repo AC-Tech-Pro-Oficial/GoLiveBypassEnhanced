@@ -826,6 +826,11 @@ function clearBundleQuarantine(bundlePath: string | undefined) {
   }
 }
 
+// EBUSY persistente no rename/remove: o holder ou e um processo do Discord que
+// sobreviveu ao taskkill (helper desanexado, updater) ou renasceu entre a
+// checagem e a operacao. Esperar passivo nao solta handle de quem nunca vai
+// soltar — as primeiras tentativas re-matam o Discord; as ultimas so aguardam
+// o SO liberar (antivirus/indexador scanning o arquivo recem-fechado).
 async function safeRename(oldPath: string, newPath: string) {
   let lastError;
   for (let i = 0; i < 15; i++) {
@@ -840,6 +845,7 @@ async function safeRename(oldPath: string, newPath: string) {
         throw new Error(writeError(oldPath));
       }
       lastError = e;
+      if (i < 3) await killDiscord();
       await new Promise((r) => setTimeout(r, 500));
     }
   }
@@ -864,6 +870,7 @@ async function safeRemove(targetPath: string) {
         throw new Error(writeError(targetPath));
       }
       lastError = e;
+      if (i < 3) await killDiscord();
       await new Promise((r) => setTimeout(r, 500));
     }
   }
