@@ -170,6 +170,7 @@ export function montarMeta(
   statusBypass: string,
   torAtivo: boolean,
   torPorta: number | null,
+  routeModeDisco: string,
 ): Record<string, string> {
   return {
     versao: app.getVersion(),
@@ -178,6 +179,10 @@ export function montarMeta(
     node: process.versions.node ?? "?",
     locale: app.getLocale() || "?",
     modoRoteamento: netMode === "auto" ? "personalizado" : netMode === "free" ? "gratuitas" : "tor",
+    // O modo que o runtime VAI ler (settings.json no disco). Divergencia daqui com o
+    // modoRoteamento de cima = drift de configuracao (o cenario da issue #108, que
+    // dizia tor com o runtime rodando auto).
+    routeModeDisco: routeModeDisco === "" ? "ausente" : routeModeDisco,
     bypass: statusBypass.toLowerCase(),
     tor: torAtivo ? `ativo:${torPorta ?? "?"}` : "inativo",
     uptime_s: String(Math.round(process.uptime())),
@@ -191,6 +196,7 @@ export async function submitBugReport(
   payload: ReportPayload,
   ctx: {
     netMode: string;
+    routeModeDisco?: string;
     statusBypass: string;
     torAtivo: boolean;
     torPorta: number | null;
@@ -208,7 +214,7 @@ export async function submitBugReport(
     title,
     description: redigir(description, segredos, BUG_API_TOKEN),
     meta: {
-      ...montarMeta(ctx.netMode, ctx.statusBypass, ctx.torAtivo, ctx.torPorta),
+      ...montarMeta(ctx.netMode, ctx.statusBypass, ctx.torAtivo, ctx.torPorta, ctx.routeModeDisco ?? ""),
       // Flavours vistos na varredura (discord,vesktop,...) — mostra na hora se
       // um cliente paralelo foi achado ou se o report e de "nao achei o Vesktop".
       ...(ctx.installsFlavours ? { installs_flavours: ctx.installsFlavours } : {}),

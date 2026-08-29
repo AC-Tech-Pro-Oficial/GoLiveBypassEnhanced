@@ -1223,6 +1223,19 @@ function linuxStatus(): Promise<string> {
     });
 }
 
+// As ultimas linhas do stderr do script viram a mensagem de erro na UI. O ruido imutavel de
+// distro imutavel (Bluefin/Bazzite preenchem LD_PRELOAD da sessao: "ERROR: ld.so: object ...
+// cannot be preloaded" em cada filho) ocupava o fim do stderr e escondia o erro de verdade
+// (issue #108) -- filtrado aqui antes de qualquer tail.
+function tailErroScript(stderr: string, linhas: number): string {
+  const uteis = stderr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => !/^ERROR: ld\.so:/.test(l));
+  return uteis.slice(-linhas).join("\n");
+}
+
 async function linuxActivate(
   proxyAddress: string,
   onChunk: (c: string) => void,
@@ -1232,20 +1245,29 @@ async function linuxActivate(
   // que so copia o torAddr que JA estava salvo -- sem isto, o botao podia estar "liberado" (o
   // Tor da Electron provado numa porta) e o script ainda injetar apontando para a porta antiga,
   // travando o gateway para sempre com a UI dizendo "Tor pronto". E sem reconferir aqui, nada
-  // impede a ativacao de proceder com o Tor fora do ar: so o botao da tela travava, e um clique
+  // impedia a ativacao de proceder com o Tor fora do ar: so o botao da tela travava, e um clique
   // fora da tela (ou uma corrida de estado) passava direto.
-  if (readNetMode() === "tor") {
+  const netMode = readNetMode();
+  let torAddr = "";
+  if (netMode === "tor") {
     const tor = await garantirTor();
     if (!tor.ok) throw new Error(`Nao consegui preparar o Tor: ${tor.error ?? "erro desconhecido"}`);
-    saveTorAddr(`127.0.0.1:${tor.porta}`);
+    torAddr = `127.0.0.1:${tor.porta}`;
   }
+  // O modo que a GUI mostra TEM que chegar ao disco antes de injetar: o default virtual
+  // "tor" do readNetMode() nunca era gravado, o settings.json nascia sem routeMode e o
+  // runtime injetado voltava ao "auto" (pool gratuito) com o Tor de pe (issue #108).
+  updateSharedSettings(netMode === "tor" ? { routeMode: netMode, torAddr } : { routeMode: netMode });
 
-  const args = ["--yes"];
+  // O modo tambem viaja por argv: o script grava o que veio na flag por cima do arquivo,
+  // imune a escritor antigo/terceiro que regrave o settings.json sem a chave.
+  const args = ["--yes", "--net-mode", netMode];
+  if (torAddr !== "") args.push("--tor-addr", torAddr);
   if (proxyAddress.trim() !== "") args.push("--proxy", proxyAddress.trim());
   const { code, stderr } = await runScript(args, onChunk);
   if (code !== 0) {
     throw new Error(
-      stderr.split("\n").filter(Boolean).slice(-3).join("\n") ||
+      tailErroScript(stderr, 3) ||
         "Falha ao ativar",
     );
   }
@@ -1284,7 +1306,7 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
     // que o cliente estiver fechado. O erro vai inteiro para a UI (stderr cortado no fim da
     // linha), em vez dos ultimos 3 fragmentos que sumiam com altas linhas longas.
     throw new Error(
-      stderr.split("\n").map((l) => l.trim()).filter(Boolean).slice(-6).join("\n") ||
+      tailErroScript(stderr, 6) ||
         "Falha ao desativar (a elevacao provavelmente falhou)",
     );
   }
@@ -2037,50 +2059,56 @@ async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
   }
 }
 
-// Guardado fora da pasta do Discord de proposito: o settings.json que o bypass le vive dentro do
-// app.asar injetado, e esse some quando o bypass e desativado ou quando o Discord se atualiza.
-// A copia daqui e a configuracao da pessoa, e sobrevive aos dois.
-function saveProxy(proxy: string) {
+// Leitura do settings.json compartilhado (o MESMO arquivo que o runtime injetado le no
+// Linux). Objeto vazio quando nao existe ou e invalido -- mesmo contrato do runtime.
+function readSharedSettings(): Record<string, unknown> {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(settingsDir(), "settings.json"), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+// Escrita por merge no settings.json compartilhado, atomica (tmp + rename). TODAS as
+// preferencias da GUI que vivem nesse arquivo passam por aqui: um escritor parcial
+// (o saveTorAddr antigo criava o arquivo so com torAddr) apagava a routeMode e o
+// runtime injetado nascia "auto" enquanto a GUI mostrava Tor (issue #108).
+function updateSharedSettings(patch: Record<string, unknown>) {
   try {
     const dir = settingsDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, "settings.json");
-
-    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-    fs.writeFileSync(file, JSON.stringify({ ...atual, proxy }, null, 4));
+    const novo = { ...readSharedSettings(), ...patch };
+    // Tmp + rename: um crash no meio da escrita nao pode deixar um settings.json
+    // pela metade, senao o modo se perderia de novo por outro caminho.
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(novo, null, 4));
+    fs.renameSync(tmp, file);
   } catch (error) {
-    console.error("[settings] nao consegui salvar a proxy:", error);
+    console.error("[settings] nao consegui gravar o settings.json compartilhado:", error);
   }
+}
+
+// Guardado fora da pasta do Discord de proposito: o settings.json que o bypass le vive dentro do
+// app.asar injetado (Windows/macOS) ou vem daqui (Linux), e esse some quando o bypass e
+// desativado ou quando o Discord se atualiza. A copia daqui e a configuracao da pessoa, e
+// sobrevive aos dois.
+function saveProxy(proxy: string) {
+  updateSharedSettings({ proxy });
 }
 
 // Porta do Tor que o script standalone (Linux) deve usar. So chamada depois de garantirTor()
 // confirmar um tunel de verdade -- sem isto, torAddr no settings.json real fica preso na porta
 // de uma sessao anterior e o gateway trava esperando uma saida que nao existe mais.
 function saveTorAddr(addr: string) {
-  try {
-    const dir = settingsDir();
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "settings.json");
-    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-    fs.writeFileSync(file, JSON.stringify({ ...atual, torAddr: addr }, null, 4));
-  } catch (error) {
-    console.error("[settings] nao consegui salvar o endereco do Tor:", error);
-  }
+  updateSharedSettings({ torAddr: addr });
 }
 
 // Modo de rede escolhido (persistido no settings.json junto da proxy): "auto" | "tor" | "free".
 // "auto" com proxy preenchida = personalizado (o bypass usa a proxy do campo). O PADRAO e
 // "tor": o app baixa e usa o Tor sempre, para nunca cair no IP brasileiro.
 function saveNetMode(mode: string) {
-  try {
-    const dir = settingsDir();
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "settings.json");
-    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-    fs.writeFileSync(file, JSON.stringify({ ...atual, routeMode: mode }, null, 4));
-  } catch (error) {
-    console.error("[settings] nao consegui salvar o modo de rede:", error);
-  }
+  updateSharedSettings({ routeMode: mode });
 }
 
 function readNetMode(): string {
@@ -2102,15 +2130,7 @@ function readNetMode(): string {
 }
 
 export function saveAutoUpdate(enabled: boolean) {
-  try {
-    const dir = settingsDir();
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "settings.json");
-    const atual = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-    fs.writeFileSync(file, JSON.stringify({ ...atual, autoUpdate: enabled }, null, 4));
-  } catch (error) {
-    console.error("[settings] nao consegui salvar preferencia de atualizacao:", error);
-  }
+  updateSharedSettings({ autoUpdate: enabled });
 }
 
 export function readAutoUpdate(): boolean {
@@ -2850,6 +2870,11 @@ ipcMain.handle("get-proxy", () => {
 ipcMain.handle("report-bug", async (_event, payload: unknown) => {
   const p = (payload ?? {}) as { title?: string; description?: string; includeLogs?: boolean };
   const netMode = readNetMode();
+  // O modo que o runtime VAI ler (disco), nao so o do seletor: o bug report classico da
+  // issue #108 dizia "tor" com o settings.json sem routeMode e o runtime no "auto".
+  const routeModeDisco = typeof readSharedSettings().routeMode === "string"
+    ? String(readSharedSettings().routeMode)
+    : "";
   let statusBypass = "INACTIVE";
   try {
     statusBypass = IS_LINUX ? await linuxStatus() : getStatus();
@@ -2862,7 +2887,7 @@ ipcMain.handle("report-bug", async (_event, payload: unknown) => {
   } catch {}
   return submitBugReport(
     { title: String(p.title ?? ""), description: String(p.description ?? ""), includeLogs: !!p.includeLogs },
-    { netMode, statusBypass, torAtivo, torPorta, installsFlavours: ultimosFlavoursLinux },
+    { netMode, routeModeDisco, statusBypass, torAtivo, torPorta, installsFlavours: ultimosFlavoursLinux },
   );
 });
 

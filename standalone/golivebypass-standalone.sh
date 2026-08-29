@@ -9,6 +9,7 @@
 #
 # Uso:
 #   ./golivebypass-standalone.sh
+#   ./golivebypass-standalone.sh --net-mode tor --tor-addr 127.0.0.1:9050
 #   ./golivebypass-standalone.sh --proxy socks5://127.0.0.1:9050
 #   ./golivebypass-standalone.sh --uninstall
 #   ./golivebypass-standalone.sh --status
@@ -79,6 +80,11 @@ MODE="install"
 PROXY=""
 EXCLUDED="BR"
 TOR_MODE=0
+# Modo de rede passado por flag (--net-mode) e endereco do Tor (--tor-addr). Vazios =
+# sem flag; a GUI manda os dois em toda ativacao para o modo dela chegar ao settings.json
+# mesmo que um escritor antigo/terceiro o tenha regravado sem a chave (issue #108).
+NET_MODE=""
+TOR_ADDR_CLI=""
 ASSUME_YES=0
 JSON=0
 
@@ -487,17 +493,25 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --proxy) PROXY="${2:-}"; shift ;;
         --excluded-countries) EXCLUDED="${2:-BR}"; shift ;;
-        --tor) TOR_MODE=1 ;;
+        --net-mode) NET_MODE="${2:-}"; shift ;;
+        --tor-addr) TOR_ADDR_CLI="${2:-}"; shift ;;
+        # Acucar retrocompativel: o modo tor do proprio script, na porta dedicada.
+        --tor) TOR_MODE=1; NET_MODE="tor" ;;
         --uninstall) MODE="uninstall" ;;
         --restore) MODE="restore" ;;
         --status) MODE="status" ;;
         --json) JSON=1 ;;
         -y|--yes) ASSUME_YES=1 ;;
-        -h|--help) sed -n '3,14p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,15p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "Opcao desconhecida: $1" ;;
     esac
     shift
 done
+
+case "$NET_MODE" in
+    ""|auto|tor|free) ;;
+    *) fail "Valor invalido para --net-mode: $NET_MODE (use auto, tor ou free)" ;;
+esac
 
 # Em automacao (--yes) o report automatico nao deve spammar a API: quase sempre essas
 # rodadas sao de teste/CI. Usuario de verdade sem --yes reporta.
@@ -999,15 +1013,31 @@ install_patcher() {
 
     # O modo de rede (routeMode/torAddr) e escolhido no seletor da GUI e vive no mesmo
     # arquivo. Regravar sem essas chaves apagava a escolha A CADA ativacao: o runtime
-    # voltava ao "auto" em silencio enquanto a GUI seguia mostrando Tor.
-    local route_mode="" tor_addr=""
-    if [ "$TOR_MODE" -eq 1 ]; then
-        # --tor: aponta o bypass para o Tor que o proprio script instalou.
-        route_mode="tor"
-        tor_addr="127.0.0.1:$TOR_PORT"
-    elif [ -f "$INSTALL_DIR/settings.json" ]; then
+    # voltava ao "auto" em silencio enquanto a GUI seguia mostrando Tor (issue #108).
+    # Precedencia: flag (--net-mode/--tor-addr, a GUI manda sempre) > --tor/TUI > o que
+    # o arquivo ja tinha. Sem nenhuma das tres (CLI puro), o runtime usa o "auto" classico.
+    local route_mode="" tor_addr="" autoupdate=""
+    if [ -f "$INSTALL_DIR/settings.json" ]; then
         route_mode="$(sed -n 's/.*"routeMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
         tor_addr="$(sed -n 's/.*"torAddr"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
+        # autoUpdate e chave da GUI que vive NESTE arquivo: apagar = a preferencia de
+        # atualizacao da pessoa zerava a cada ativacao do bypass.
+        autoupdate="$(sed -n 's/.*"autoUpdate"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
+    fi
+    if [ -n "$NET_MODE" ]; then
+        route_mode="$NET_MODE"
+    elif [ "$TOR_MODE" -eq 1 ]; then
+        route_mode="tor"
+    fi
+    if [ -n "$TOR_ADDR_CLI" ]; then
+        tor_addr="$TOR_ADDR_CLI"
+    elif [ "$TOR_MODE" -eq 1 ]; then
+        # --tor: aponta o bypass para o Tor que o proprio script instalou.
+        tor_addr="127.0.0.1:$TOR_PORT"
+    elif [ "$route_mode" = "tor" ] && [ -z "$tor_addr" ]; then
+        # modo tor sem endereco em lugar nenhum: o unico Tor que este script garante
+        # de pe e o proprio (a GUI sempre manda --tor-addr, entao nao passa por aqui).
+        tor_addr="127.0.0.1:$TOR_PORT"
     fi
     local net_keys=""
     if [ -n "$route_mode" ]; then
@@ -1017,6 +1047,10 @@ install_patcher() {
     if [ -n "$tor_addr" ]; then
         net_keys="$net_keys,
     \"torAddr\": \"$tor_addr\""
+    fi
+    if [ -n "$autoupdate" ]; then
+        net_keys="$net_keys,
+    \"autoUpdate\": $autoupdate"
     fi
 
     cat > "$INSTALL_DIR/settings.json" <<JSON
@@ -1163,14 +1197,18 @@ EOF
 
 remove_tor() {
     # Desinstala o que este script criou. Nao apaga o binario (a GUI usa o mesmo).
+    # Os systemctl levam || true: a unit golivebypass-tor.service so existe se ESTE
+    # script instalou o Tor. Com um Tor do sistema (9050), "disable" sai com erro de
+    # "unit does not exist" e o set -eu abortava o --uninstall no meio (issue #108),
+    # com o ruido ld.so do stderr virando a mensagem de erro na GUI.
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl --user disable --now "$TOR_SERVICE" 2>/dev/null
+        systemctl --user disable --now "$TOR_SERVICE" 2>/dev/null || true
         rm -f "$HOME/.config/systemd/user/$TOR_SERVICE"
-        systemctl --user daemon-reload 2>/dev/null
+        systemctl --user daemon-reload 2>/dev/null || true
         if [ -f "/etc/systemd/system/$TOR_SERVICE" ]; then
-            sudo systemctl disable --now "$TOR_SERVICE" 2>/dev/null
+            sudo systemctl disable --now "$TOR_SERVICE" 2>/dev/null || true
             sudo rm -f "/etc/systemd/system/$TOR_SERVICE"
-            sudo systemctl daemon-reload 2>/dev/null
+            sudo systemctl daemon-reload 2>/dev/null || true
         fi
     fi
     rm -f "$HOME/.config/systemd/user/$TOR_SERVICE"
@@ -1399,7 +1437,15 @@ if [ "$MODE" = "status" ]; then
     if [ "$JSON" -eq 1 ]; then
         # Saida maquina para a GUI: um JSON com o estado de cada Discord encontrado.
         # Formato de cada linha do FOUND: path|flavour|detected_by|flatpak_id(opcional)
-        printf '{"discords":['
+        # routeMode/torAddr na raiz: o modo que o runtime VAI ler, para a GUI (e o bug
+        # report) compararem contra o modo do seletor e denunciar drift (issue #108).
+        settings_file="$INSTALL_DIR/settings.json"
+        route_mode_disk="" tor_addr_disk=""
+        if [ -f "$settings_file" ]; then
+            route_mode_disk="$(sed -n 's/.*"routeMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$settings_file" | head -1)"
+            tor_addr_disk="$(sed -n 's/.*"torAddr"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$settings_file" | head -1)"
+        fi
+        printf '{"routeMode":"%s","torAddr":"%s","discords":[' "$route_mode_disk" "$tor_addr_disk"
         first=1
         printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav detect id; do
             [ "$first" -eq 1 ] || printf ','
@@ -1489,15 +1535,18 @@ lista="$(mktemp)"
 tally="$(mktemp)"
 
 # Se entramos pela TUI (instalar sem flags), pergunta a rede antes de injetar.
-if [ "$MODE" = "install" ] && st_tui_is_interactive; then
+# Quem ja veio com o modo explicito (--net-mode ou --tor) nao e perguntado: a escolha
+# da flag vence. Toda opcao grava o modo no settings.json; deixar a chave de fora
+# fazia o runtime voltar ao "auto" (issue #108).
+if [ "$MODE" = "install" ] && [ -z "$NET_MODE" ] && st_tui_is_interactive; then
     st_net="$(st_tui_menu "Como o bypass vai sair?" \
         "Tor automatico (recomendado, baixa e sobe sozinho)" \
         "Proxy gratuita (escolhida e testada sozinha)" \
         "Proxy minha (socks5://host:porta)")"
     case "$st_net" in
-        2) PROXY="" ; TOR_MODE=0 ;;
-        3) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ;;
-        *) TOR_MODE=1 ;;
+        2) PROXY="" ; TOR_MODE=0 ; NET_MODE="free" ;;
+        3) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ; NET_MODE="auto" ;;
+        *) TOR_MODE=1 ; NET_MODE="tor" ;;
     esac
 fi
 
@@ -1525,9 +1574,10 @@ while IFS='|' read -r resources flav detect id; do
         confirm "Mesmo assim injetar em $id?" || { warn "Deixei como estava."; continue; }
     fi
 
-    # Com --tor, prepara o daemon antes de injetar: o settings.json aponta para ele e o
-    # gateway segura ate o Tor responder (o bypass nunca cai direto no modo tor).
-    if [ "$TOR_MODE" -eq 1 ] && ! ensure_tor; then
+    # Com modo tor do proprio script, prepara o daemon antes de injetar: o settings.json
+    # aponta para ele e o gateway segura ate o Tor responder (o bypass nunca cai direto
+    # no modo tor). Quem manda --tor-addr (a GUI) ja prove o Tor dela: nao instala.
+    if { [ "$TOR_MODE" -eq 1 ] || { [ "$NET_MODE" = "tor" ] && [ -z "$TOR_ADDR_CLI" ]; } } && ! ensure_tor; then
         warn "O Tor nao subiu. Nao vou instalar o standalone no modo tor; tente de novo ou use --proxy."
         printf '0\n' >> "$tally"
         continue

@@ -324,6 +324,12 @@ const TOR_ADDR = typeof settings.torAddr === "string" && settings.torAddr !== ""
     ? settings.torAddr
     : "127.0.0.1:9050";
 
+// Primeira linha do log: o modo EFETIVO que este runtime vai usar. Sem ela, um settings.json
+// regravado sem routeMode (escritor antigo, terceiro, versao anterior) deixava o runtime no
+// "auto" enquanto a GUI jurava tor -- e o log nao tinha como provar o contrario (issue #108).
+log("modo de roteamento: " + routeMode +
+    (typeof settings.routeMode === "string" ? " (settings.json)" : " (padrao: settings.json sem routeMode)"));
+
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
 // Agora suporta RANGE de portas para proxies multiplexados, ex: 10000-10050
@@ -615,7 +621,7 @@ function tlsHandshake(socket, host, timeoutMs) {
 // Prova o que interessa numa saida: o tunel negocia, o TLS fecha com certificado valido para o
 // Discord, e o Discord responde 200 por ela. Saida barrada por reputacao falha exatamente aqui,
 // que e o motivo de o teste nao ser contra um endereco qualquer.
-async function probe(proxy, timeoutMs) {
+async function probe(proxy, timeoutMs, torProbe) {
     const started = Date.now();
 
     // No modo "tor" o teste e feito contra o host que a saida REALMENTE vai carregar. O
@@ -625,15 +631,19 @@ async function probe(proxy, timeoutMs) {
     // ela nunca ia atender, e o modo tor ficava preso em "porta aberta mas nao respondeu como
     // proxy" com o Tor de pe e o gateway alcancavel (TLS ate gateway.discord.gg em ~600ms).
     //
-    // Aqui a prova e o handshake TLS ate o gateway: o /api/v9/gateway nao existe nesse host
-    // (ele e websocket), entao exigir HTTP 200 nao faria sentido. Um exit que fecha TLS com o
-    // gateway entrega o que precisamos.
-    const host = routeMode === "tor" ? ROUTED_HOSTS[0] : DISCORD_HOST;
+    // O mesmo vale para o detectTor nos modos auto/free (torProbe): sem isso, o probe HTTP
+    // contra discord.com reprovava um Tor do sistema perfeitamente saudavel e o "auto"
+    // ("Tor local se houver, senao gratuitas") caia direto no pool gratuito -- exatamente o
+    // cenario da issue #108. A prova e o handshake TLS ate o gateway: o /api/v9/gateway nao
+    // existe nesse host (ele e websocket), entao exigir HTTP 200 nao faria sentido. Um exit
+    // que fecha TLS com o gateway entrega o que precisamos.
+    const torHost = routeMode === "tor" || torProbe === true;
+    const host = torHost ? ROUTED_HOSTS[0] : DISCORD_HOST;
 
     const socket = await openTunnel(proxy, host, 443, timeoutMs);
     if (socket === null) return null;
 
-    if (routeMode === "tor") {
+    if (torHost) {
         if (!await tlsHandshake(socket, host, timeoutMs)) return null;
     } else {
         const response = await readOverTls(socket, host, "/api/v9/gateway", timeoutMs);
@@ -907,7 +917,9 @@ async function detectTor(probeTimeoutMs) {
         const proxy = "socks5://" + addr;
         const port = Number(addr.split(":")[1] || 0);
         if (!await listening(port, TOR_PORT_TIMEOUT_MS)) continue;
-        if (await probe(proxy, probeMs) === null) {
+        // torProbe: a prova e o TLS ate o gateway (Cloudflare recusa o HTTP de discord.com
+        // vindo de exit Tor, mesmo com o circuito saudavel -- ver comentario do probe).
+        if (await probe(proxy, probeMs, true) === null) {
             log("porta " + port + " esta aberta mas nao respondeu como proxy");
             continue;
         }

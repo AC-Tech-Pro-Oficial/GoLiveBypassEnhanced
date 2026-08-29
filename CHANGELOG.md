@@ -4,7 +4,7 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
-## [1.1.10] - Unreleased
+## [1.1.10] - 2026-08-29
 
 ### Adicionado
 - **Versão visível na UI**: número da versão agora aparece no header
@@ -47,6 +47,57 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   agora existe também no Windows.
 
 ### Corrigido
+- **Modo de roteamento da GUI era ignorado no Linux** (`routeMode` nunca
+  chegava ao runtime): o `readNetMode()` da GUI tem default **virtual**
+  `tor` — mostra Tor sem gravar nada — e o `linuxActivate` chamava o
+  script standalone só com `--yes`/`--proxy`, nunca passando o modo. O
+  `saveTorAddr()` criava o `settings.json` só com `torAddr` e o
+  `install_patcher` regravava o arquivo preservando `routeMode` só se já
+  existisse. Resultado: o runtime injetado nascia no default `auto` e, no
+  `auto`, o probe do Tor contra `discord.com` é recusado pela Cloudflare
+  (`tls alert handshake failure` com exit Tor), então `detectTor()`
+  falhava com o Tor saudável na 9050 e o bypass caía no pool de
+  **proxies gratuitas** — exatamente o log da
+  [#108](https://github.com/bezumiya/GoLiveBypass/issues/108) ("22
+  candidatas", saída `socks5://193.25.215.182`), com a GUI jurando que
+  estava em Tor. Agora, com defesa em profundidade: a GUI materializa
+  `routeMode`/`torAddr` no settings.json compartilhado **antes de toda
+  ativação** (escrita atômica por merge, `updateSharedSettings`, que
+  todas as preferências da GUI usam); o modo também viaja por argv
+  (`--net-mode`/`--tor-addr`, novos, com `--tor` retrocompatível) e o
+  script grava o que vier na flag por cima do arquivo — imune a escritor
+  antigo/terceiro que regrave o settings.json sem a chave. A TUI do
+  standalone também grava o modo explícito em toda escolha (a opção
+  "gratuitas" não gravava `routeMode: free` e o CLI puro herdava
+  `auto`). No runtime, o probe de um endereço Tor passou a provar o
+  túnel com handshake TLS até o gateway (`gateway.discord.gg`) em
+  qualquer modo — o que o `auto` prometia ("Tor local se houver") volta
+  a valer mesmo com a Cloudflare na frente. Observabilidade pra drift
+  futuro: a primeira linha do log do bypass agora diz o modo efetivo
+  (`modo de roteamento: tor (settings.json)`), o `--status --json`
+  reporta o `routeMode` do disco, e o bug report inclui
+  `routeModeDisco` (o modo que o runtime vai ler, não só o do seletor).
+  O fluxo Windows/macOS não muda (já materializava o modo dentro do
+  app.asar injetado). Fecha
+  [#108](https://github.com/bezumiya/GoLiveBypass/issues/108).
+- **Preferência "Avisar sobre atualizações" zerava a cada ativação no
+  Linux**: o `autoUpdate` da GUI vive no mesmo `settings.json`
+  compartilhado, e o heredoc do `install_patcher` regravava o arquivo
+  com um conjunto fixo de chaves, apagando a preferência. Agora a chave
+  é preservada na regravação (e o merge da GUI nunca mais escreve
+  subsets parciais).
+- **`--uninstall`/`--restore` abortavam no meio com Tor do sistema**: o
+  `remove_tor` rodava `systemctl --user disable --now
+  golivebypass-tor.service` sem `|| true` — quando a unit não existe
+  (o usuário usa o Tor da distro na 9050, não o embutido), o erro de
+  "unit does not exist" tripava o `set -eu` e o script saía com código
+  ≠ 0 antes do fim. A GUI recebia o erro e mostrava como mensagem as
+  últimas linhas do stderr — que eram o ruído inofensivo de
+  `LD_PRELOAD` (`ERROR: ld.so: ... cannot be preloaded`) típico de
+  distros imutáveis (Bluefin/Bazzite), o famoso `Error occurred in
+  handler for 'deactivate'`. Os `systemctl` agora toleram ausência da
+  unit, e a GUI filtra o ruído `ld.so` do stderr antes de compor a
+  mensagem de erro.
 - **`Set-RunKey` apagava todas as entradas de inicialização do usuário**: no
   provider de registro do PowerShell (ao contrário do de arquivos),
   `New-Item -Path <chave> -Force` numa chave que **já existe** apaga a chave e
