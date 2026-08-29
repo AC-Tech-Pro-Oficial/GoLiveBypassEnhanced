@@ -146,7 +146,10 @@ const appVersionEl = document.getElementById('appVersion');
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const autoUpdateToggle = document.getElementById('autoUpdateToggle') as HTMLInputElement | null;
-const themeBtn = document.getElementById('themeBtn') as HTMLButtonElement;
+const settingsBtn = document.getElementById('settingsBtn') as HTMLButtonElement | null;
+const settingsDialog = document.getElementById('settingsDialog') as HTMLElement | null;
+const settingsBackdrop = document.getElementById('settingsBackdrop') as HTMLElement | null;
+const settingsClose = document.getElementById('settingsClose') as HTMLButtonElement | null;
 
 let currentState = 'INACTIVE';
 
@@ -168,11 +171,40 @@ if ((import.meta as any).env?.DEV) {
 }
 
 // ---------------------------------------------------------------------------
-// Tema: botao alterna; inicia com o valor salvo.
+// Configurações: o botão de canto abre o dialog com tema + notificações de
+// update. O tema continua aplicando na hora (e avisando o main pro
+// titleBarOverlay); o toggle de update reusa o mesmo handler de sempre.
 // ---------------------------------------------------------------------------
-themeBtn.addEventListener('click', () => {
-  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
+function syncThemeOptions() {
+  const atual = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+  document.querySelectorAll<HTMLButtonElement>('.theme-opt').forEach((opt) => {
+    const ativo = opt.dataset.themeOpt === atual;
+    opt.classList.toggle('theme-opt--active', ativo);
+    opt.setAttribute('aria-checked', String(ativo));
+  });
+}
+
+function openSettingsDialog() {
+  if (!settingsDialog) return;
+  syncThemeOptions();
+  settingsDialog.hidden = false;
+  settingsClose?.focus();
+}
+
+function closeSettingsDialog() {
+  if (!settingsDialog) return;
+  settingsDialog.hidden = true;
+}
+
+settingsBtn?.addEventListener('click', openSettingsDialog);
+settingsBackdrop?.addEventListener('click', closeSettingsDialog);
+settingsClose?.addEventListener('click', closeSettingsDialog);
+
+document.querySelectorAll<HTMLButtonElement>('.theme-opt').forEach((opt) => {
+  opt.addEventListener('click', () => {
+    applyTheme(opt.dataset.themeOpt === 'light' ? 'light' : 'dark');
+    syncThemeOptions();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -718,6 +750,7 @@ bugBackdrop?.addEventListener('click', closeBugDialog);
 bugCancel?.addEventListener('click', closeBugDialog);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && bugDialog && !bugDialog.hidden) closeBugDialog();
+  if (e.key === 'Escape' && settingsDialog && !settingsDialog.hidden) closeSettingsDialog();
 });
 
 bugSubmit?.addEventListener('click', async () => {

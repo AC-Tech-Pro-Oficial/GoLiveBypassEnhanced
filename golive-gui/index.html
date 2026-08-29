@@ -92,43 +92,24 @@
         </a>
 
         <button
-          class="icon-btn theme-btn corner corner--tr"
-          id="themeBtn"
+          class="icon-btn settings-btn corner corner--tr"
+          id="settingsBtn"
           type="button"
-          aria-label="Alternar tema claro/escuro"
-          data-tip="Tema"
+          aria-label="Abrir configurações"
+          aria-haspopup="dialog"
+          data-tip="Configurações"
         >
           <svg
-            class="icon-moon"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            stroke-width="2"
+            stroke-width="1.8"
             stroke-linecap="round"
             stroke-linejoin="round"
             aria-hidden="true"
           >
-            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-          </svg>
-          <svg
-            class="icon-sun"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <circle cx="12" cy="12" r="4" />
-            <path d="M12 2v2" />
-            <path d="M12 20v2" />
-            <path d="m4.93 4.93 1.41 1.41" />
-            <path d="m17.66 17.66 1.41 1.41" />
-            <path d="M2 12h2" />
-            <path d="M20 12h2" />
-            <path d="m6.34 17.66-1.41 1.41" />
-            <path d="m19.07 4.93-1.41 1.41" />
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+            <circle cx="12" cy="12" r="3" />
           </svg>
         </button>
 
@@ -200,14 +181,6 @@
           <span id="startupLabel">Iniciar com o Windows</span>
         </label>
 
-        <label class="switch-row" id="autoUpdateRow">
-          <input type="checkbox" id="autoUpdateToggle" checked />
-          <span class="switch-track" aria-hidden="true">
-            <span class="switch-thumb"></span>
-          </span>
-          <span id="autoUpdateLabel">Avisar sobre atualizações</span>
-        </label>
-
         <div class="net-mode-group">
           <div
             class="segmented"
@@ -222,6 +195,7 @@
               role="radio"
               aria-checked="true"
             >
+              <span class="seg-badge seg-badge--reco" aria-hidden="true">recomendado</span>
               <span class="seg-label">Tor</span>
               <span class="seg-hint">sempre, baixa sozinho</span>
             </button>
@@ -232,6 +206,7 @@
               role="radio"
               aria-checked="false"
             >
+              <span class="seg-badge seg-badge--insta" aria-hidden="true">instável</span>
               <span class="seg-label">Gratuitas</span>
               <span class="seg-hint">proxies da lista</span>
             </button>
@@ -334,6 +309,55 @@
             >.
           </p>
         </footer>
+
+        <div id="settingsDialog" class="settings-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+          <div class="settings-dialog__backdrop" id="settingsBackdrop"></div>
+          <div class="settings-dialog__panel" role="document">
+            <h2 id="settingsTitle" class="settings-dialog__title">Configurações</h2>
+
+            <div class="settings-group">
+              <span class="settings-group__label" id="themeGroupLabel">Tema</span>
+              <div class="theme-opts" role="radiogroup" aria-labelledby="themeGroupLabel">
+                <button type="button" class="theme-opt" data-theme-opt="light" role="radio" aria-checked="false">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="4" />
+                    <path d="M12 2v2" />
+                    <path d="M12 20v2" />
+                    <path d="m4.93 4.93 1.41 1.41" />
+                    <path d="m17.66 17.66 1.41 1.41" />
+                    <path d="M2 12h2" />
+                    <path d="M20 12h2" />
+                    <path d="m6.34 17.66-1.41 1.41" />
+                    <path d="m19.07 4.93-1.41 1.41" />
+                  </svg>
+                  <span>Claro</span>
+                </button>
+                <button type="button" class="theme-opt" data-theme-opt="dark" role="radio" aria-checked="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+                  </svg>
+                  <span>Escuro</span>
+                </button>
+              </div>
+            </div>
+
+            <label class="switch-row" id="autoUpdateRow">
+              <input type="checkbox" id="autoUpdateToggle" checked />
+              <span class="switch-track" aria-hidden="true">
+                <span class="switch-thumb"></span>
+              </span>
+              <span id="autoUpdateLabel">Avisar sobre atualizações</span>
+            </label>
+            <p class="settings-dialog__hint">
+              Avisa quando sai uma versão nova do GoLiveBypass. Pode ser mudado de
+              novo a qualquer momento aqui.
+            </p>
+
+            <div class="settings-dialog__actions">
+              <button id="settingsClose" type="button" class="bug-btn bug-btn--primary">Fechar</button>
+            </div>
+          </div>
+        </div>
 
         <div id="bugDialog" class="bug-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="bugDialogTitle">
           <div class="bug-dialog__backdrop" id="bugBackdrop"></div>

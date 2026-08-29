@@ -380,12 +380,7 @@ html[data-theme='dark'] .page-ambient::before {
   fill: currentColor;
 }
 
-/* Botao de tema: sol / lua */
-.theme-btn svg.icon-moon { display: block; }
-.theme-btn svg.icon-sun { display: none; }
-
-html[data-theme='dark'] .theme-btn svg.icon-moon { display: none; }
-html[data-theme='dark'] .theme-btn svg.icon-sun { display: block; }
+/* Botao de configuracoes (canto superior): herda o visual do .icon-btn. */
 
 /* Botao de reportar bug (canto inferior esquerdo). Mesma forma e linguagem do
    botao de tema, com um acento de status (verde/ok) para se diferenciar como acao.
@@ -781,6 +776,7 @@ html[data-theme='dark'] .switch-row input:checked + .switch-track .switch-thumb 
 }
 
 .seg-btn {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -794,6 +790,31 @@ html[data-theme='dark'] .switch-row input:checked + .switch-track .switch-thumb 
   cursor: pointer;
   transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
 }
+
+/* Etiqueta flutuante no topo do botao (recomendado / instavel). Visual de
+   contorno: fundo da superficie, borda e texto na cor do semantico. */
+.seg-badge {
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2.5px 7px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.seg-badge--reco { color: var(--ok-ink); }
+.seg-badge--insta { color: var(--warn-ink); }
 
 .seg-btn:hover {
   color: var(--ink);
@@ -1377,6 +1398,110 @@ kbd {
   gap: 8px;
 }
 @keyframes bug-spin { to { transform: rotate(360deg); } }
+
+/* ------------------------------------------------------------
+   Dialog de configurações — tema claro/escuro + notificações de
+   atualização. Mesma gramática visual do dialog de bug: painel
+   flutuante com backdrop borrado.
+   ------------------------------------------------------------ */
+.settings-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+.settings-dialog__backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--overlay-bg);
+  backdrop-filter: blur(2px);
+}
+.settings-dialog__panel {
+  position: relative;
+  width: 100%;
+  max-width: 380px;
+  max-height: 92vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.22);
+  padding: 18px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: pop-in 200ms var(--ease);
+}
+.settings-dialog__title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink-strong);
+}
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-group__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+.theme-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.theme-opt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms var(--ease), border-color 150ms var(--ease),
+    color 150ms var(--ease);
+}
+.theme-opt svg {
+  width: 15px;
+  height: 15px;
+}
+.theme-opt:hover {
+  background: var(--surface-muted);
+  border-color: var(--ink-strong);
+}
+.theme-opt:focus-visible {
+  outline: 2px solid var(--ink-strong);
+  outline-offset: 2px;
+}
+.theme-opt--active {
+  border-color: var(--ink-strong);
+  background: color-mix(in srgb, var(--ink-strong) 10%, var(--canvas));
+  color: var(--ink-strong);
+}
+.settings-dialog__hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: -8px;
+}
+.settings-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
 
 .bug-success {
   display: flex;
