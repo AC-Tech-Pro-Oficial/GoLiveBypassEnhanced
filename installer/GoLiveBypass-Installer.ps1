@@ -689,7 +689,13 @@ function Get-PatchTargets {
     # pnpm inject --location, 'P' recebe a copia do asar do mod.
     $targets = @()
     foreach ($install in (Get-DiscordResources)) {
-        $targets += [pscustomobject]@{ Flavour = $install.Flavour; Resources = $install.Resources; Tipo = 'O' }
+        # Get-DiscordResources devolve STRINGS (caminhos de resources), nao objetos:
+        # .Flavour/.Resources numa string devolvem $null no PowerShell — a TUI de
+        # selecao mostrava checkboxes vazios e o Split-Path da injecao recebia nulo
+        # ("Nao e possivel associar o argumento ao parametro Path").
+        $resources = "$install"
+        $flavour = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $resources))
+        $targets += [pscustomobject]@{ Flavour = $flavour; Resources = $resources; Tipo = 'O' }
     }
     if ($env:LOCALAPPDATA) {
         foreach ($name in $ParallelNames) {

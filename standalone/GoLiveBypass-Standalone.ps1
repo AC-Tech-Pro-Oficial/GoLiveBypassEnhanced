@@ -520,7 +520,12 @@ function Get-PatchTargets {
     # seletor e para os loops de Install/Uninstall.
     $targets = @()
     foreach ($install in (Get-DiscordResources)) {
-        $targets += [pscustomobject]@{ Flavour = $install.Flavour; Resources = $install.Resources; Paralelo = $false }
+        # Get-DiscordResources devolve STRINGS (caminhos de resources), nao objetos:
+        # .Flavour/.Resources numa string devolvem $null no PowerShell — o seletor
+        # mostrava itens vazios e os loops de Install/Uninstall recebiam nulo.
+        $resources = "$install"
+        $flavour = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $resources))
+        $targets += [pscustomobject]@{ Flavour = $flavour; Resources = $resources; Paralelo = $false }
     }
     if ($env:LOCALAPPDATA) {
         foreach ($name in $ParallelNames) {
