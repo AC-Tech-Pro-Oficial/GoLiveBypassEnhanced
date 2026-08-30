@@ -78,6 +78,22 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   validação funcional ao vivo do `.ps1` numa VM Windows (5 cenários: mismatch detectado,
   sucesso normal, build realmente faltando, cliente desconhecido, e a checagem de mod).
 
+- **Aviso quando a proxy manual configurada está permanentemente quebrada**
+  ([#134](https://github.com/bezumiya/GoLiveBypass/issues/134), "loading infinito
+  mesmo dando control r"): com uma saída manual (`settings.proxy`) configurada
+  mas recusando a conexão em toda tentativa (visto no relato: SOCKS5 recusando
+  a autenticação, `etapa=auth`), o app já caía para Tor/gratuitas
+  automaticamente — mas sem avisar a pessoa, que ficava dando Ctrl+R e
+  reabrindo o Discord tentando "consertar" algo que só uma troca da própria
+  proxy resolveria. **Ctrl+R não ajuda nesse caso**: ele só recarrega a
+  página (renderer), não o processo principal onde o roteador roda — a
+  saída manual quebrada continua sendo a preferida a cada abertura nova.
+  Agora, depois de 2 falhas seguidas do probe em segundo plano, um banner
+  avisa que a proxy configurada não respondeu, que o app está usando uma
+  saída automática por baixo, e que reiniciar não resolve — é preciso
+  checar o endereço/usuário/senha em Configurações. Contador por processo
+  (uma resposta boa zera), banner uma vez só por sessão.
+
 ### Plugin Vencord/Equicord (`goLiveBypass/native.ts`)
 O plugin é uma implementação separada do bypass (não gerada a partir de
 `standalone/golivebypass.js`, arquitetura própria: patches de webpack +
@@ -129,6 +145,13 @@ infinito ao abrir" para o plugin (o padrão da issue #116 é sobre a corrida
 GUI×Discord no boot do Windows, que não existe da mesma forma aqui), não
 implementei um modo equivalente nesta rodada — adicionar um exigiria nova
 opção de settings e mudança maior na cadeia `pickExit`/`autoExit`.
+
+**Pendência da regra de sincronização (seção 4 do AGENTS.md):** o aviso de
+proxy manual quebrada da issue #134 (ver acima, nesta mesma versão) só foi
+implementado no standalone/GUI até agora — o plugin tem o mesmo padrão de
+falha silenciosa em `pickExit()` (loga em `history`/arquivo, nunca mostra
+`showToast`) e merece o mesmo aviso, adaptado ao mecanismo de toast dele.
+Não portado nesta rodada por escopo/tempo; fica para a próxima.
 
 ## [1.1.11] - 2026-08-29
 

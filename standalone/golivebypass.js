@@ -267,6 +267,21 @@ let reloading = false;         // single-flight
 // tentar de novo por conta propria (que pode demorar mais que so tentar na hora).
 let coldTorHoldSince = 0;
 
+// Falhas seguidas do probe da saida MANUAL (nao do trafego vivo -- so a checagem de fundo em
+// chooseExit). Uma falha isolada pode ser um blip; falhas repetidas em toda abertura sao o
+// padrao de credencial/endereco errado (ex.: SOCKS5 recusa a autenticacao) que nenhum retry
+// sozinho resolve -- e o "de Ctrl+R" que o projeto recomenda em outras issues NAO ajuda aqui,
+// porque Ctrl+R so recarrega o renderer (a pagina), nao o processo principal onde mora o
+// roteador: ele continua preferindo a mesma saida quebrada (issue: "loading infinito mesmo
+// dando control r" -- o usuario reabria o Discord varias vezes achando que ia resolver, e a
+// unica coisa que resolvia de verdade era o fallback automatico para o Tor, sem aviso nenhum
+// de que o problema era a PROXY configurada). Contador de PROCESSO, nao persistido: reabrir
+// o Discord comeca a contagem de novo, entao uma saida que voltou a funcionar nao carrega
+// alarme velho.
+let manualProxyFalhasSeguidas = 0;
+const MANUAL_PROXY_AVISO_LIMITE = 2;
+let manualProxyBannerMostrado = false;
+
 // Pasta estavel onde a GUI le os logs (sobrevive a updates do Discord e a
 // desativacao). Espelhar aqui e o que permite o report de bug pegar o log do
 // bypass mesmo depois de o app.asar injetado ser apagado.
@@ -1108,7 +1123,13 @@ async function chooseExit() {
         // o trafego vivo cai para reserva/cache/lista antes de ir direto.
         log("usando a saida que voce configurou: " + safeProxy(manual));
         probe(manual, 2500).then(ok => {
-            if (ok === null) log("a saida que voce configurou nao respondeu ao probe em segundo plano: " + safeProxy(manual));
+            if (ok === null) {
+                log("a saida que voce configurou nao respondeu ao probe em segundo plano: " + safeProxy(manual));
+                manualProxyFalhasSeguidas++;
+                if (manualProxyFalhasSeguidas >= MANUAL_PROXY_AVISO_LIMITE) showManualProxyFailedBanner();
+            } else {
+                manualProxyFalhasSeguidas = 0;
+            }
         });
         return manual;
     }
@@ -1561,6 +1582,75 @@ function hideTorBootBanner() {
     const script = "(function(){ var el = document.getElementById('golivebypass-tor-wait'); " +
         "if (el) { el.style.opacity = '0'; setTimeout(function(){ el.remove(); }, 250); } })();";
     win.webContents.executeJavaScript(script).catch(() => { });
+}
+
+// Prazo/intervalo de retentativa iguais aos do showTorBootBanner -- mesmo motivo: chooseExit()
+// roda em start(), antes de a janela do CLIENTE existir (o Discord mostra uma splash sem url
+// discord.com primeiro).
+const MANUAL_PROXY_BANNER_RETRY_MS = 1500;
+const MANUAL_PROXY_BANNER_MAX_WAIT_MS = 20_000;
+
+const MANUAL_PROXY_BANNER_TEXT = "GoLiveBypass: a proxy que voce configurou nao respondeu " +
+    "(varias vezes seguidas). Por enquanto o app esta usando uma saida automatica no lugar " +
+    "dela. Reiniciar o Discord (ou dar Ctrl+R) nao resolve isso -- confira o endereco, " +
+    "usuario e senha da proxy em Configuracoes.";
+
+// So uma vez por processo (a flag e checada aqui dentro, nao no chamador): chooseExit() so
+// chama isto depois do limite de falhas seguidas, mas o probe de fundo continua rodando a
+// cada abertura de conexao -- sem a flag, cada falha nova tentaria mostrar/empilhar o aviso
+// de novo.
+function showManualProxyFailedBanner(limiteMs) {
+    if (manualProxyBannerMostrado) return;
+
+    const win = clientWindow();
+    if (win === null) {
+        const limite = limiteMs !== undefined ? limiteMs : Date.now() + MANUAL_PROXY_BANNER_MAX_WAIT_MS;
+        if (Date.now() >= limite) return; // desiste; a janela nao apareceu a tempo
+        setTimeout(() => showManualProxyFailedBanner(limite), MANUAL_PROXY_BANNER_RETRY_MS);
+        return;
+    }
+
+    manualProxyBannerMostrado = true;
+
+    const script = "(function(){\n" +
+        "  var el = document.getElementById('golivebypass-manual-proxy-warn');\n" +
+        "  if (el) return;\n" +
+        "  el = document.createElement('div');\n" +
+        "  el.id = 'golivebypass-manual-proxy-warn';\n" +
+        "  el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;" +
+        "display:flex;align-items:flex-start;gap:10px;width:320px;" +
+        "background:#2b2d31;color:#f2f3f5;padding:14px 16px;border-radius:10px;" +
+        "border-left:4px solid #f0b232;" +
+        "font:13px/1.45 \"gg sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;" +
+        "box-shadow:0 8px 24px rgba(0,0,0,.45);" +
+        "opacity:0;transform:translateY(8px);transition:opacity .2s ease,transform .2s ease;';\n" +
+        "  var icon = document.createElement('div');\n" +
+        "  icon.textContent = '\u26A0\uFE0F';\n" +
+        "  icon.style.cssText = 'font-size:18px;line-height:1;flex-shrink:0;margin-top:1px;';\n" +
+        "  var body = document.createElement('div');\n" +
+        "  body.style.cssText = 'flex:1;min-width:0;';\n" +
+        "  var title = document.createElement('div');\n" +
+        "  title.textContent = 'GoLiveBypass';\n" +
+        "  title.style.cssText = 'font-weight:600;margin-bottom:3px;color:#fff;';\n" +
+        "  var text = document.createElement('div');\n" +
+        "  text.style.cssText = 'color:#d8dadf;';\n" +
+        "  text.textContent = " + JSON.stringify(MANUAL_PROXY_BANNER_TEXT) + ";\n" +
+        "  body.appendChild(title);\n" +
+        "  body.appendChild(text);\n" +
+        "  var closeBtn = document.createElement('div');\n" +
+        "  closeBtn.textContent = '\\u2715';\n" +
+        "  closeBtn.style.cssText = 'cursor:pointer;color:#949ba4;font-size:14px;flex-shrink:0;padding:2px;';\n" +
+        "  closeBtn.onmouseenter = function(){ closeBtn.style.color = '#f2f3f5'; };\n" +
+        "  closeBtn.onmouseleave = function(){ closeBtn.style.color = '#949ba4'; };\n" +
+        "  closeBtn.onclick = function(){ el.remove(); };\n" +
+        "  el.appendChild(icon);\n" +
+        "  el.appendChild(body);\n" +
+        "  el.appendChild(closeBtn);\n" +
+        "  document.body.appendChild(el);\n" +
+        "  requestAnimationFrame(function(){ el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });\n" +
+        "})();";
+
+    win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso de proxy manual: " + error.message));
 }
 
 // O Tor respondeu depois de um arranque frio (issue #116): a conexao de gateway que estava
