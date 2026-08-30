@@ -93,9 +93,22 @@ function Show-Banner {
     Write-Host ''
 }
 
+function Read-Escolha($prompt) {
+    # Console sem teclado (stdin com handle morto — o instalador lancado por
+    # atalho/automacao que nao abre console de verdade): o Read-Host explode
+    # dentro do FileStream com "Invalid handle. Parameter name: handle" — e a
+    # pessoa so ve um crash cru (issue #146). Mensagem com o que fazer; e
+    # ambiente de uso, nao bug, entao nao vira issue.
+    try {
+        return (Read-Host $prompt)
+    } catch {
+        throw 'Este console nao aceita entrada de teclado. Feche e rode o instalador de novo com duplo clique no GoLiveBypass-Installer.bat (ou de uma janela normal do PowerShell).'
+    }
+}
+
 function Confirm-Action($question) {
     if ($Yes) { return $true }
-    return (Read-Host "  $question [s/N]") -match '^[sSyY]'
+    return (Read-Escolha "  $question [s/N]") -match '^[sSyY]'
 }
 
 # =========================================================================== Report de bugs
@@ -204,6 +217,12 @@ function Invoke-SendAutoReport([string]$summary, [string]$extra = '', $ErrorReco
         $info = $ErrorRecord.InvocationInfo
         if ($info -and $info.ScriptLineNumber) {
             $desc += "`nlinha do script: $($info.ScriptLineNumber): $($info.Line.Trim())"
+        } elseif ($ErrorRecord.ScriptStackTrace) {
+            # Excecao .NET surfada pelo pipeline as vezes chega sem InvocationInfo
+            # util (#136: DriveNotFoundException sem linha nenhuma no relato). O
+            # ScriptStackTrace e preenchido sempre que existe frame de script.
+            $pilha = ($ErrorRecord.ScriptStackTrace -split "`n" | Select-Object -First 2) -join ' | '
+            $desc += "`npilha: " + $pilha
         }
     }
     Invoke-BugReport $summary $desc $tail (Get-ReportMeta $ErrorRecord)
@@ -216,6 +235,8 @@ function Invoke-SendAutoReport([string]$summary, [string]$extra = '', $ErrorReco
 function Test-ShouldReport([string]$msg) {
     # cancelamento e instrucoes de uso
     if ($msg -eq 'Cancelado.') { return $false }
+    # console sem teclado (issue #146): ambiente de uso, o aviso ja diz o que fazer
+    if ($msg -like '*Este console nao aceita entrada de teclado*') { return $false }
     # Cancelamento via Ctrl+C no Read-Host: PowerShell lanca a mensagem nativa
     # "Esse comando nao pode ser executado devido ao erro: A operacao foi cancelada
     # pelo usuario." (PT-BR) / "This command cannot be executed ... The operation
@@ -724,7 +745,8 @@ function Get-PatchTargets {
         # .Flavour/.Resources numa string devolvem $null no PowerShell — a TUI de
         # selecao mostrava checkboxes vazios e o Split-Path da injecao recebia nulo
         # ("Nao e possivel associar o argumento ao parametro Path").
-        $resources = "$install"
+        $resources = [string]$install
+        if (-not $resources.Trim()) { continue }
         $flavour = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $resources))
         $targets += [pscustomobject]@{ Flavour = $flavour; Resources = $resources; Tipo = 'O' }
     }
@@ -747,6 +769,17 @@ function Get-PatchTargets {
                     break
                 }
             }
+        }
+    }
+    # Defesa em profundidade (#136): um alvo com Resources vazio ou nao-string,
+    # usado como path la na frente, virava o DriveNotFoundException
+    # "A drive with the name '@{Flavour=Discord; Resources=C' does not exist" —
+    # o PowerShell entende o trecho antes do ":" como nome de drive. Nunca deve
+    # acontecer; se acontecer, para AQUI com o motivo na mesa em vez de explodir
+    # longe da causa.
+    foreach ($t in $targets) {
+        if (-not $t.Resources -or -not ($t.Resources -is [string]) -or -not $t.Resources.Trim()) {
+            throw "Alvo de injecao nasceu sem caminho (Flavour='$($t.Flavour)'). Bug do instalador — reporte com este print."
         }
     }
     return $targets
@@ -858,7 +891,7 @@ function Show-ModChoice {
     Write-Host '    [0] Cancelar' -ForegroundColor Gray
     Write-Host ''
 
-    switch (Read-Host '  Escolha') {
+    switch (Read-Escolha '  Escolha') {
         '1' { return 'Equicord' }
         '2' { return 'Vencord' }
         default { throw 'Cancelado.' }
@@ -1316,7 +1349,7 @@ function Select-Target($root) {
     Write-Host '    [2] Baixar e usar outro (Equicord ou Vencord)' -ForegroundColor Cyan
     Write-Host ''
 
-    switch (Read-Host '  Escolha') {
+    switch (Read-Escolha '  Escolha') {
         '2' { return (Install-Mod (Show-ModChoice)) }
         default { return $root }
     }
@@ -1558,7 +1591,7 @@ function Select-Proxy {
     Write-Host '        Voce informa o endereco, no formato socks5://host:porta.' -ForegroundColor DarkGray
     Write-Host ''
 
-    switch (Read-Host '  Escolha') {
+    switch (Read-Escolha '  Escolha') {
         '2' {
             if (-not (Install-Tor)) {
                 Write-Warn 'Nao deu para preparar o Tor. Seguindo com proxy gratuita.'
@@ -1569,7 +1602,7 @@ function Select-Proxy {
         '3' {
             Write-Host '  Se a sua proxy pedir login, use socks5://usuario:senha@host:porta' -ForegroundColor DarkGray
             Write-Host '  Senha com @ ou : precisa vir codificada (@ vira %40, : vira %3A)' -ForegroundColor DarkGray
-            $manual = (Read-Host '  Endereco da proxy').Trim()
+            $manual = (Read-Escolha '  Endereco da proxy').Trim()
             # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
             # : codificados. Recusar isso aqui deixaria o suporte a login existindo so no plugin.
             if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
@@ -1601,7 +1634,7 @@ function Select-Persistence {
     Write-Host '        Vale so nesta sessao. Quando voce fechar o Discord, a injecao e desfeita.' -ForegroundColor DarkGray
     Write-Host ''
 
-    return (Read-Host '  Escolha') -ne '2'
+    return (Read-Escolha '  Escolha') -ne '2'
 }
 
 function Wait-DiscordExit($root) {
@@ -1688,7 +1721,7 @@ function Show-MainMenu {
     Write-Host '    [0] Sair' -ForegroundColor Gray
     Write-Host ''
 
-    switch (Read-Host '  Escolha') {
+    switch (Read-Escolha '  Escolha') {
         '1' { Invoke-Install $root }
         '2' { Invoke-Uninstall }
         '3' { Invoke-RestoreEverything }
@@ -1852,7 +1885,7 @@ function Invoke-Update {
         if ($cmp -eq 1) {
             Write-Warn "Versao local (v$installed) e mais nova que a release (v$($release.Tag))."
             if (-not $Yes -and $Host.UI.RawUI) {
-                $ans = Read-Host "  Atualizar mesmo assim? (S/N)"
+                $ans = Read-Escolha "  Atualizar mesmo assim? (S/N)"
                 if ($ans -ne 'S' -and $ans -ne 's') { Write-Warn 'Atualizacao cancelada.'; return }
             }
         }

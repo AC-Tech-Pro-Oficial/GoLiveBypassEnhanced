@@ -76,6 +76,26 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   failed".
 
 ### Corrigido
+- **Instalador crashava com "Invalid handle. Parameter name: handle" ao perguntar no
+  console** ([#146](https://github.com/bezumiya/GoLiveBypass/issues/146)): quando o
+  instalador é lançado por um caminho que não abre console de verdade (atalho,
+  automação, wrapper), o `Read-Host` do menu explode dentro do `FileStream` com um
+  handle de stdin morto — crash cru, sem dizer nada. Todos os prompts (menus de
+  escolha, proxy, persistência, update) agora passam por um `Read-Escolha` que
+  converte o crash em uma mensagem com o que fazer ("rode de novo com duplo clique
+  no .bat ou de uma janela normal do PowerShell"). É ambiente de uso, não bug — o
+  aviso não abre issue automática (`Test-ShouldReport`).
+- **Instalador: alvo de injeção sem caminho virava `DriveNotFoundException`
+  críptico** ([#136](https://github.com/bezumiya/GoLiveBypass/issues/136), "Cannot
+  find drive. A drive with the name '@{Flavour=Discord; Resources=C' does not
+  exist"): um alvo cujo `Resources` não é string, usado como path, faz o PowerShell
+  entender o trecho antes do `:` como nome de drive. Não reproduziu no código atual
+  (verificado na VM Windows com pipeline completo e dois alvos falsos), então é
+  ciclo velho ou estado de máquina — mas a classe morreu: `Get-PatchTargets` agora
+  coerciona para string, descarta caminho vazio e valida todos os alvos antes de
+  devolver (parando na causa, longe do sintoma). E o relato automático ganhou
+  `ScriptStackTrace` quando o `InvocationInfo` não traz linha — a próxima ocorrência
+  chega com a pilha exata em vez de vir sem localização nenhuma.
 - **Auto-update do Windows portable não funcionava — nunca** ([#135](https://github.com/bezumiya/GoLiveBypass/issues/135),
   "Auto-update não funciona"): o popup aparecia, o download e a conferência de
   digest passavam, e a instalação morria sempre em "não consegui substituir o
