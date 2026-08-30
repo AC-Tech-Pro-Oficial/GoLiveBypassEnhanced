@@ -54,3 +54,13 @@ Consequência prática: qualquer mecanismo que troque a saída ativa sem necessi
 Se o projeto estiver usando um VM com `3proxy` para oferecer portas SOCKS5 multiplexadas (ex.: range `10000-10050`), confira sempre:
 - `auth strong` + `users` **precisa** de uma linha `allow <usuario>` depois — sem ela o 3proxy aceita qualquer usuário/senha (proxy aberto), mesmo com `auth strong` configurado.
 - `bandlimin`/`bandlimout` no 3proxy são compartilhados por todas as conexões do mesmo usuário (não é por conexão) — mas como só o gateway (sinalização, tráfego mínimo) passa pelo proxy, isso raramente é o gargalo real.
+
+## 9. Releases: versões beta NUNCA viram release no GitHub (regra permanente)
+Versões de teste (qualquer versão com sufixo de prerelease, ex.: `1.1.12-beta.X`) **não são publicadas como GitHub Release** — nem `--publish always`, nem como prerelease marcada. Motivo: o auto-update consulta `/releases/latest`, que devolve a release mais recente **não-prerelease**; uma beta publicada vira "latest" e o popup de atualização dispara para a base inteira, cujo updater nas versões antigas pode estar quebrado (o "clico e nada acontece" vira spam em massa — foi exatamente o risco criado na beta.3, publicada por engano em 30/08/2026 e retirada em seguida).
+
+Fluxo correto de beta:
+1. Bump da versão no `golive-gui/package.json` (ex.: `1.1.12-beta.3`).
+2. Build local (`npm run build:win` — precisa de Windows/wine) **ou** pegar o artefato de uma execução do `build-gui.yml` e **não publicar**.
+3. Entregar o instalador diretamente ao testador (Discord, e-mail etc).
+
+Release no GitHub só quando a versão é candidata a estável (sem sufixo), via tag + `workflow_dispatch` do `build-gui.yml`.
