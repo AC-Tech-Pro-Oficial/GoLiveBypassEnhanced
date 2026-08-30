@@ -107,6 +107,31 @@ $script:BugApiToken = 'c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e5080
 
 function Invoke-BugReport([string]$title, [string]$description, [string]$log = '', [hashtable]$meta = @{}) {
     if ($Yes) { return }  # automacao: nao spammar a API
+    # Dedupe: o mesmo erro NAO reabre issue. Os 3 reports duplos da 1.1.11
+    # (issues 124-126) vieram daqui: cada rodada do mesmo bug abria issue nova.
+    # Assinatura = titulo + primeira linha da descricao, com data; janela de 48h.
+    try {
+        $primeiraLinha = ($description -split "`n" | Select-Object -First 1)
+        if ($primeiraLinha.Length -gt 300) { $primeiraLinha = $primeiraLinha.Substring(0, 300) }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("$title|$primeiraLinha"))) -replace '-', '').Substring(0, 16)
+        $sha.Dispose()
+        $stateFile = Join-Path (Get-EffectiveLocalApp) 'GoLiveBypass\.last-report'
+        if (Test-Path -LiteralPath $stateFile) {
+            $campos = @((Get-Content -LiteralPath $stateFile -First 1) -split ' ')
+            if ($campos.Count -ge 2 -and $campos[0] -eq $hash) {
+                try {
+                    $ultimo = [datetime]::ParseExact($campos[1], 'yyyyMMddHHmm', [Globalization.CultureInfo]::InvariantCulture)
+                    if (((Get-Date) - $ultimo).TotalHours -lt 48) {
+                        Write-Host '  [i] Esse erro ja foi reportado a menos de 48h — nao vou reabrir a issue.' -ForegroundColor DarkGray
+                        return
+                    }
+                } catch { }
+            }
+        }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $stateFile) -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-Content -LiteralPath $stateFile -Value "$hash $(Get-Date -Format 'yyyyMMddHHmm')" -ErrorAction SilentlyContinue
+    } catch { }
     $desc = Invoke-SanitizeBug $description
     # Mesma forma do payload da GUI (golive-gui/electron/bugreport.ts): {title,
     # description, log, meta}. O formato antigo (includeLogs) nunca foi lido pela
@@ -174,6 +199,12 @@ function Invoke-SendAutoReport([string]$summary, [string]$extra = '', $ErrorReco
         } catch { }
         $desc += "`n`nexcecao: " + $ErrorRecord.Exception.GetType().FullName
         if ($frame) { $desc += "`nframe: " + $frame }
+        # A LINHA do script: sem ela um "Invalid handle" de FileStream nao diz nada
+        # (issue #127). O catch do instalador mostra no console; o report so via aqui.
+        $info = $ErrorRecord.InvocationInfo
+        if ($info -and $info.ScriptLineNumber) {
+            $desc += "`nlinha do script: $($info.ScriptLineNumber): $($info.Line.Trim())"
+        }
     }
     Invoke-BugReport $summary $desc $tail (Get-ReportMeta $ErrorRecord)
 }

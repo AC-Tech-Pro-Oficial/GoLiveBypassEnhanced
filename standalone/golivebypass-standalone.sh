@@ -187,6 +187,27 @@ report_sanitize() {
 # Envia o report para a API. Devolve 0 em caso de sucesso (issue aberta).
 report_send() {
     local titulo="$1" descricao="$2"
+
+    # Dedupe: o mesmo erro NAO reabre issue (os reports duplos da 1.1.11 vieram
+    # daqui — cada rodada do mesmo bug abria issue nova). Assinatura = titulo,
+    # guardada com epoch em INSTALL_DIR/.last-report; janela de 48h.
+    local sig state ultimo data
+    sig="$(printf '%s' "$titulo" | sha256sum 2>/dev/null | cut -c1-16)"
+    state="$INSTALL_DIR/.last-report"
+    if [ -n "$sig" ] && [ -f "$state" ]; then
+        ultimo=""; data=0
+        read -r ultimo data < "$state" 2>/dev/null || true
+        case "$data" in ''|*[!0-9]*) data=0 ;; esac
+        if [ "$ultimo" = "$sig" ] && [ $(( $(date +%s) - data )) -lt 172800 ]; then
+            printf '  %s[i]%s Esse erro ja foi reportado a menos de 48h — nao vou reabrir a issue.\n' "$C_DIM" "$C_OFF" >&2
+            return 0
+        fi
+    fi
+    if [ -n "$sig" ]; then
+        mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+        printf '%s %s\n' "$sig" "$(date +%s)" > "$state" 2>/dev/null || true
+    fi
+
     local corpo
     corpo="$(report_sanitize "$descricao")"
     # JSON minimo: title, description, includeLogs
