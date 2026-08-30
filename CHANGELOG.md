@@ -4,6 +4,21 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [1.1.12] - Unreleased
+
+### Adicionado
+- **Mitigação do "RTC connecting" eterno após instabilidade do Tor** (beta:
+  [#129](https://github.com/bezumiya/GoLiveBypass/issues/129),
+  [#131](https://github.com/bezumiya/GoLiveBypass/issues/131)): quando o
+  gateway reconecta **sem chamada/transmissão nos últimos 5 min**, a janela
+  do Discord é recarregada proativamente (após provar que a saída está
+  entregando) — o motor de vídeo renasce limpo em vez de travar na próxima
+  tentativa de Go Live. Com chamada em andamento continua só o banner manual
+  (reload encerraria a call). Máximo de 1 reload a cada 3 min.
+- **Singleton do `garantirTor`**: chamadas concorrentes (boot + janela)
+  spawnavam dois `tor.exe` — um perdia a porta e morria com "Reading config
+  failed".
+
 ## [1.1.11] - 2026-08-29
 
 Hotfix de estabilidade do ciclo 1.1.10: o bypass agora **sobrevive ao reboot**
