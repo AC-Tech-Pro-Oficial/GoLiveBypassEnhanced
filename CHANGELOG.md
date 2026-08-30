@@ -4,6 +4,75 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [1.1.11] - 2026-08-29
+
+Hotfix de estabilidade do ciclo 1.1.10: o bypass agora **sobrevive ao reboot**
+de verdade (sem botão verde de novo), o Tor não derruba mais o gateway nas
+rotações de circuito, e os instaladores de linha de comando voltam a
+funcionar de ponta a ponta.
+
+### Adicionado
+- **Re-injeção automática no boot (`autoInject`)**: uma flag gravada nas
+  configurações lembra que o bypass estava ativo. No boot, se a injeção não
+  estiver no disco (o quit limpo a restaura), a GUI reativa sozinha — sem
+  esperar o clique no botão verde. Zerada apenas quando o usuário desativa
+  explicitamente. No modo tor, espera o daemon subir antes de injetar.
+- **`diagnostico.ps1`**: coletor de boot/autostart para o Windows (somente
+  leitura, proxy nunca impressa): Run key com detecção de caminho morto,
+  tarefas agendadas, processos/portas, tails de log, eventos de erro, AV de
+  terceiros e estado de injeção. Salva um `.txt` no Desktop para o suporte.
+- **`COMO-INSTALAR.md` dentro do zip do plugin**: o `goLiveBypass-vencord.zip`
+  sai com as instruções junto dos 3 arquivos fonte, e o card de conflito da
+  GUI + os avisos dos CLIs apontam para o tutorial completo do README.
+
+### Corrigido
+- **O bypass apagava a si mesmo a cada reboot**: o `revertOrphanedInjection`
+  revertia a injeção NOSSA e INTACTA sempre que o PC desligava sem quit
+  limpo — no Windows ela é autocontida (stub + patcher + settings dentro do
+  asar) e funcionava sozinha. Agora só reverte quando os arquivos internos
+  quebrarem de verdade; no Linux ela persiste enquanto o patcher existir no
+  `INSTALL_DIR`.
+- **Trocar de modo no seletor não chegava ao runtime no Windows**
+  ([#121](https://github.com/bezumiya/GoLiveBypass/issues/121)): o
+  settings.json dentro do asar só era reescrito na ATIVAÇÃO — o bypass
+  rodava no modo velho atravessando reinícios do Discord, e com a lista
+  gratuita morta o fallback varria só as portas clássicas do Tor e perdia o
+  daemon da GUI na 9060 (gateway direto, IP BR). Agora a troca reescreve a
+  injeção na hora (com aviso de que vale no próximo start) e o fallback
+  começa pelo `torAddr` gravado.
+- **Rotação de circuito do Tor derrubava o gateway no modo tor**
+  ([#122](https://github.com/bezumiya/GoLiveBypass/issues/122)): o batimento
+  de 4s marcava a saída única como morta durante a construção do circuito
+  novo (5-30s) e o relay abortava em 2.5s — janelas de minutos (no log do
+  relato, 30 e 57 min) sem gateway. Batimento agora é informativo no modo
+  tor e o relay usa 30s, atravessando a construção do circuito.
+- **EBUSY ao ativar com o Discord recém-fechado**: o retry do
+  rename/remove era passivo — handle de processo vivo não some com espera.
+  As primeiras tentativas re-executam o kill do Discord; as demais aguardam
+  o SO liberar (antivírus/indexador).
+- **Autostart do Windows quebrado para usuários do portable**: a Run key era
+  gravada com o exe EXTRAÍDO do `%TEMP%` (o portable se auto-extrai a cada
+  execução) — limpou o temp, o boot falhava em silêncio com o checkbox
+  marcado. Agora grava o exe original (`PORTABLE_EXECUTABLE_FILE`) e se
+  auto-cura a cada abertura. O Tor do logon também não abre mais janela de
+  terminal (wrapper VBS via wscript).
+- **Seletor de Discords com checkboxes vazios e injeção com `Path` nulo** no
+  instalador: `Get-PatchTargets` tratava strings como objetos (`.Flavour`
+  dava `$null`) — e uma regressão minha stringificou os objetos do
+  standalone, que já estavam certos. Ambos restaurados com o formato certo
+  de cada `Get-DiscordResources`.
+- **Instalação nova pela linha de comando falhava no injector**: o
+  `--location` mandava `...\Discord\app-1.0.x` ao instalador do
+  Vencord/Equicord, que espera a raiz (`...\Discord`) — o `.sh` do Linux já
+  mandava certo. Relato de usuário com o print do
+  `EquilotlCli` rejeitando o caminho.
+- **Falha de injeção sem detalhe** ([#120](https://github.com/bezumiya/GoLiveBypass/issues/120)):
+  o "Falha ao injetar em algum dos Discords escolhidos" agora carrega o
+  alvo e o código de saída no relato automático.
+- **Bug report mentia o modo no Windows**: `routeModeDisco` lia a
+  preferência da GUI, não o que o runtime vai ler (o settings dentro do
+  asar injetado) — divergência GUI×runtime agora é visível no relato.
+
 ## [1.1.10] - 2026-08-29
 
 ### Adicionado
