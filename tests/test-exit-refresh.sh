@@ -118,6 +118,16 @@ const sandbox = {
 sandbox.module.exports = sandbox.exports;
 sandbox.global = sandbox;
 vm.createContext(sandbox);
+// injectorPath do bypass e' process.argv[1] || require.main.filename -- desde que o argv[1]
+// passou a ser a fonte confiavel para clientes paralelos (Vesktop/Equibop/Legcord), o
+// sandboxRequire.main sozinho parou de bastar (o argv[1] REAL do processo host, ex.:
+// /helpers/heartbeat-test.js, vence o "||" e o bypass procura o _app.asar na raiz do
+// filesystem). Sem sobrescrever o argv aqui tambem, o require(asarPath + "/package.json")
+// falha com MODULE_NOT_FOUND antes de qualquer teste rodar.
+Object.defineProperty(sandbox.process, "argv", {
+  value: ["node", "/tmp/discord-fake/resources/app.asar/index.js"],
+  writable: false,
+});
 vm.runInContext(code, sandbox, { filename: BYPASS });
 
 const g = sandbox;

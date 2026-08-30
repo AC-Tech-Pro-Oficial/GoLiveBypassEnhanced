@@ -82,6 +82,16 @@ const sandbox = {
 sandbox.module.exports = sandbox.exports;
 sandbox.global = sandbox;
 vm.createContext(sandbox);
+// injectorPath do bypass e' process.argv[1] || require.main.filename -- desde que o argv[1]
+// passou a ser a fonte confiavel para clientes paralelos (Vesktop/Equibop/Legcord), o
+// sandboxRequire.main sozinho parou de bastar (o argv[1] REAL do processo host, ex.:
+// /helpers/heartbeat-test.js, vence o "||" e o bypass procura o _app.asar na raiz do
+// filesystem). Sem sobrescrever o argv aqui tambem, o require(asarPath + "/package.json")
+// falha com MODULE_NOT_FOUND antes de qualquer teste rodar.
+Object.defineProperty(sandbox.process, "argv", {
+  value: ["node", "/tmp/discord-fake/resources/app.asar/index.js"],
+  writable: false,
+});
 vm.runInContext(code, sandbox, { filename: BYPASS });
 
 const g = sandbox;
@@ -156,7 +166,9 @@ async function main() {
   else bad("2b. pote", JSON.stringify(s.pool));
   if (s.missed.some(([p, n]) => p === A && n === 1)) ok("2c. o erro ficou marcado");
   else bad("2c. marca", JSON.stringify(s.missed));
-  if (logs.some(l => l.includes("perdeu o batimento, assumindo a reserva"))) ok("2d. a troca foi registrada");
+  // O log mudou de uma linha inline para o formato estruturado do trocarPara() compartilhado
+  // ("saida.trocada | de=... para=... motivo=..."); o motivo continua o mesmo texto.
+  if (logs.some(l => l.includes("saida.trocada") && l.includes("motivo=perdeu o batimento"))) ok("2d. a troca foi registrada");
   else bad("2d. registro", logs.join(" | "));
 
   // 3) segundo erro seguido: sai do pote
