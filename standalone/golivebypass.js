@@ -1381,37 +1381,139 @@ function agendarEstat() {
     }
 }
 
-// === detector de gateway zumbi (issue #145): inicio ===
-// A sessao de gateway pode ficar MUDA sem morrer de forma visivel: o TCP nao gera
-// tunel.caiu, o Discord nao reconnecta (nada de gw.visto), e as telas ficam
-// carregando para sempre enquanto isso. O sinal de vida de um gateway saudavel sao
-// os heartbeats — bytes nos dois sentidos a cada ~40s. Silencio longo (nenhum byte
-// no tunel E nenhum connect novo) e sessao morta na pratica.
-// A acao e banner MANUAL de proposito: reload automatico aqui seria o "esperto
-// demais" que encerra chamada (ver MIDIA_RECENTE_MS) — quem decide e a pessoa.
-let gwUltimoSinalEm = 0;      // ultimo connect iniciado ou ultimo byte em tunel de gateway
-let zumbiBannerAtivo = false;
-const GW_ZUMBI_SILENCIO_MS = 5 * 60_000;   // ~7 heartbeats perdidos: mudo de verdade
-const GW_ZUMBI_CHECAGEM_MS = 60_000;
+// === gateway: probe no renderer + pill de recuperacao (issues #145/#149): inicio ===
+// A beta.3 provou com logs (issues #149/#150) que o zumbi de aplicacao e
+// INVISIVEL para a rede: durante os vaos (416s e 713s) o tunel seguiu carregando
+// heartbeats — sessao protocolarmente viva, dados nao fluem — e como a conexao e
+// TLS ponta a ponta com payload comprimido, heartbeat e dado sao
+// indistinguiveis do lado de fora. Consequencias do desenho:
+// 1. A recuperacao correta e AMBIENTE: pill permanente de reload dentro do
+//    Discord (o usuario sabe no instante; o reload cura sempre; e decisao dele,
+//    nunca automatica — regra de MIDIA_RECENTE_MS). Esconde sozinho em
+//    fullscreen e com websocket de midia aberto (call/transmissao).
+// 2. A verdade mora no RENDERER: um shim (CDP, antes do bundle) envolve o
+//    WebSocket do gateway e conta frames — cliente vem em JSON texto (o zlib do
+//    Discord e so servidor->cliente): op 1 heartbeat, op 14 subscribe =
+//    intencao de navegar; servidor vem comprimido (contagem/cadencia). O vigia
+//    polla e LOGA — o proximo relato chega com ground truth em vez de deducao.
+// 3. O alarme de rede sobrevive re-escopado: servidor INTEIRO calado (>3min sem
+//    nenhum frame, nem ACK de heartbeat) com o ws constando aberto e morte de
+//    rede de verdade — o banner antecipa o reconnect que o cliente faria em
+//    instantes. O caso "protocolo vivo, dados mortos" nao dispara alarme porque
+//    nao e detectavel — para isso existe o pill.
 
-function marcarSinalGateway() {
-    gwUltimoSinalEm = Date.now();
-    if (zumbiBannerAtivo) {
-        // Era falso alarme (ou o Discord reconectou sozinho): tira o aviso.
-        zumbiBannerAtivo = false;
-        const win = clientWindow();
-        if (win !== null) {
-            win.webContents.executeJavaScript(
-                "document.getElementById('golivebypass-zumbi') && document.getElementById('golivebypass-zumbi').remove();",
-            ).catch(() => {});
-        }
-        log("gateway voltou a responder: banner de sessao muda removido");
-    }
+// Shim do renderer: roda ANTES do bundle do Discord (CDP
+// addScriptToEvaluateOnNewDocument, unico ponto sem corrida), no main world.
+// Envolve o WebSocket para: (a) contar frames do gateway — cliente em JSON
+// texto, servidor comprimido em contagem/cadencia; (b) rastrear websockets de
+// midia abertos (o pill usa para se esconder em call/transmissao).
+const SHIM_GATEWAY_SRC = "(function(){" +
+    "  if (window.__goliveGwShim) return;" +
+    "  window.__goliveGwShim = true;" +
+    "  var midia = new Set();" +
+    "  var gw = { estado: 'nenhum', srvEm: 0, cliEm: 0, op1Em: 0, subs: 0, srvFrames: 0 };" +
+    "  window.__goliveGwResumo = function () {" +
+    "    return { estado: gw.estado," +
+    "      srvHa: gw.srvEm ? Date.now() - gw.srvEm : -1," +
+    "      cliHa: gw.cliEm ? Date.now() - gw.cliEm : -1," +
+    "      subs: gw.subs, srvFrames: gw.srvFrames };" +
+    "  };" +
+    "  window.__goliveMidiaAberta = function () { return midia.size > 0; };" +
+    "  var OriginalWebSocket = window.WebSocket;" +
+    "  function GoliveWebSocket(url, protocolos) {" +
+    "    var ws = protocolos === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocolos);" +
+    "    try {" +
+    "      var alvo = String(url);" +
+    "      var ehMidia = false, ehGw = false;" +
+    "      try { ehMidia = /(^|\\.)discord\\.media$/.test(new URL(alvo).hostname); } catch (e) { }" +
+    "      try { ehGw = /(^|\\.)gateway(-[a-z0-9-]+)?\\.discord\\.gg$/.test(new URL(alvo).hostname); } catch (e) { }" +
+    "      if (ehMidia) {" +
+    "        midia.add(ws);" +
+    "        ws.addEventListener('close', function () { midia.delete(ws); });" +
+    "      }" +
+    "      if (ehGw) {" +
+    "        gw.estado = 'conectando';" +
+    "        ws.addEventListener('open', function () { gw.estado = 'aberta'; });" +
+    "        ws.addEventListener('close', function () { gw.estado = 'fechada'; });" +
+    "        ws.addEventListener('message', function (ev) {" +
+    "          gw.srvEm = Date.now(); gw.srvFrames++;" +
+    "          try {" +
+    "            if (typeof ev.data === 'string' && JSON.parse(ev.data).op === 11) gw.ackEm = Date.now();" +
+    "          } catch (e) { }" +
+    "        });" +
+    "        var enviar = ws.send.bind(ws);" +
+    "        ws.send = function (dados) {" +
+    "          try {" +
+    "            gw.cliEm = Date.now();" +
+    "            var op = JSON.parse(dados).op;" +
+    "            if (op === 1) gw.op1Em = Date.now();" +
+    "            if (op === 14) gw.subs++;" +
+    "          } catch (e) { }" +
+    "          return enviar(dados);" +
+    "        };" +
+    "      }" +
+    "    } catch (e) { }" +
+    "    return ws;" +
+    "  }" +
+    "  GoliveWebSocket.prototype = OriginalWebSocket.prototype;" +
+    "  GoliveWebSocket.CONNECTING = 0; GoliveWebSocket.OPEN = 1;" +
+    "  GoliveWebSocket.CLOSING = 2; GoliveWebSocket.CLOSED = 3;" +
+    "  window.WebSocket = GoliveWebSocket;" +
+"})();";
+
+// Pill de recuperacao: elemento permanente, discreto, com reload a um clique —
+// o usuario aperta no primeiro segundo de loading em vez de esperar o
+// reconnect chegar sozinho (7-25 min nos relatos). Some em fullscreen e com
+// midia aberta; o atalho Ctrl+Alt+R fica de pe mesmo assim (intencao explicita
+// do usuario, entao executa mesmo em call — a decisao e dele, nao nossa).
+const REVIVE_SRC = "(function(){" +
+    "  if (window.__goliveRevive) return;" +
+    "  window.__goliveRevive = true;" +
+    "  function recarregar() { location.reload(); }" +
+    "  window.addEventListener('keydown', function (ev) {" +
+    "    if (ev.ctrlKey && ev.altKey && ev.code === 'KeyR') { ev.preventDefault(); ev.stopPropagation(); recarregar(); }" +
+    "  }, true);" +
+    "  var el = null;" +
+    "  function criar() {" +
+    "    el = document.createElement('div');" +
+    "    el.id = 'golive-revive';" +
+    "    el.title = 'Discord travado? Recarregar (Ctrl+Alt+R)';" +
+    "    el.textContent = '\\u21BB';" +
+    "    el.style.cssText = 'position:fixed;z-index:2147483646;bottom:18px;right:18px;width:24px;height:24px;" +
+    "border-radius:50%;background:#2b2d31;color:#b5bac1;border:1px solid #4e5058;font-size:15px;" +
+    "line-height:22px;text-align:center;cursor:pointer;opacity:.35;transition:opacity .15s;user-select:none;';" +
+    "    el.onmouseenter = function(){ el.style.opacity = '1'; };" +
+    "    el.onmouseleave = function(){ el.style.opacity = '.35'; };" +
+    "    el.onclick = function(){ recarregar(); };" +
+    "    document.body.appendChild(el);" +
+    "  }" +
+    "  setInterval(function () {" +
+    "    var esconder = !!document.fullscreenElement || (window.__goliveMidiaAberta ? window.__goliveMidiaAberta() : false);" +
+    "    if (esconder) { if (el) el.style.display = 'none'; return; }" +
+    "    if (!el || !document.body.contains(el)) { criar(); }" +
+    "    el.style.display = 'block';" +
+    "  }, 2000);" +
+"})();";
+
+let zumbiBannerAtivo = false;
+
+// Alarme re-escopado pelo probe: servidor INTEIRO calado (nem ACK de heartbeat)
+// com o ws constando aberto — morte de rede real, o cliente morre em instantes e
+// o banner antecipa. O caso "protocolo vivo, dados mortos" nao dispara alarme
+// porque nao e detectavel — para isso existe o pill.
+const GW_SERVIDOR_SILENCIOSO_MS = 3 * 60_000;
+const GW_PROBE_CHECAGEM_MS = 60_000;
+
+function avaliarSinalGw(resumo, agora) {
+    if (!resumo || resumo.estado !== 'aberta') return null;
+    if (resumo.srvHa < 0) return null;
+    if (agora - resumo.srvHa < GW_SERVIDOR_SILENCIOSO_MS) return null;
+    return 'silente';
 }
 
 const ZUMBI_BANNER_TEXT = "GoLiveBypass: a sessao do gateway esta sem resposta ha alguns " +
     "minutos — as telas podem ficar carregando para sempre. Clique em \"Reiniciar agora\" " +
-    "abaixo (ou Ctrl+R) para recarregar a janela.";
+    "abaixo (ou Ctrl+Alt+R) para recarregar a janela.";
 
 function showZumbiBanner() {
     const win = clientWindow();
@@ -1466,20 +1568,58 @@ function showZumbiBanner() {
     win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso de sessao muda: " + error.message));
 }
 
-function checarGatewayZumbi() {
-    if (reloading) return;
-    if (gwUltimoSinalEm === 0) return;   // nunca vimos gateway: arranque frio tem banner proprio
-    const silencio = Date.now() - gwUltimoSinalEm;
-    if (silencio < GW_ZUMBI_SILENCIO_MS) return;
-    if (zumbiBannerAtivo) return;
-    zumbiBannerAtivo = true;
-    log("gw.silente | sem sinal de gateway ha " + Math.round(silencio / 1000) + "s — avisando na tela");
-    showZumbiBanner();
+function checarGatewaySilente() {
+    const win = clientWindow();
+    if (win === null) return;
+    win.webContents.executeJavaScript('window.__goliveGwResumo ? window.__goliveGwResumo() : null', true)
+        .then(resumo => {
+            if (!resumo) return;
+            log("gw.probe | estado=" + resumo.estado +
+                " srv_ha=" + (resumo.srvHa < 0 ? "?" : Math.round(resumo.srvHa / 1000) + "s") +
+                " cli_ha=" + (resumo.cliHa < 0 ? "?" : Math.round(resumo.cliHa / 1000) + "s") +
+                " subs=" + resumo.subs +
+                " srv_frames=" + resumo.srvFrames);
+            if (avaliarSinalGw(resumo, Date.now()) === 'silente') {
+                if (zumbiBannerAtivo) return;
+                zumbiBannerAtivo = true;
+                showZumbiBanner();
+            } else if (zumbiBannerAtivo) {
+                zumbiBannerAtivo = false;
+                log("gateway voltou a responder: banner de sessao muda removido");
+            }
+        })
+        .catch(() => { });
 }
-// === detector de gateway zumbi: fim ===
+
+// Shim + pill: prender em TODO webContents novo (o Discord recria janelas e
+// recarrega o tempo todo). O shim vai via CDP — addScriptToEvaluateOnNewDocument
+// roda antes do primeiro script da pagina, a unica forma garantida de envolver o
+// WebSocket antes do cliente do gateway nascer. O pill vai no did-finish-load
+// (DOM pronto) e reinjeta a cada recarga.
+function injetarInstrumentacao(wc) {
+    try {
+        wc.debugger.attach('1.3');
+        wc.debugger.sendCommand('Page.enable').catch(() => { });
+        wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: SHIM_GATEWAY_SRC }).catch(() => { });
+    } catch (error) {
+        log("nao consegui prender o shim do gateway: " + error.message);
+    }
+    wc.on('did-finish-load', () => {
+        try {
+            let url = '';
+            try { url = wc.getURL(); } catch { return; }
+            if (!CLIENT_URL_RE.test(url)) return;
+            wc.executeJavaScript(REVIVE_SRC).catch(() => { });
+        } catch { }
+    });
+}
+
+app.on("web-contents-created", (_evento, wc) => {
+    try { injetarInstrumentacao(wc); } catch (error) { log(error.message); }
+});
+// === gateway: probe no renderer + pill de recuperacao: fim ===
 
 function markGatewayRouted() {
-    marcarSinalGateway();
     lastRoutedAt = Date.now();
     ativaEntregouEm = Date.now();
     sessaoRoteadas++;
@@ -2459,11 +2599,6 @@ function serveSocks(client) {
             client.on("error", e => log("[net] cliente.falha | alvo=" + target.host + " errno=" + (e && e.code ? e.code : "desconhecido")));
             client.on("close", () => upstream.destroy());
             upstream.on("close", () => client.destroy());
-            // Sinal de vida da sessao: heartbeat do gateway e byte que anda (ver
-            // detector de gateway zumbi). Sem isto, um tunel estabelecido e mudo
-            // e invisivel para todo o resto do script.
-            upstream.on("data", () => marcarSinalGateway());
-            client.on("data", () => marcarSinalGateway());
             upstream.pipe(client);
             client.pipe(upstream);
         });
@@ -2690,9 +2825,6 @@ async function start() {
                     : "saida pronta ha " + Math.round((Date.now() - lastExitAt) / 1000) + "s";
                 const ultimoVistoHa = ultimoVistoAt === 0 ? "?" : (agora - ultimoVistoAt) + "ms";
                 ultimoVistoAt = agora;
-                // A intencao do renderer de abrir gateway tambem e sinal de vida
-                // (o connect pode nem chegar ao tunel e ainda assim conta).
-                marcarSinalGateway();
                 log("gw.visto | host=" + host +
                     " n_janela=" + gatewayReconexoes.length + "/180s" +
                     " n_sessao=" + (gatewayConnCount + 1) +
@@ -2771,8 +2903,8 @@ async function start() {
     // com ela, e e a busca inicial que segura o gateway.
     setInterval(() => { beat(); }, HEARTBEAT_MS);
     log("batimento ligado: reconfiro as saidas a cada " + Math.round(HEARTBEAT_MS / 1000) + "s");
-    setInterval(() => { checarGatewayZumbi(); }, GW_ZUMBI_CHECAGEM_MS);
-    log("vigia de gateway mudo ligado: checo o sinal a cada " + Math.round(GW_ZUMBI_CHECAGEM_MS / 1000) + "s");
+    setInterval(() => { checarGatewaySilente(); }, GW_PROBE_CHECAGEM_MS);
+    log("vigia de gateway mudo ligado: polla o probe do renderer a cada " + Math.round(GW_PROBE_CHECAGEM_MS / 1000) + "s");
 }
 
 try {

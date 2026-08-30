@@ -7,6 +7,30 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Pill de recuperação permanente + probe do gateway no renderer** (beta 4,
+  [#149](https://github.com/bezumiya/GoLiveBypass/issues/149)): o teste real do
+  William na beta 3 provou que o **zumbi de aplicação é indistinguível na rede** —
+  durante os vãos (416s e 713s) o túnel seguiu carregando heartbeats (o alarme da
+  beta 3 não disparou) — e como a conexão é TLS ponta a ponta com payload
+  comprimido, nenhum detector do lado da rede separa heartbeat de dado. Três
+  mudanças: (1) um **pill "↻" permanente** dentro do Discord — discreto
+  (opacidade 35%, hover 100%) — que recarrega a janela num clique:
+  o usuário resolve no primeiro segundo de loading em vez de esperar os 7-25 min
+  do reconnect; some sozinho em fullscreen e com websocket de mídia aberto (call/
+  transmissão), e o atalho **Ctrl+Alt+R** fica de pé mesmo assim (intenções
+  explícitas do usuário executam mesmo em chamada — a decisão é dele, nunca
+  nossa). (2) Um **shim no renderer** injetado via CDP
+  (`addScriptToEvaluateOnNewDocument`, antes do bundle — única forma sem corrida)
+  que envolve o `WebSocket` do gateway e conta frames: cliente em JSON texto (o
+  zlib do Discord é só servidor→cliente; op 1 heartbeat, op 14 subscribe =
+  intenção de navegar), servidor comprimido em contagem/cadência — o vigia polla
+  a cada 60s e loga `gw.probe`, então o próximo relato chega com ground truth em
+  vez de dedução. (3) O alarme de rede foi **re-escopado** pelo probe: dispara só
+  com o servidor inteiro calado (>3min sem NENHUM frame, nem ACK) — morte de
+  rede real; o detector de bytes da beta 3 foi removido (mascarado pelos
+  heartbeats, provou inútil para a variante real). Testes:
+  `tests/gateway-probe.test.ts` executa o shim e o alarme REAIS extraídos do
+  script (8 cenários, incluindo wire-up e remoção do antigo).
 - **Alarme de "gateway zumbi"** ([#145](https://github.com/bezumiya/GoLiveBypass/issues/145),
   beta 3): a sessão de gateway pode ficar muda sem morrer de forma visível — o TCP não
   gera `tunel.caiu`, o Discord não reconecta (nada de `gw.visto`), e as telas ficam
@@ -214,10 +238,11 @@ infinito ao abrir" para o plugin (o padrão da issue #116 é sobre a corrida
 GUI×Discord no boot do Windows, que não existe da mesma forma aqui), não
 implementei um modo equivalente nesta rodada — adicionar um exigiria nova
 opção de settings e mudança maior na cadeia `pickExit`/`autoExit`. Também
-ficou de fora o **alarme de "gateway zumbi"** do beta 3 (#145): no plugin ele
-até sairia mais preciso (o renderer enxerga o socket do gateway e o timestamp
-da última mensagem), mas o porte não entrou neste ciclo — o plugin segue sem
-o alarme até o próximo.
+ficaram de fora o **alarme de "gateway zumbi"** do beta 3 (#145) e o **pill de
+recuperação + probe** do beta 4 (#149): no plugin eles sairiam mais precisos
+(o renderer enxerga o socket do gateway e o timestamp da última mensagem) — o
+pill inclusive é quase direto lá — mas o porte não entrou neste ciclo; o
+plugin segue sem nenhum dos dois até o próximo.
 
 **Pendência da regra de sincronização (seção 4 do AGENTS.md):** o aviso de
 proxy manual quebrada da issue #134 (ver acima, nesta mesma versão) só foi
