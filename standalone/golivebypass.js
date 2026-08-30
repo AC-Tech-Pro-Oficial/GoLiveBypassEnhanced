@@ -1346,8 +1346,9 @@ function markGatewayRouted() {
     if (gatewayConnCount > 1) {
         const comMidia = Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS;
         log("gateway reconectou no meio da sessao (recorrencia " + (gatewayConnCount - 1) + ")"
-            + (comMidia ? ": avisando na tela" : ", sem chamada em andamento: nao avisa"));
+            + (comMidia ? ": avisando na tela" : ", sem chamada em andamento"));
         if (comMidia) showReconnectWarning(gatewayConnCount - 1);
+        else autoReloadForCleanEngine(gatewayConnCount - 1);
     }
     agendarEstat();
 }
@@ -1358,6 +1359,33 @@ function markGatewayRouted() {
 const WARN_BANNER_TEXT = "GoLiveBypass: o gateway reconectou no meio da sessao. Se o video da " +
     "sua transmissao travou (ficou so o audio), de Ctrl+R no Discord para corrigir " +
     "-- isso sai da chamada de voz.";
+
+// Reconexao do gateway SEM midia recente (nem call, nem live): o motor de midia
+// (WASM) pode ter ficado stale com o gateway morto — e a PROXIMA tentativa de
+// transmitir que pega o "RTC connecting" eterno (issue #129: usuario no tor com
+// circuito resetando a cada ~50s-4min, ws morrendo e renascendo). Recarregar a
+// janela AGORA, fora de chamada, entrega um motor limpo para o proximo Go Live.
+// Com midia recente NAO recarrega: encerraria a chamada da pessoa (o banner
+// manual continua valendo ai). Resguardos: saida comprovadamente viva (probe) e
+// no maximo 1 reload a cada 3 min, para o ws flapado nao virar loop de reload.
+let ultimoAutoReloadMidia = 0;
+function autoReloadForCleanEngine(recorrencias) {
+    if (reloading) return;
+    if (Date.now() - ultimoAutoReloadMidia < 3 * 60_000) return;
+    const exit = chosenExit;
+    if (exit === null) return;
+    probe(exit, 2500).then(ok => {
+        if (ok === null) {
+            log("saida " + safeProxy(exit) + " nao respondeu, adiando o reload limpo");
+            return;
+        }
+        ultimoAutoReloadMidia = Date.now();
+        const win = clientWindow();
+        if (win === null) return;
+        log("reconexao sem midia: recarregando a janela para limpar o motor de midia (recorrencia " + recorrencias + ")");
+        win.webContents.reload();
+    }).catch(() => { });
+}
 
 function showReconnectWarning(recorrencias) {
     const win = clientWindow();

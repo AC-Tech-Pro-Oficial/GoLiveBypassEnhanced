@@ -1879,7 +1879,20 @@ function tentarTorEmFundo() {
 // Deixa um Tor utilizavel de pe. Tenta algumas vezes seguidas antes de desistir da chamada, e
 // mesmo desistindo deixa uma insistencia rodando em segundo plano -- falhar uma vez costuma
 // ser rede ruim ou um bootstrap que demorou, nao uma maquina onde o Tor nunca vai funcionar.
-async function garantirTor(): Promise<{ ok: boolean; porta?: number; error?: string }> {
+// Singleton da promessa: chamadas concorrentes (whenReady + autoInject do boot,
+// watchdog + botao) rodavam tentarTor em PARALELO — dois tor.exe nasciam, um
+// perdia a porta e morria com "[err] Reading config failed" no log (relato da
+// issue #129). Todos os chamadores agora esperam a mesma corrida.
+let garantirTorEmCurso: Promise<{ ok: boolean; porta?: number; error?: string }> | null = null;
+function garantirTor(): Promise<{ ok: boolean; porta?: number; error?: string }> {
+  if (garantirTorEmCurso) return garantirTorEmCurso;
+  garantirTorEmCurso = garantirTorUmaVez().finally(() => {
+    garantirTorEmCurso = null;
+  });
+  return garantirTorEmCurso;
+}
+
+async function garantirTorUmaVez(): Promise<{ ok: boolean; porta?: number; error?: string }> {
   let ultimo: { ok: boolean; porta?: number; error?: string } = {
     ok: false,
     error: "nao consegui preparar o Tor",
