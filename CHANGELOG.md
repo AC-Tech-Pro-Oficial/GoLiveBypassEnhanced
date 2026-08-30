@@ -100,6 +100,14 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   failed".
 
 ### Corrigido
+- **Botão ficava em "Ativar" com o bypass já de pé após a reativação de boot**
+  ([#149](https://github.com/bezumiya/GoLiveBypass/issues/149), beta 5 —
+  confirmado pelo testador na beta 4): a janela costuma carregar NO MEIO da
+  reativação automática do boot (o Tor demora segundos para subir) e nada a
+  avisava quando ela terminava — o botão ficava em "Ativar", e o clique nesse
+  estado era o gatilho exato da duplicação que a guarda da beta 4 neutralizou.
+  A reativação de boot agora atualiza a janela e a bandeja ao terminar, no
+  sucesso e na falha.
 - **Instalador crashava com "Invalid handle. Parameter name: handle" ao perguntar no
   console** ([#146](https://github.com/bezumiya/GoLiveBypass/issues/146)): quando o
   instalador é lançado por um caminho que não abre console de verdade (atalho,

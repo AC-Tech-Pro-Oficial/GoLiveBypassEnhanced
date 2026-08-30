@@ -83,4 +83,12 @@ describe("guarda de ativacao duplicada", () => {
     expect(src).toContain("assinaturaUltimaAtivacao = assinatura;");
     expect(src).toContain("getStatus() === \"ACTIVE\" &&");
   });
+
+  it("a reativacao de boot atualiza janela e bandeja no fim (sucesso ou falha)", () => {
+    // Relato do testador na beta 4 (#149): a janela carregava no meio da
+    // reativacao e o botao ficava em "Ativar" com o bypass ja de pe.
+    const src = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    expect(src).toMatch(/autoInject: bypass reativado"[\s\S]{0,600}refreshWindowStatus\(\);/);
+    expect(src).toMatch(/autoInject falhou:[\s\S]{0,600}refreshWindowStatus\(\);/);
+  });
 });

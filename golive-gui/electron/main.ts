@@ -580,13 +580,25 @@ if (!gotLock) {
         void garantirTor()
           .catch(() => ({ ok: false }))
           .then(() => activateBypass({}, proxySalvo, false))
-          .then(() => console.log("[boot] autoInject: bypass reativado"))
-          .catch((error: unknown) =>
+          .then(() => {
+            console.log("[boot] autoInject: bypass reativado");
+            // A janela costuma carregar NO MEIO desta ativacao (o Tor demora
+            // segundos): sem este refresh o botao ficava em "Ativar" com o
+            // bypass ja de pe — e o clique nesse estado reinjetava por cima
+            // (a origem da duplicacao da #149, confirmada pelo testador na
+            // beta 4). Falha atualiza tambem: o botao tem que refletir o que
+            // deu errado.
+            refreshWindowStatus();
+            refreshTray().catch(() => { });
+          })
+          .catch((error: unknown) => {
             console.error(
               "[boot] autoInject falhou:",
               error instanceof Error ? error.message : error,
-            ),
-          );
+            );
+            refreshWindowStatus();
+            refreshTray().catch(() => { });
+          });
       }
     }
     // No KDE o watcher da bandeja (StatusNotifier) pode demorar a subir no login; esperar
