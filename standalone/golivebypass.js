@@ -1381,7 +1381,105 @@ function agendarEstat() {
     }
 }
 
+// === detector de gateway zumbi (issue #145): inicio ===
+// A sessao de gateway pode ficar MUDA sem morrer de forma visivel: o TCP nao gera
+// tunel.caiu, o Discord nao reconnecta (nada de gw.visto), e as telas ficam
+// carregando para sempre enquanto isso. O sinal de vida de um gateway saudavel sao
+// os heartbeats — bytes nos dois sentidos a cada ~40s. Silencio longo (nenhum byte
+// no tunel E nenhum connect novo) e sessao morta na pratica.
+// A acao e banner MANUAL de proposito: reload automatico aqui seria o "esperto
+// demais" que encerra chamada (ver MIDIA_RECENTE_MS) — quem decide e a pessoa.
+let gwUltimoSinalEm = 0;      // ultimo connect iniciado ou ultimo byte em tunel de gateway
+let zumbiBannerAtivo = false;
+const GW_ZUMBI_SILENCIO_MS = 5 * 60_000;   // ~7 heartbeats perdidos: mudo de verdade
+const GW_ZUMBI_CHECAGEM_MS = 60_000;
+
+function marcarSinalGateway() {
+    gwUltimoSinalEm = Date.now();
+    if (zumbiBannerAtivo) {
+        // Era falso alarme (ou o Discord reconectou sozinho): tira o aviso.
+        zumbiBannerAtivo = false;
+        const win = clientWindow();
+        if (win !== null) {
+            win.webContents.executeJavaScript(
+                "document.getElementById('golivebypass-zumbi') && document.getElementById('golivebypass-zumbi').remove();",
+            ).catch(() => {});
+        }
+        log("gateway voltou a responder: banner de sessao muda removido");
+    }
+}
+
+const ZUMBI_BANNER_TEXT = "GoLiveBypass: a sessao do gateway esta sem resposta ha alguns " +
+    "minutos — as telas podem ficar carregando para sempre. Clique em \"Reiniciar agora\" " +
+    "abaixo (ou Ctrl+R) para recarregar a janela.";
+
+function showZumbiBanner() {
+    const win = clientWindow();
+    if (win === null) return;
+    const script = "(function(){\n" +
+        "  var el = document.getElementById('golivebypass-zumbi');\n" +
+        "  if (!el) {\n" +
+        "    el = document.createElement('div');\n" +
+        "    el.id = 'golivebypass-zumbi';\n" +
+        "    el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;" +
+        "display:flex;align-items:flex-start;gap:10px;width:320px;" +
+        "background:#2b2d31;color:#f2f3f5;padding:14px 16px;border-radius:10px;" +
+        "border-left:4px solid #f0b232;" +
+        "font:13px/1.45 \"gg sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;" +
+        "box-shadow:0 8px 24px rgba(0,0,0,.45);" +
+        "opacity:0;transform:translateY(8px);transition:opacity .2s ease,transform .2s ease;'; \n" +
+        "    var icon = document.createElement('div');\n" +
+        "    icon.textContent = '\\u26A0\\uFE0F';\n" +
+        "    icon.style.cssText = 'font-size:18px;line-height:1;flex-shrink:0;margin-top:1px;';\n" +
+        "    var body = document.createElement('div');\n" +
+        "    body.style.cssText = 'flex:1;min-width:0;';\n" +
+        "    var title = document.createElement('div');\n" +
+        "    title.textContent = 'GoLiveBypass';\n" +
+        "    title.style.cssText = 'font-weight:600;margin-bottom:3px;color:#fff;';\n" +
+        "    var text = document.createElement('div');\n" +
+        "    text.id = 'golivebypass-zumbi-text';\n" +
+        "    text.style.cssText = 'color:#d8dadf;';\n" +
+        "    var restartBtn = document.createElement('button');\n" +
+        "    restartBtn.type = 'button';\n" +
+        "    restartBtn.textContent = 'Reiniciar agora';\n" +
+        "    restartBtn.style.cssText = 'margin-top:8px;padding:5px 10px;border:0;" +
+        "border-radius:6px;background:#f0b232;color:#111214;font-weight:600;font-size:12px;" +
+        "cursor:pointer;';\n" +
+        "    restartBtn.onmouseenter = function(){ restartBtn.style.background = '#f5c862'; };\n" +
+        "    restartBtn.onmouseleave = function(){ restartBtn.style.background = '#f0b232'; };\n" +
+        "    restartBtn.onclick = function(){ location.reload(); };\n" +
+        "    body.appendChild(title);\n" +
+        "    body.appendChild(text);\n" +
+        "    body.appendChild(restartBtn);\n" +
+        "    var closeBtn = document.createElement('div');\n" +
+        "    closeBtn.textContent = '\\u2715';\n" +
+        "    closeBtn.style.cssText = 'cursor:pointer;color:#949ba4;font-size:14px;flex-shrink:0;padding:2px;';\n" +
+        "    closeBtn.onclick = function(){ el.remove(); };\n" +
+        "    el.appendChild(icon);\n" +
+        "    el.appendChild(body);\n" +
+        "    el.appendChild(closeBtn);\n" +
+        "    document.body.appendChild(el);\n" +
+        "    requestAnimationFrame(function(){ el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });\n" +
+        "  }\n" +
+        "  document.getElementById('golivebypass-zumbi-text').textContent = " + JSON.stringify(ZUMBI_BANNER_TEXT) + ";\n" +
+        "})();";
+    win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso de sessao muda: " + error.message));
+}
+
+function checarGatewayZumbi() {
+    if (reloading) return;
+    if (gwUltimoSinalEm === 0) return;   // nunca vimos gateway: arranque frio tem banner proprio
+    const silencio = Date.now() - gwUltimoSinalEm;
+    if (silencio < GW_ZUMBI_SILENCIO_MS) return;
+    if (zumbiBannerAtivo) return;
+    zumbiBannerAtivo = true;
+    log("gw.silente | sem sinal de gateway ha " + Math.round(silencio / 1000) + "s — avisando na tela");
+    showZumbiBanner();
+}
+// === detector de gateway zumbi: fim ===
+
 function markGatewayRouted() {
+    marcarSinalGateway();
     lastRoutedAt = Date.now();
     ativaEntregouEm = Date.now();
     sessaoRoteadas++;
@@ -2361,6 +2459,11 @@ function serveSocks(client) {
             client.on("error", e => log("[net] cliente.falha | alvo=" + target.host + " errno=" + (e && e.code ? e.code : "desconhecido")));
             client.on("close", () => upstream.destroy());
             upstream.on("close", () => client.destroy());
+            // Sinal de vida da sessao: heartbeat do gateway e byte que anda (ver
+            // detector de gateway zumbi). Sem isto, um tunel estabelecido e mudo
+            // e invisivel para todo o resto do script.
+            upstream.on("data", () => marcarSinalGateway());
+            client.on("data", () => marcarSinalGateway());
             upstream.pipe(client);
             client.pipe(upstream);
         });
@@ -2587,6 +2690,9 @@ async function start() {
                     : "saida pronta ha " + Math.round((Date.now() - lastExitAt) / 1000) + "s";
                 const ultimoVistoHa = ultimoVistoAt === 0 ? "?" : (agora - ultimoVistoAt) + "ms";
                 ultimoVistoAt = agora;
+                // A intencao do renderer de abrir gateway tambem e sinal de vida
+                // (o connect pode nem chegar ao tunel e ainda assim conta).
+                marcarSinalGateway();
                 log("gw.visto | host=" + host +
                     " n_janela=" + gatewayReconexoes.length + "/180s" +
                     " n_sessao=" + (gatewayConnCount + 1) +
@@ -2665,6 +2771,8 @@ async function start() {
     // com ela, e e a busca inicial que segura o gateway.
     setInterval(() => { beat(); }, HEARTBEAT_MS);
     log("batimento ligado: reconfiro as saidas a cada " + Math.round(HEARTBEAT_MS / 1000) + "s");
+    setInterval(() => { checarGatewayZumbi(); }, GW_ZUMBI_CHECAGEM_MS);
+    log("vigia de gateway mudo ligado: checo o sinal a cada " + Math.round(GW_ZUMBI_CHECAGEM_MS / 1000) + "s");
 }
 
 try {

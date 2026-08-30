@@ -1058,11 +1058,48 @@ function updateInjectedNetSettings(mode: string): number {
   return reescritos;
 }
 
+// ------------------------------------------------------------------ guarda de ativacao duplicada
+// Duas ativacoes em segundos (reativacao de boot + clique com o status ainda velho, duplo
+// clique no botao) injetam duas vezes: cada injecao fecha as conexoes antigas e faz o
+// gateway renascer — na #145 isso abriu com duas injecoes em 7s e a segunda derrubou a
+// sessao recem-nascida da primeira. Entao: a segunda chamada aguarda a primeira terminar;
+// e re-ativacao identica (mesma proxy, mesmo modo) sobre um bypass ja injetado e no-op.
+let ativacaoCorrente: Promise<void> | null = null;
+let assinaturaUltimaAtivacao = "";
+
+function assinaturaAtivacao(proxyAddress: string): string {
+  return JSON.stringify({ proxy: proxyAddress.trim(), modo: readNetMode() });
+}
+
 async function activateBypass(event: any, proxyAddress: string = "", confirmOverride: boolean = false) {
+  if (ativacaoCorrente !== null) {
+    logger.info("ativacao", "ja ha uma ativacao em andamento; aguardando a mesma conclusao");
+    return ativacaoCorrente;
+  }
+  ativacaoCorrente = executarAtivacao(event, proxyAddress, confirmOverride).finally(() => {
+    ativacaoCorrente = null;
+  });
+  return ativacaoCorrente;
+}
+
+async function executarAtivacao(event: any, proxyAddress: string, confirmOverride: boolean) {
   const installs = getDiscordInstalls();
   if (installs.length === 0) {
     discordscan.ativacaoSemDiscord("nenhum install encontrado na varredura");
     throw new Error("Nenhum Discord encontrado.");
+  }
+
+  // Ja ativo, injetado em todo mundo e com a mesma assinatura (proxy + modo): nada a
+  // fazer — re-injetar mataria o gateway a toa. Assinatura diferente (proxy ou modo
+  // mudou) passa e re-injeta de verdade.
+  const assinatura = assinaturaAtivacao(proxyAddress);
+  if (
+    assinatura === assinaturaUltimaAtivacao &&
+    getStatus() === "ACTIVE" &&
+    installs.every((install) => isOurInjection(install.resources))
+  ) {
+    logger.info("ativacao", "bypass ja ativo com a mesma proxy/modo; re-injecao ignorada");
+    return;
   }
 
   // Antes de matar o Discord: detecta mods protegidos (Vencord/Equicord). Sobrescrever
@@ -1170,6 +1207,9 @@ async function activateBypass(event: any, proxyAddress: string = "", confirmOver
   // botao de novo — relato do beta 1.1.11-beta.2). Zerada so no deactivate
   // explicito do usuario.
   updateSharedSettings({ autoInject: true });
+  // Ativacao concluiu de verdade: guarda a assinatura para a guarda de duplicada
+  // (ver topo da funcao).
+  assinaturaUltimaAtivacao = assinatura;
 }
 
 async function deactivateAll() {

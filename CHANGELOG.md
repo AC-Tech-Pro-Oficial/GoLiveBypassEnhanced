@@ -7,6 +7,26 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Alarme de "gateway zumbi"** ([#145](https://github.com/bezumiya/GoLiveBypass/issues/145),
+  beta 3): a sessão de gateway pode ficar muda sem morrer de forma visível — o TCP não
+  gera `tunel.caiu`, o Discord não reconecta (nada de `gw.visto`), e as telas ficam
+  carregando para sempre enquanto isso (o relato: ~14,5 minutos sem nenhum connect novo,
+  com o bypass achando que tudo estava bem, porque o batimento só prova o túnel do Tor,
+  não a sessão do Discord). O sinal de vida de um gateway saudável são os heartbeats
+  (bytes nos dois sentidos a cada ~40s): 5 minutos de silêncio total — nenhum byte no
+  túnel e nenhum connect novo — agora dispara um banner manual dentro do Discord
+  ("sessão sem resposta — Reiniciar agora"), que some sozinho se o sinal voltar.
+  Manual de propósito: reload automático aqui seria o "esperto demais" que encerra
+  chamada (mesma regra da janela de mídia recente). Testes: `tests/gateway-zumbi.test.ts`
+  executa o bloco real do detector extraído do script (tempo falso, 7 cenários).
+- **Guarda contra ativação duplicada** ([#145](https://github.com/bezumiya/GoLiveBypass/issues/145),
+  beta 3): duas ativações em segundos (reativação de boot + clique com o status ainda
+  velho) injetavam duas vezes — cada injeção fecha as conexões antigas e faz o gateway
+  renascer; no relato da #145 a segunda derrubou a sessão recém-nascida da primeira,
+  7 segundos depois. Agora a segunda chamada aguarda a primeira terminar, e
+  re-ativação idêntica (mesma proxy, mesmo modo) sobre um bypass já injetado é
+  ignorada. Mudou proxy ou modo? Re-injeta de verdade. Testes:
+  `tests/ativacao-guard.test.ts`.
 - **Aviso visível + recarga automática no arranque frio em modo Tor** (beta 2,
   [#116](https://github.com/bezumiya/GoLiveBypass/issues/116)): a GUI é um
   processo Electron à parte do Discord e, no boot do Windows, precisa
@@ -173,7 +193,11 @@ nessa ordem, com um teto de 12s. Sem relato específico de "carregamento
 infinito ao abrir" para o plugin (o padrão da issue #116 é sobre a corrida
 GUI×Discord no boot do Windows, que não existe da mesma forma aqui), não
 implementei um modo equivalente nesta rodada — adicionar um exigiria nova
-opção de settings e mudança maior na cadeia `pickExit`/`autoExit`.
+opção de settings e mudança maior na cadeia `pickExit`/`autoExit`. Também
+ficou de fora o **alarme de "gateway zumbi"** do beta 3 (#145): no plugin ele
+até sairia mais preciso (o renderer enxerga o socket do gateway e o timestamp
+da última mensagem), mas o porte não entrou neste ciclo — o plugin segue sem
+o alarme até o próximo.
 
 **Pendência da regra de sincronização (seção 4 do AGENTS.md):** o aviso de
 proxy manual quebrada da issue #134 (ver acima, nesta mesma versão) só foi
