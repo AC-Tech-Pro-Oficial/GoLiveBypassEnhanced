@@ -561,6 +561,34 @@ if (!gotLock) {
     // movido = boot falha em silencio com o checkbox marcado. Reescrever a cada
     // abertura cura (reg add idempotente). (issue: "nao abre mesmo ativando")
     syncStartupEntry();
+    // Boot: se o usuario deixou o bypass ativo na sessao passada (flag gravada na
+    // ativacao, zerada so no deactivate explicito) e a injecao nao esta no disco
+    // (o quit limpo restaura), reativa sozinho — sem esperar o clique no botao
+    // verde (relato do beta 1.1.11-beta.2). No Linux nao roda: a ativacao pode
+    // pedir elevacao, e prompt no boot e pior que o clique; la a injecao persiste
+    // no boot pelo intact-skip do revertOrphanedInjection.
+    if (!IS_LINUX && readSharedSettings().autoInject === true) {
+      const injetado = getDiscordInstalls().some((install) =>
+        withNoAsar(() =>
+          diskFs.existsSync(path.join(install.resources, "_app.asar")) &&
+          isOurInjection(install.resources),
+        ),
+      );
+      if (!injetado) {
+        const proxySalvo = String(readSharedSettings().proxy ?? "");
+        console.log("[boot] autoInject: bypass estava ativo e nao esta injetado, reativando");
+        void garantirTor()
+          .catch(() => ({ ok: false }))
+          .then(() => activateBypass({}, proxySalvo, false))
+          .then(() => console.log("[boot] autoInject: bypass reativado"))
+          .catch((error: unknown) =>
+            console.error(
+              "[boot] autoInject falhou:",
+              error instanceof Error ? error.message : error,
+            ),
+          );
+      }
+    }
     // No KDE o watcher da bandeja (StatusNotifier) pode demorar a subir no login; esperar
     // evita o Tray cair para o GtkStatusIcon, que o Plasma 6 nao exibe.
     waitForStatusNotifier().then(createTray);
@@ -1130,6 +1158,11 @@ async function activateBypass(event: any, proxyAddress: string = "", confirmOver
   // Registra a sessao: o bypass so se desfaz no quit limpo; se o PC desligar no meio, o
   // boot seguinte encontra este marcador e reverte a injecao orfa.
   writeSessionMarker(installs);
+  // Flag de "estava ativo": o boot seguinte re-injeta sozinho se a injecao nao
+  // estiver no disco (quit limpo restaura, e o usuario nao precisa apertar o
+  // botao de novo — relato do beta 1.1.11-beta.2). Zerada so no deactivate
+  // explicito do usuario.
+  updateSharedSettings({ autoInject: true });
 }
 
 async function deactivateAll() {
@@ -1345,6 +1378,9 @@ async function linuxActivate(
   } catch {
     // sem marcador o boot seguinte nao consegue reverter; a injecao orfa fica para a mao
   }
+  // Flag de "estava ativo" (o quit limpo do Linux restaura a injecao; o boot
+  // seguinte re-injeta pela flag). Zerada so no deactivate explicito.
+  updateSharedSettings({ autoInject: true });
 }
 
 async function linuxDeactivate(onChunk: (c: string) => void) {
@@ -1378,6 +1414,10 @@ ipcMain.handle("activate", async (event, proxyAddress: string = "", confirmOverr
   refreshTray().catch(() => {});
 });
 ipcMain.handle("deactivate", async (event) => {
+  // Deactivate EXPLICITO (botao/bandeja): o usuario nao quer mais — zera a flag de
+  // auto-injecao do boot. O quit limpo NAO passa aqui (la a injecao e removida mas o
+  // usuario so fechou o app; o boot seguinte re-injeta pela flag).
+  updateSharedSettings({ autoInject: false });
   if (IS_LINUX) {
     await linuxDeactivate((c) => event.sender.send("bypass-log", c));
   } else {
@@ -1481,8 +1521,18 @@ async function revertOrphanedInjection() {
   }
 
   // No Linux a injecao vive no script (com permissoes flatpak/sudo); o --restore reverte
-  // sem reabrir o Discord no login.
+  // sem reabrir o Discord no login. MAS: se o patcher do INSTALL_DIR continua no lugar,
+  // a injecao no disco nao e "orfã" — e o bypass persistente sobrevivendo ao boot.
+  // Reverter fazia o Discord abrir injetado, a GUI restaura-lo vanilla e o usuario
+  // apertar o botao de novo a cada boot sem quit limpo (relato beta 1.1.11-beta.2).
   if (IS_LINUX) {
+    const patcherPresente = withNoAsar(() =>
+      diskFs.existsSync(path.join(settingsDir(), "golivebypass.js")),
+    );
+    if (patcherPresente) {
+      console.log("[restore] injecao do boot anterior intacta (patcher presente), mantendo");
+      return; // mantem o marcador: a sessao continua valida
+    }
     clearSessionMarker();
     if (data === null) {
       // A ativacao pode ter vindo do script standalone (fora da GUI), sem marker nenhum.
@@ -1505,17 +1555,41 @@ async function revertOrphanedInjection() {
 
   const atuais = getDiscordInstalls();
   const alvos: DiscordInstall[] = [];
+  let intactas = 0;
   for (const resources of resourcesList) {
     const install =
       atuais.find((a) => a.resources === resources) ??
       ({ flavour: "", resources, exePath: "", bundlePath: undefined } as DiscordInstall);
     // So age onde a injecao ainda e a nossa (outro mod tomou o lugar = nao mexe).
     const temOriginal = withNoAsar(() => diskFs.existsSync(path.join(resources, "_app.asar")));
-    if (temOriginal && isOurInjection(resources)) alvos.push(install);
+    if (!temOriginal || !isOurInjection(resources)) continue;
+    // A injecao no Windows e autocontida (stub + patcher + settings dentro do asar):
+    // se os arquivos internos estao la, ela nao e "orfã" — e o bypass persistente
+    // sobrevivendo ao boot sem quit limpo. Reverter fazia o Discord abrir injetado,
+    // a GUI restaura-lo vanilla e o usuario apertar o botao de novo a cada boot
+    // (relato beta 1.1.11-beta.2). So reverte quando os arquivos quebrarem de verdade
+    // (escrita parcial num crash, por exemplo).
+    const intacta = withNoAsar(() => {
+      try {
+        const bypassJs = diskFs.statSync(path.join(resources, "app.asar", "golivebypass.js"));
+        return bypassJs.isFile() && bypassJs.size > 1024 &&
+          diskFs.existsSync(path.join(resources, "app.asar", "settings.json"));
+      } catch {
+        return false;
+      }
+    });
+    if (intacta) {
+      intactas++;
+      console.log("[restore] injecao do boot anterior intacta, mantendo:", resources);
+      continue;
+    }
+    alvos.push(install);
   }
 
   if (alvos.length === 0) {
-    clearSessionMarker();
+    // Nada quebrado para reverter. Se havia injecao nossa intacta, o marcador
+    // permanece: a sessao continua valida para um boot futuro que ache problemas.
+    if (intactas === 0) clearSessionMarker();
     return;
   }
 
