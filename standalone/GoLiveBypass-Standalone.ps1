@@ -954,7 +954,10 @@ foreach ($install in $alvos) {
         Write-Host ("        " + $cmd1) -ForegroundColor DarkGray
         Write-Host ("        " + $cmd2) -ForegroundColor DarkGray
         if (-not (Confirm-Action "Substituir o $modName em $($install.Flavour) pelo standalone mesmo assim? (perde o mod e os plugins dele)")) {
-            Write-Warn "$($install.Flavour) ficou como estava. Instale o GoLiveBypass como plugin do $modName para nao perder nada."
+            Write-Warn "$($install.Flavour) ficou como estava."
+            Write-Host "      Para nao perder o $modName, instale o GoLiveBypass como plugin dele:" -ForegroundColor DarkGray
+            Write-Host "      baixe o goLiveBypass-vencord.zip na aba Releases do GitHub e siga" -ForegroundColor DarkGray
+            Write-Host "      o tutorial do README ('Instalação: passo a passo completo')." -ForegroundColor DarkGray
             continue
         }
     } elseif ($state -eq 'OutroMod') {

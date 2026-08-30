@@ -236,7 +236,7 @@ async function updateStatus() {
     conflictCard.hidden = true;
     // Link do plugin (zip do release): mesma URL para todos os mods.
     conflictPluginLink.href =
-      'https://github.com/bezumiya/GoLiveBypass/releases/latest/download/goLiveBypass-vencord.zip';
+      'https://github.com/bezumiya/GoLiveBypass#instala%C3%A7%C3%A3o-passo-a-passo-completo';
 
     // Decodifica o status: pode ser "OTHER_MOD" (legado) ou "OTHER_MOD:vencord" / "OTHER_MOD:equicord" / etc.
     let baseStatus = status;

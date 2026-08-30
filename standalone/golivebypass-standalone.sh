@@ -1562,6 +1562,8 @@ while IFS='|' read -r resources flav detect id; do
         warn "Este Discord ja tem Equicord ou Vencord injetado."
         printf '      %sO standalone ocupa o mesmo lugar, entao instalar aqui desliga o outro mod.%s\n' "$C_DIM" "$C_OFF" >&2
         printf '      %sSe voce usa Equicord ou Vencord, prefira o plugin: ele convive com o resto.%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '      %sBaixe o goLiveBypass-vencord.zip na aba Releases e siga o tutorial%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '      %sdo README (Instalação: passo a passo completo).%s\n' "$C_DIM" "$C_OFF" >&2
         confirm "Substituir o mod em $resources pelo standalone?" || { warn "Deixei como estava."; continue; }
     fi
 
