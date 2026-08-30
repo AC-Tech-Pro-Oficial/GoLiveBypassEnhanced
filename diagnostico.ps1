@@ -133,8 +133,11 @@ try {
     foreach ($log in @('golivebypass.log', 'gui.log', 'bypass.log')) {
         $lp = Get-ChildItem -Path $glbDir -Filter $log -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($lp) {
-            L ("--- {0} (ultimas 20 de {1}, mtime {2})" -f $lp.FullName, (Get-Content -LiteralPath $lp | Measure-Object -Line).Lines, $lp.LastWriteTime)
-            Get-Content -LiteralPath $lp -Tail 20 | ForEach-Object { L ('  ' + (Redact $_)) }
+            # -LiteralPath quer STRING: passar o FileInfo faz o ToString() virar so o
+            # nome ("gui.log") e o Get-Content procurar na raiz atual.
+            $total = (Get-Content -LiteralPath $lp.FullName | Measure-Object -Line).Lines
+            L ("--- {0} (ultimas 20 de {1}, mtime {2})" -f $lp.FullName, $total, $lp.LastWriteTime)
+            Get-Content -LiteralPath $lp.FullName -Tail 20 | ForEach-Object { L ('  ' + (Redact $_)) }
         } else {
             L ("--- {0}: nao existe" -f $log)
         }
