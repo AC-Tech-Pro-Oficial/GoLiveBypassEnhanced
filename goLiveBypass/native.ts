@@ -56,6 +56,18 @@ const MAX_LISTED_TIMEOUT = 1500;
 const TOR_PORTS = [9060, 9052, 9150, 9050, 9250];
 const TOR_PORT_TIMEOUT_MS = 400;
 
+// O Tor renova circuitos a cada ~10min (MaxCircuitDirtiness) e um SOCKS CONNECT durante a
+// construcao do circuito novo leva 5-30s (o SocksTimeout do Tor e 60s+). Com o prazo curto de
+// uma saida gratuita (RELAY_TUNNEL_TIMEOUT_MS/HEARTBEAT_TIMEOUT_MS) o cliente abortava uma
+// conexao que o Tor completaria segundos depois -- o gateway so reconectava no proximo ciclo
+// de backoff do Discord, e reconectar no MEIO de uma call/transmissao deixa o motor de video
+// travado ate um Ctrl+R manual (mesmo bug do standalone, issue #122 -- so que aqui nao existia
+// excecao nenhuma para Tor, nem no trafego vivo nem no batimento). Usados so quando a saida
+// ativa e um Tor local (ver isTorProxy) -- esperar mais nao custa nada, porque nao ha
+// alternativa melhor esperando: o Tor ja recebeu a conexao SOCKS e so falta o circuito ficar
+// pronto.
+const TOR_RELAY_TIMEOUT_MS = 30_000;
+
 const POOL_SIZE = 5;
 const POOL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -64,6 +76,12 @@ const POOL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // o bastante para nao virar carga na saida gratuita, que costuma limitar conexoes.
 const HEARTBEAT_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 4000;
+
+// Batimento contra uma saida Tor: mais largo pelo mesmo motivo do TOR_RELAY_TIMEOUT_MS (ver
+// comentario acima, perto de TOR_PORTS). Uma falha aqui e so INFORMATIVA -- ver checkPool --
+// nunca troca nem descarta a saida ativa; a morte real do daemon aparece no trafego vivo,
+// protegido pelo TOR_RELAY_TIMEOUT_MS.
+const TOR_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_TIMEOUT_MS * 4;
 
 // Quantos batimentos seguidos uma saida pode errar antes de sair do pote. Cortar no primeiro
 // seria cruel com saida gratuita congestionada, que erra um e volta; nunca cortar deixaria o
@@ -185,6 +203,20 @@ function safeProxy(proxyRules: string) {
 
     const credentials = parsed.user === "" ? "" : `${parsed.user}:***@`;
     return `${parsed.scheme}://${credentials}${parsed.host}:${parsed.port}`;
+}
+
+// Um proxy socks5 local numa das portas classicas de Tor. Cobre tanto o Tor auto-detectado
+// (torExit) quanto um Tor configurado a mao no campo Proxy -- os dois merecem a mesma
+// paciencia contra a rotacao de circuito (TOR_RELAY_TIMEOUT_MS/TOR_HEARTBEAT_TIMEOUT_MS), e
+// nenhum dos dois entra no pote persistente (ver autoExit/writePool), entao esta checagem
+// nunca precisa consultar o pote nem nada alem do proprio endereco.
+function isTorProxy(proxy: string | null): boolean {
+    if (proxy === null) return false;
+
+    const parsed = parseProxy(proxy);
+    if (parsed === null || parsed.scheme !== "socks5") return false;
+
+    return (parsed.host === "127.0.0.1" || parsed.host === "localhost") && (TOR_PORTS as number[]).includes(parsed.port);
 }
 
 function pluginSettings() {
@@ -580,18 +612,72 @@ function firstUsable(candidates: string[], excluded: Set<string>, timeoutMs: num
     });
 }
 
-async function torExit(excluded: Set<string>, timeoutMs: number) {
+// Prazo curto para o handshake TLS puro ate o gateway -- e so isso que decide se a saida
+// entrega. Nao usa measure()/firstUsable() (a mesma dupla de requisicoes HTTP completas --
+// trace da Cloudflare + reachesGateway -- pensada para saida GRATUITA, ver o comentario de
+// measure): contra Tor essa dupla soma facilmente mais que o STALL_BUDGET_MS inteiro (visto
+// ao vivo numa VM de teste: Tor recem bootado, SOCKS respondendo, mas measure() nao
+// terminou a tempo -- o gateway caiu para uma saida gratuita com o Tor perfeitamente
+// saudavel do lado). gateway.discord.gg e o UNICO host que importa aqui: e nele que o
+// veredito de bloqueio e decidido, e um handshake TLS que fecha ja prova que o circuito
+// entrega.
+function torReachable(proxy: string, timeoutMs: number): Promise<boolean> {
+    return openTunnel(proxy, GATEWAY_HOSTS[0], 443, timeoutMs).then(socket => {
+        if (socket === null) return false;
+
+        return new Promise<boolean>(resolve => {
+            let settled = false;
+            const finish = (ok: boolean) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                tls.destroy();
+                resolve(ok);
+            };
+
+            const timer = setTimeout(() => finish(false), timeoutMs);
+            const tls = connectTls({ socket, servername: GATEWAY_HOSTS[0], host: GATEWAY_HOSTS[0] }, () => finish(true));
+            tls.on("error", () => finish(false));
+            // Fechou limpo antes do handshake terminar nao gera erro -- sem isto o retorno
+            // so viria quando o prazo estourasse.
+            tls.on("close", () => finish(false));
+        });
+    });
+}
+
+// Pais de saida do Tor, com prazo curto e BEST-EFFORT: um circuito lento nao pode atrasar a
+// decisao de USAR o Tor (essa e o torReachable ali em cima), so a decisao de RECUSAR por
+// pais. Sem resposta a tempo, segue sem filtrar -- destravar o Go Live agora vale mais que
+// um geo-check inconclusivo, e um pais errado (raro: poucos exits Tor ficam no Brasil)
+// ainda cai no retry normal se o servidor continuar bloqueando a sessao.
+const TOR_COUNTRY_TIMEOUT_MS = 2500;
+async function torCountry(proxy: string): Promise<string | null> {
+    const socket = await openTunnel(proxy, TRACE_HOST, 443, TOR_COUNTRY_TIMEOUT_MS);
+    if (socket === null) return null;
+
+    const response = await readOverTls(socket, TRACE_HOST, TRACE_PATH, TOR_COUNTRY_TIMEOUT_MS);
+    const match = response === null ? null : /(?:^|\n)loc=([A-Za-z]{2})/.exec(response);
+    return match === null ? null : match[1].toUpperCase();
+}
+
+async function torExit(excluded: Set<string>, timeoutMs: number): Promise<string | null> {
     for (const port of TOR_PORTS) {
         const proxy = `socks5://127.0.0.1:${port}`;
         if (!await listening(port, TOR_PORT_TIMEOUT_MS)) continue;
 
-        const found = await firstUsable([proxy], excluded, timeoutMs);
-        if (found !== null) {
-            log(`Tor local encontrado na porta ${port}`);
-            return found;
+        if (!await torReachable(proxy, timeoutMs)) {
+            log(`porta ${port} aberta mas nao respondeu como proxy, ignorando`);
+            continue;
         }
 
-        log(`porta ${port} aberta mas nao respondeu como proxy, ignorando`);
+        const country = await torCountry(proxy);
+        if (country !== null && excluded.has(country)) {
+            log(`Tor na porta ${port} recusado: saida em ${country}`);
+            continue;
+        }
+
+        log(`Tor local encontrado na porta ${port}${country === null ? " (pais nao verificado)" : `, saida em ${country}`}`);
+        return proxy;
     }
 
     return null;
@@ -754,8 +840,17 @@ async function pickExit(excluded: Set<string>) {
     if (manual !== "auto") {
         // Sem testar, uma saida fora do ar viraria conexao direta dentro do roteador e o
         // bypass falharia em silencio, que foi exatamente o que aconteceu com o Tor fechado.
+        // Tor configurado a mao ganha o mesmo checkout rapido (torReachable) do Tor
+        // auto-detectado (ver torExit), com orcamento mais largo (PROBE_TIMEOUT_MS): o
+        // measure() generico (2 requisicoes HTTP em serie, pensado para saida gratuita)
+        // somado ao prazo curto pensado pra vencer a corrida (WARM_PROBE_TIMEOUT_MS=2.5s)
+        // reprovava um Tor saudavel mas nao instantaneo -- visto ao vivo numa VM de teste
+        // (Tor respondendo fora do plugin, measure() ainda assim reprovando dentro do prazo).
         const started = Date.now();
-        if (await measure(manual.proxy, WARM_PROBE_TIMEOUT_MS) !== null) {
+        const manualOk = isTorProxy(manual.proxy)
+            ? await torReachable(manual.proxy, PROBE_TIMEOUT_MS)
+            : await measure(manual.proxy, WARM_PROBE_TIMEOUT_MS) !== null;
+        if (manualOk) {
             log(`seu proxy respondeu em ${Date.now() - started}ms: ${safeProxy(manual.proxy)}`);
             return settleExit(manual.proxy);
         }
@@ -785,7 +880,7 @@ async function autoExit(excluded: Set<string>) {
     }
 
     const tor = await torExit(excluded, PROBE_TIMEOUT_MS);
-    if (tor !== null) return settleExit(tor.proxy);
+    if (tor !== null) return settleExit(tor);
 
     log(`procurando uma saida nova, o gateway fica segurado por ate ${Math.round(STALL_BUDGET_MS / 1000)}s`);
     const [first] = await sharedFreeExit(excluded, 1);
@@ -855,8 +950,23 @@ async function beat() {
 // Cloudflare. O pais ja foi decidido quando a saida entrou no pote, e cada checagem extra e
 // mais uma conexao simultanea numa saida que talvez nao aceite duas.
 async function checkPool() {
-    const stored = readPool();
     const active = exit;
+
+    // Saida Tor: o batimento e so INFORMATIVO -- nunca troca nem descarta (ver comentario de
+    // TOR_HEARTBEAT_TIMEOUT_MS). Sem esta excecao, uma falha de probe durante a construcao de
+    // um circuito novo (a cada ~10min) contava como "perdeu o batimento" e o codigo abaixo
+    // trocava para uma reserva gratuita (ou descartava sem reserva) -- trocando de saida ou
+    // reconectando o gateway a toa, exatamente o bug do issue #122 do standalone. A morte REAL
+    // do Tor aparece no trafego vivo (serveRequest, protegido pelo TOR_RELAY_TIMEOUT_MS bem
+    // mais largo) e vira dropExit ali. O pote de gratuitas fica parado neste ciclo -- sem
+    // problema, ele so importa se a pessoa sair do Tor.
+    if (active !== null && isTorProxy(active)) {
+        const ok = await reachesGateway(active, TOR_HEARTBEAT_TIMEOUT_MS);
+        if (!ok) log(`batimento do Tor (${safeProxy(active)}) falhou -- circuito reconstruindo? mantendo a saida`);
+        return;
+    }
+
+    const stored = readPool();
 
     // A ativa entra na rodada mesmo estando fora do pote: proxy do campo e Tor local nunca sao
     // guardados, e sao exatamente os que a pessoa mais sente quando caem.
@@ -931,6 +1041,39 @@ let socks: Server | undefined;
 let scope: Scope = "off";
 let fallbackRule = "DIRECT";
 
+// Quando vimos um websocket de voz/video pela ultima vez. *.discord.media nunca passa pelo
+// roteador (so o gateway/login precisam de rota, ver isGatewayHost/LOGIN_HOSTS) -- por isso
+// isto observa o trafego direto do Chromium via webRequest, nao o roteador SOCKS. So
+// ATUALIZA quando um websocket de midia NOVO abre (entrar numa call, ligar a camera): uma
+// call ja em andamento, sem reconectar por dentro, nao a renova. Numa call longa e estavel
+// (comuns, dezenas de minutos) o timestamp fica parado desde a entrada -- por isso a janela
+// abaixo e generosa (20min): um valor curto classificaria uma call longa como "sem midia" e
+// retryWithProxy recarregaria a janela NO MEIO da chamada.
+let ultimaMidiaEm = 0;
+const MIDIA_RECENTE_MS = 20 * 60_000;
+let watchingMedia = false;
+
+// Instalado uma vez so (chamado de startRouter, junto da criacao do servidor SOCKS -- os
+// dois tem o mesmo ciclo de vida de "uma vez por processo"). onBeforeRequest so REGISTRA um
+// listener por sessao -- chamar de novo so o substitui por um equivalente, entao repetir a
+// chamada e inofensivo, mas a flag evita o trabalho a toa se enable() rodar mais de uma vez.
+function watchMedia() {
+    if (watchingMedia) return;
+    watchingMedia = true;
+
+    session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+        if (details.resourceType === "webSocket") {
+            try {
+                if (new URL(details.url).hostname.endsWith(".discord.media")) ultimaMidiaEm = Date.now();
+            } catch {
+                // url estranha, ignora
+            }
+        }
+
+        callback({});
+    });
+}
+
 function refuse(client: Socket) {
     // 2 = "nao permitido pelas regras": o roteador so encaminha os hosts que o PAC manda.
     if (!client.destroyed) client.end(Buffer.from([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]));
@@ -1003,7 +1146,11 @@ async function serveRequest(client: Socket, request: Buffer | null) {
 
     let upstream: Socket | null = null;
     if (through !== null) {
-        upstream = await openTunnel(through, target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS);
+        // Saida Tor ganha prazo bem mais largo (rotacao de circuito, ver TOR_RELAY_TIMEOUT_MS)
+        // -- so na tentativa pela ATIVA. As reservas abaixo nunca sao Tor (ele nunca entra no
+        // pote persistente), entao continuam no prazo curto de sempre.
+        const prazoAtiva = isTorProxy(through) ? TOR_RELAY_TIMEOUT_MS : RELAY_TUNNEL_TIMEOUT_MS;
+        upstream = await openTunnel(through, target.host, target.port, prazoAtiva);
 
         // Trocar para uma reserva ja testada custa uma conexao; esperar a proxima abertura do
         // Discord custa a sessao inteira sem bypass. As reservas correm juntas em vez de uma
@@ -1145,6 +1292,7 @@ async function startRouter(next: Scope) {
 
         socks = server;
         log(`roteador local de pe na porta ${(server.address() as AddressInfo).port}`);
+        watchMedia();
     }
 
     // Loopback e porta escolhida pelo sistema: nao ha colisao possivel, e nada de fora da
@@ -1348,6 +1496,21 @@ export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountrie
     if (event.sender.isDestroyed()) {
         retries--;
         return { retried: false as const, reason: "janela indisponivel" };
+    }
+
+    // Reconectar o gateway (o que reload() faz la embaixo) no MEIO de uma call/transmissao
+    // deixa o motor de video travado ate um Ctrl+R manual -- confirmado ao vivo no standalone
+    // (issue #129/#131), mesmo binario de video do Discord dos dois lados. Aqui o reload era
+    // incondicional: nada segurava a mao antes de derrubar a call inteira por baixo do pe da
+    // pessoa. ultimaMidiaEm nao cobre uma call ja em andamento sem reconectar por dentro (ver
+    // o comentario dela), mas reduz bastante o risco sem custar nada em troca -- o pior caso
+    // sem o guard e so ficar bloqueado ate a call acabar, esperando o proximo CONNECTION_OPEN.
+    // Devolve a vaga (nao foi o servidor que negou, foi uma escolha nossa) e nao mexe em
+    // exit/scope: a proxima reconexao de verdade tenta de novo do zero.
+    if (Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS) {
+        retries--;
+        log(`bloqueado atras de ${safeProxy(through)}, mas ha midia recente (call/transmissao) -- nao recarregando por baixo do seu pe`);
+        return { retried: false as const, reason: "chamada em andamento" };
     }
 
     log(`o servidor bloqueou esta sessao, recarregando atras de ${safeProxy(through)} (tentativa ${attempt} de ${MAX_RETRIES})`);

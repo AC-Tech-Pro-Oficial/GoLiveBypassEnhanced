@@ -274,6 +274,15 @@ async function retryBehindExit() {
             return;
         }
 
+        // O processo principal recusou recarregar de proposito: ha midia recente (call ou
+        // transmissao em andamento) e reconectar o gateway agora travaria o video ate um
+        // Ctrl+R manual, ou pior, derrubaria a chamada. Toast neutro (sem FAILURE) -- nao e um
+        // erro, e uma escolha de seguranca.
+        if (result.reason === "chamada em andamento") {
+            showToast("GoLiveBypass: this session is still blocked, but you're in a call or stream right now. Won't restart Discord automatically -- reload manually (Ctrl+R) once you hang up, or it sorts itself out on the next reconnect.");
+            return;
+        }
+
         showToast(`GoLiveBypass could not unlock this session (${result.reason}). Open your proxy, then restart Discord from the tray.`, Toasts.Type.FAILURE);
     } catch (error) {
         logger.error("Failed to reach the desktop process", error);

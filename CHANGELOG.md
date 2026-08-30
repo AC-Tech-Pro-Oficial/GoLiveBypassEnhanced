@@ -55,15 +55,57 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   spawnavam dois `tor.exe` — um perdia a porta e morria com "Reading config
   failed".
 
-### Nota de escopo
-- O plugin do Vencord/Equicord (`goLiveBypass/native.ts`) é uma implementação
-  separada do bypass (não gerada a partir de `standalone/golivebypass.js`) e
-  **não recebeu nenhuma das mitigações acima nem as da 1.1.11/1.1.10**
-  (rotação de circuito do Tor, fallback de cold start, recarga fora de
-  chamada, `routeMode`). Repete o padrão já visto na
-  [#37](https://github.com/bezumiya/GoLiveBypass/issues/37). Portar as
-  mitigações para o plugin fica como trabalho futuro dedicado — fora do
-  escopo desta beta, que cobre GUI e standalone.
+### Plugin Vencord/Equicord (`goLiveBypass/native.ts`)
+O plugin é uma implementação separada do bypass (não gerada a partir de
+`standalone/golivebypass.js`, arquitetura própria: patches de webpack +
+roteador local + IPC com o renderer). Repetia o padrão da
+[#37](https://github.com/bezumiya/GoLiveBypass/issues/37) — nenhuma das
+mitigações de estabilidade das versões recentes tinha chegado até ele. Esta
+rodada portou as duas mais críticas, adaptadas à arquitetura do plugin (não
+uma cópia mecânica do standalone):
+- **Rotação de circuito do Tor não derruba mais o gateway** (porte do
+  [#122](https://github.com/bezumiya/GoLiveBypass/issues/122)): `isTorProxy()`
+  identifica quando a saída ativa é um Tor local (auto-detectado ou digitado
+  à mão no campo Proxy) e dá a ela prazo bem mais largo no trafego vivo
+  (`TOR_RELAY_TIMEOUT_MS`, 30s) e no batimento (`TOR_HEARTBEAT_TIMEOUT_MS`,
+  informativo — nunca troca nem descarta a saída). Antes, qualquer saída
+  (Tor incluído) usava os prazos curtos pensados para proxy gratuita, e uma
+  falha de probe durante a construção de um circuito novo (a cada ~10min)
+  trocava de saída ou reconectava o gateway à toa.
+- **Reload de sessão bloqueada não derruba mais uma call/transmissão em
+  andamento**: `retryWithProxy` recarregava a janela do Discord **sem
+  nenhuma verificação** sempre que o servidor continuava bloqueando o vídeo
+  — reconectar o gateway no meio de uma call trava o motor de vídeo até um
+  Ctrl+R manual (confirmado ao vivo no standalone, issue #129/#131, mesmo
+  motor de vídeo dos dois lados). Agora um hook em
+  `session.defaultSession.webRequest` observa quando um websocket de mídia
+  (`*.discord.media`) abre — se houver um recente (call/transmissão em
+  andamento, janela de 20min), o reload não acontece e a pessoa recebe um
+  toast explicando em vez de ter a call encerrada por baixo do pé.
+- **Detecção do Tor (auto ou manual) até 10x mais rápida**: achada testando
+  ao vivo numa VM — o Tor configurado à mão (ou auto-detectado) usava a
+  mesma função de teste da saída gratuita (`measure`, duas requisições HTTP
+  completas em série: trace da Cloudflare + checagem do gateway), com prazo
+  curto pensado para vencer a corrida do gateway (2,5s). Contra um Tor são
+  mas não instantâneo isso reprovava a saída — visto ao vivo: Tor
+  respondendo fora do plugin, `measure()` ainda assim estourando o prazo
+  dentro dele, e a sessão caindo para uma saída gratuita aleatória com o Tor
+  perfeitamente saudável do lado. `torReachable()` novo faz só o handshake
+  TLS até o gateway (o único host que decide o bloqueio) com prazo bem mais
+  largo; `torCountry()` novo faz a checagem de país à parte, com prazo curto
+  e best-effort (não filtra se não responder a tempo — melhor destravar
+  agora que ficar preso num geo-check inconclusivo). Confirmado ao vivo: o
+  proxy Tor manual, que antes falhava e caía para uma saída gratuita da
+  Coreia do Sul, passou a responder em ~1,1s.
+
+Fora do escopo desta rodada (documentado como trabalho futuro): o plugin não
+tem um modo "só Tor, nunca vaza direto" equivalente ao `routeMode` do
+standalone/GUI — ele sempre tenta manual → pote → Tor → gratuitas → direto,
+nessa ordem, com um teto de 12s. Sem relato específico de "carregamento
+infinito ao abrir" para o plugin (o padrão da issue #116 é sobre a corrida
+GUI×Discord no boot do Windows, que não existe da mesma forma aqui), não
+implementei um modo equivalente nesta rodada — adicionar um exigiria nova
+opção de settings e mudança maior na cadeia `pickExit`/`autoExit`.
 
 ## [1.1.11] - 2026-08-29
 
