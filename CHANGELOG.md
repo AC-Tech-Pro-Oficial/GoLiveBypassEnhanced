@@ -7,17 +7,63 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Aviso visível + recarga automática no arranque frio em modo Tor** (beta 2,
+  [#116](https://github.com/bezumiya/GoLiveBypass/issues/116)): a GUI é um
+  processo Electron à parte do Discord e, no boot do Windows, precisa
+  terminar o próprio arranque antes de sequer chamar o Tor — o Discord
+  (nativo, mais rápido, e também com "Iniciar com Windows" ligado) costuma
+  vencer essa corrida. O bypass já fazia a coisa seguramente (segura o
+  gateway, nunca vaza direto pelo IP brasileiro), mas sem aviso a pessoa só
+  via "carregando" parado, sem saber se travou. Agora: (1) um banner
+  informativo aparece na janela do Discord avisando que o Tor está subindo
+  (com retentativa até a janela do cliente existir — o Discord mostra uma
+  splash sem URL antes do app de verdade); (2) assim que o Tor responde, a
+  janela recarrega sozinha na hora (se o gateway ainda não tiver roteado por
+  conta própria), em vez de esperar o backoff do próprio Discord tentar de
+  novo. Testado ao vivo (Discord + Tor reais numa VM Windows): o arranque
+  frio, a detecção do Tor pelo batimento e a recarga (ou o cancelamento dela
+  quando o gateway já roteou sozinho) se comportaram como esperado.
+- **Orçamento de espera do Tor no arranque frio aumentado de 45s para 90s**
+  (`TOR_HOLD_BUDGET_MS`): com o aviso visível acima, esperar mais não
+  confunde mais ninguém, e reduz quantos ciclos de recusa+retentativa o
+  Discord precisa até o Tor (que pode legitimamente levar mais de 45s numa
+  máquina fria) responder.
+- **Botão "Reiniciar agora" no banner de reconexão durante uma
+  chamada/transmissão**: o aviso amarelo que já existia (issue #129/#131)
+  pedia Ctrl+R por texto; agora tem um botão que faz o mesmo
+  (`location.reload()` na própria janela do Discord) com um clique.
+- **Janela de "chamada recente" alargada de 5 para 20 minutos**
+  (`MIDIA_RECENTE_MS`): essa marca só é atualizada quando um websocket de
+  mídia NOVO abre (entrar numa call, ligar a câmera) — uma call já em
+  andamento, sem reconectar por dentro, não a renova. Em calls/streams
+  longas (comuns, de dezenas de minutos) o valor antigo de 5 min podia
+  classificar uma chamada ainda ativa como "sem mídia" e a recarga
+  automática (abaixo) reiniciaria a janela **no meio da chamada** — o oposto
+  do que a guarda existe para evitar. Vinte minutos reduz bastante essa
+  janela de risco (não elimina para calls mais longas: o projeto não
+  inspeciona o payload do gateway para saber se a call segue de pé, só os
+  hosts do handshake, por design).
 - **Mitigação do "RTC connecting" eterno após instabilidade do Tor** (beta:
   [#129](https://github.com/bezumiya/GoLiveBypass/issues/129),
   [#131](https://github.com/bezumiya/GoLiveBypass/issues/131)): quando o
-  gateway reconecta **sem chamada/transmissão nos últimos 5 min**, a janela
-  do Discord é recarregada proativamente (após provar que a saída está
-  entregando) — o motor de vídeo renasce limpo em vez de travar na próxima
-  tentativa de Go Live. Com chamada em andamento continua só o banner manual
-  (reload encerraria a call). Máximo de 1 reload a cada 3 min.
+  gateway reconecta **sem chamada/transmissão recente** (ver janela acima),
+  a janela do Discord é recarregada proativamente (após provar que a saída
+  está entregando) — o motor de vídeo renasce limpo em vez de travar na
+  próxima tentativa de Go Live. Com chamada em andamento continua só o
+  banner manual (reload encerraria a call). Máximo de 1 reload a cada 3 min.
 - **Singleton do `garantirTor`**: chamadas concorrentes (boot + janela)
   spawnavam dois `tor.exe` — um perdia a porta e morria com "Reading config
   failed".
+
+### Nota de escopo
+- O plugin do Vencord/Equicord (`goLiveBypass/native.ts`) é uma implementação
+  separada do bypass (não gerada a partir de `standalone/golivebypass.js`) e
+  **não recebeu nenhuma das mitigações acima nem as da 1.1.11/1.1.10**
+  (rotação de circuito do Tor, fallback de cold start, recarga fora de
+  chamada, `routeMode`). Repete o padrão já visto na
+  [#37](https://github.com/bezumiya/GoLiveBypass/issues/37). Portar as
+  mitigações para o plugin fica como trabalho futuro dedicado — fora do
+  escopo desta beta, que cobre GUI e standalone.
 
 ## [1.1.11] - 2026-08-29
 
