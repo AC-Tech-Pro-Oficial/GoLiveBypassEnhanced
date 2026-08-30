@@ -1456,19 +1456,36 @@ build_mod() {
 # (Extrato do antigo inject_parallel: o seletor novo escolhe varios alvos.)
 patch_parallel_one() {
     local root="$1" target="$2"
-    local asar="" client_name="" app_path=""
+    local asar="" client_name="" app_path="" mod=""
 
     [ -n "$target" ] || return 1
 
-    # Mapear path -> nome do cliente e arquivo asar a usar
+    # Mapear path -> nome do cliente
     case "$target" in
-        */equibop|*/Equibop)
-            client_name="Equibop"; asar="$root/dist/equibop.asar"; app_path="$target/app.asar" ;;
-        */vesktop|*/Vesktop)
-            client_name="Vesktop"; asar="$root/dist/vesktop.asar"; app_path="$target/app.asar" ;;
-        */legcord|*/Legcord)
-            client_name="Legcord"; asar="$root/dist/legcord.asar"; app_path="$target/app.asar" ;;
+        */equibop|*/Equibop) client_name="Equibop" ;;
+        */vesktop|*/Vesktop) client_name="Vesktop" ;;
+        */legcord|*/Legcord) client_name="Legcord" ;;
         *) printf "  [!] Cliente paralelo desconhecido: %s\n" "$target"; return 1 ;;
+    esac
+
+    # Equicord e Vencord sao forks DIFERENTES: o build do Equicord so empacota
+    # equibop.asar (o cliente dele), o do Vencord so vesktop.asar (o dele) -- nenhum dos
+    # dois gera o .asar do outro. Legcord e um projeto A PARTE (nao e fork de nenhum dos
+    # dois): nenhum checkout Equicord/Vencord gera legcord.asar, entao "rode pnpm build e
+    # tente de novo" era enganoso nesse caso -- nenhum build ia gerar aquele arquivo. Essa
+    # e a causa raiz por tras das issues #123/#130/#132/#133 no lado Windows (sempre
+    # Vesktop detectado com um checkout Equicord); aqui do lado Linux o bug era o mesmo,
+    # so que sem relato ainda.
+    app_path="$target/app.asar"
+    mod="$(checkout_mod "$root")"
+    case "$mod:$client_name" in
+        Equicord:Equibop) asar="$root/dist/equibop.asar" ;;
+        Vencord:Vesktop) asar="$root/dist/vesktop.asar" ;;
+        *)
+            printf "  [!] %s nao e gerado por um checkout %s (Equicord builda so o Equibop, Vencord so o Vesktop; Legcord e um app a parte -- nenhum dos dois builda ele). Use um checkout do mod certo para %s, ou injete o %s pelo instalador dele mesmo.\n" \
+                "$client_name" "$mod" "$client_name" "$client_name"
+            return 1
+            ;;
     esac
 
     if [ ! -f "$asar" ]; then

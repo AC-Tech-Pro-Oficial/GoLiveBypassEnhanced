@@ -55,6 +55,29 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   spawnavam dois `tor.exe` — um perdia a porta e morria com "Reading config
   failed".
 
+### Corrigido
+- **"Falha ao injetar" em cliente paralelo (Vesktop/Equibop/Legcord) sem dizer o motivo real**
+  ([#123](https://github.com/bezumiya/GoLiveBypass/issues/123),
+  [#130](https://github.com/bezumiya/GoLiveBypass/issues/130),
+  [#132](https://github.com/bezumiya/GoLiveBypass/issues/132),
+  [#133](https://github.com/bezumiya/GoLiveBypass/issues/133)): quatro relatos do mesmo
+  padrão — "patch direto falhou (motivo no aviso acima)" — mas o "aviso" só ia para o
+  console, nunca para o relato automático de bug (`--- logs ---` sempre vazio), obrigando
+  diagnóstico manual toda vez. Causa raiz encontrada: Equicord e Vencord são forks
+  **diferentes** — o build do Equicord só empacota `dist/equibop.asar` (o cliente dele), o
+  do Vencord só `dist/vesktop.asar` (o dele); nenhum dos dois gera o `.asar` do outro. Quem
+  tem o Vesktop instalado (comum: gente que usa só o Vesktop, sem Discord oficial) mas está
+  com um checkout Equicord (a escolha mais comum) sempre batia nessa parede — e a mensagem
+  antiga ("rode `pnpm build` e tente de novo") era **enganosa**: nenhum `pnpm build` nesse
+  checkout jamais geraria `vesktop.asar`. Legcord é um projeto à parte (não é fork de
+  nenhum dos dois) e tinha o mesmo problema. Agora o instalador (`.ps1` e `.sh`) detecta o
+  mod do checkout (`Get-CheckoutMod`/`checkout_mod`, já existente) e, se o par mod×cliente
+  não bate, explica exatamente isso — com o texto chegando de verdade no relato automático
+  de bug (o `.ps1` agora devolve o motivo real em vez de "no aviso acima"). Teste de
+  regressão novo: `tests/test-parallel-client-mismatch.sh` (dash/debian, 10 asserções) e
+  validação funcional ao vivo do `.ps1` numa VM Windows (5 cenários: mismatch detectado,
+  sucesso normal, build realmente faltando, cliente desconhecido, e a checagem de mod).
+
 ### Plugin Vencord/Equicord (`goLiveBypass/native.ts`)
 O plugin é uma implementação separada do bypass (não gerada a partir de
 `standalone/golivebypass.js`, arquitetura própria: patches de webpack +

@@ -773,19 +773,48 @@ function Select-InjectionTargets($targets) {
     return $escolhidos
 }
 
+# Qual .asar cada mod consegue gerar para cada cliente paralelo. Equicord e Vencord sao forks
+# DIFERENTES: o build do Equicord so empacota equibop.asar (o cliente dele), o do Vencord so
+# vesktop.asar (o dele) -- nenhum dos dois gera o .asar do outro. Legcord e um projeto A PARTE
+# (nao e fork de nenhum dos dois): nenhum checkout Equicord/Vencord gera legcord.asar, entao
+# "rode pnpm build e tente de novo" era enganoso nesse caso -- nenhum build ia gerar aquele
+# arquivo. Isso e a causa raiz por tras de #123/#130/#132/#133 (sempre Vesktop detectado com
+# um checkout Equicord): o "aviso acima" que a mensagem de erro citava nunca chegava no relato
+# de bug (so ia para o console), entao a causa ficava invisivel para quem nao colava o
+# terminal inteiro.
+$ParallelAsarPorMod = @{
+    Equicord = @{ Equibop = 'equibop.asar' }
+    Vencord  = @{ Vesktop = 'vesktop.asar' }
+}
+
 function Copy-PatchParallel($root, $resources) {
     # Patch direto em cliente paralelo: o build do mod gera dist\<cliente>.asar;
     # copia sobre o app.asar do cliente, com backup _app.asar (idempotente).
-    $nome = $null; $asar = $null
+    $nome = $null
     switch -Regex ($resources) {
-        '(?i)equibop' { $nome = 'Equibop'; $asar = Join-Path $root 'dist\equibop.asar' }
-        '(?i)vesktop' { $nome = 'Vesktop'; $asar = Join-Path $root 'dist\vesktop.asar' }
-        '(?i)legcord' { $nome = 'Legcord'; $asar = Join-Path $root 'dist\legcord.asar' }
-        default { Write-Warn "Cliente paralelo desconhecido: $resources"; return $false }
+        '(?i)equibop' { $nome = 'Equibop' }
+        '(?i)vesktop' { $nome = 'Vesktop' }
+        '(?i)legcord' { $nome = 'Legcord' }
+        default {
+            $motivo = "cliente paralelo desconhecido: $resources"
+            Write-Warn $motivo
+            return [pscustomobject]@{ Ok = $false; Motivo = $motivo }
+        }
     }
+
+    $mod = Get-CheckoutMod $root
+    $asarName = $ParallelAsarPorMod[$mod][$nome]
+    if (-not $asarName) {
+        $motivo = "$nome nao e gerado por um checkout $mod (Equicord builda so o Equibop, Vencord so o Vesktop; Legcord e um app a parte -- nenhum dos dois builda ele). Use um checkout do mod certo para $nome (-Source), ou injete o $nome pelo instalador dele mesmo."
+        Write-Warn $motivo
+        return [pscustomobject]@{ Ok = $false; Motivo = $motivo }
+    }
+
+    $asar = Join-Path $root "dist\$asarName"
     if (-not (Test-Path -LiteralPath $asar)) {
-        Write-Warn "O build nao gerou $asar. Rode 'pnpm build' no checkout e tente de novo."
-        return $false
+        $motivo = "o build nao gerou $asar. Rode 'pnpm build' no checkout $mod e tente de novo."
+        Write-Warn $motivo
+        return [pscustomobject]@{ Ok = $false; Motivo = $motivo }
     }
     $appAsar = Join-Path $resources 'app.asar'
     $backup = Join-Path $resources '_app.asar'
@@ -795,7 +824,7 @@ function Copy-PatchParallel($root, $resources) {
     }
     Copy-Item -LiteralPath $asar -Destination $appAsar -Force
     Write-Ok "$nome patcheado: $appAsar"
-    return $true
+    return [pscustomobject]@{ Ok = $true; Motivo = '' }
 }
 
 function Show-ModChoice {
@@ -1034,9 +1063,13 @@ function Invoke-Injection($root, $targets) {
         $detalhes = [System.Collections.Generic.List[string]]::new()
         foreach ($t in @($targets)) {
             if ($t.Tipo -eq 'P') {
-                if (-not (Copy-PatchParallel $root $t.Resources)) {
+                $resultado = Copy-PatchParallel $root $t.Resources
+                if (-not $resultado.Ok) {
                     $falha = $true
-                    $detalhes.Add("cliente paralelo ($($t.Resources)): patch direto falhou (motivo no aviso acima)")
+                    # O motivo real (nao mais "no aviso acima"): antes disto, o motivo so ia
+                    # para o console via Write-Warn e nunca chegava no relato automatico de bug
+                    # (issues #123/#130/#132/#133, todas com "--- logs ---" vazio).
+                    $detalhes.Add("cliente paralelo ($($t.Resources)): $($resultado.Motivo)")
                 }
                 continue
             }
