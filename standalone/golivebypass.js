@@ -54,8 +54,13 @@ const TOR_PORT_TIMEOUT_MS = 400;
 const HOLD_BUDGET_MS = 12_000;
 // No modo "tor" o bootstrap do daemon leva ~20s numa maquina fria, e neste modo estourar o
 // prazo nao vira saida direta (o serveSocks recusa), entao esperar mais e barato: o custo e
-// o gateway demorar a conectar, nao vazar.
-const TOR_HOLD_BUDGET_MS = 45_000;
+// o gateway demorar a conectar, nao vazar. No BOOT do Windows o orcamento e maior ainda na
+// pratica: a GUI e um processo Electron a parte, que precisa terminar o proprio arranque
+// ANTES de sequer chamar o Tor -- o Discord (nativo, mais rapido) costuma vencer a corrida
+// (issue #116: "carregamento infinito" so no modo tor, so ao abrir com o Windows). Por isso
+// 90s em vez de 45s: com o aviso visivel (showTorBootBanner) esperar mais nao confunde, e o
+// custo so aparece no primeiro Discord aberto depois de ligar o PC.
+const TOR_HOLD_BUDGET_MS = 90_000;
 // O pool guardado vale por este tempo. A revalidacao acontece na abertura (probe real em
 // cada saida), entao uma idade longa e segura: o que importa e ter candidatas para revalidar
 // em vez de baixar a lista inteira (lenta) com o gateway ja conectando. 30min fazia o pool
@@ -252,6 +257,15 @@ let gatewayWentDirectAt = 0;   // quando o roteador abriu direto para um host de
 let reloadCount = 0;           // recargas nesta execucao (reseta quando a sessao volta roteada)
 let lastReloadAt = 0;          // cooldown
 let reloading = false;         // single-flight
+
+// Estado do arranque frio em modo tor: quando o Discord abre (ou o Windows liga) antes do
+// Tor da GUI terminar de subir, as conexoes de gateway ficam SEGURADAS (nunca vazam direto --
+// ver HOLD_BUDGET_MS/TOR_HOLD_BUDGET_MS). Sem aviso a pessoa so ve "carregando" para sempre e
+// nao sabe se travou ou se e so questao de tempo (issue #116). Este timestamp marca quando a
+// espera comecou; zerado assim que uma saida real aparece (settleExit), momento em que o
+// banner some e a janela recarrega sozinha em vez de esperar o proprio Discord perceber e
+// tentar de novo por conta propria (que pode demorar mais que so tentar na hora).
+let coldTorHoldSince = 0;
 
 // Pasta estavel onde a GUI le os logs (sobrevive a updates do Discord e a
 // desativacao). Espelhar aqui e o que permite o report de bug pegar o log do
@@ -1136,6 +1150,17 @@ function settleExit(proxy) {
     if (proxy !== null) lastExitAt = Date.now();
     while (waitingForExit.length > 0) waitingForExit.shift()(proxy);
 
+    // Saida real depois de um arranque frio em modo tor: some com o aviso e recarrega a
+    // janela na hora, em vez de esperar o Discord perceber sozinho que pode tentar de novo
+    // (o backoff dele nao e nosso e pode demorar bem mais que isto). Guarda antes de
+    // maybeReloadAfterDirect de proposito: sao sinais diferentes (seguro vs vazou), e o
+    // primeiro nunca chega a marcar gatewayWentDirectAt (modo tor nunca vaza).
+    if (proxy !== null && coldTorHoldSince !== 0) {
+        coldTorHoldSince = 0;
+        hideTorBootBanner();
+        maybeReloadAfterColdHold();
+    }
+
     // Saida nova no ar e o gateway tinha saido direto ha pouco: esta sessao nasceu bloqueada
     // e so um reload faz o gateway renascer atras da saida. Avalia (com todas as guardas).
     if (proxy !== null && gatewayWentDirectAt !== 0) {
@@ -1272,8 +1297,19 @@ let gatewayConnCount = 0;
 // Quando vimos um websocket de voz/video pela ultima vez. O aviso de reconexao so faz sentido
 // com chamada ou transmissao em andamento: fora disso a reconexao do gateway nao quebra nada
 // visivel, e avisar so assustaria -- ainda por cima sugerindo um Ctrl+R que derruba a call.
+//
+// Esta marca so ATUALIZA quando um websocket de midia NOVO abre (entrar numa call, ligar a
+// camera) -- uma call ja em andamento, sem novo handshake, nao a renova. Numa call longa e
+// estavel (comum: streams/reunioes de dezenas de minutos) o timestamp fica parado desde a
+// entrada. Por isso a janela e generosa (20min, nao 5): um valor curto classificaria uma
+// call longa como "sem midia" e o autoReloadForCleanEngine recarregaria a janela NO MEIO da
+// chamada, exatamente o dano que esta guarda existe para evitar. Vinte minutos nao elimina o
+// risco para calls mais longas que isso (o projeto nao inspeciona o payload do gateway para
+// saber se a call segue de pe -- so os hosts de handshake, por design), mas reduz bastante a
+// janela de perigo sem custar nada em troca (o pior caso sem isto e so o banner manual, que
+// ja e o comportamento seguro de antes desta funcao existir).
 let ultimaMidiaEm = 0;
-const MIDIA_RECENTE_MS = 5 * 60_000;
+const MIDIA_RECENTE_MS = 20 * 60_000;
 
 // Um Ctrl+R (ou a nossa propria recarga) comeca uma sessao NOVA: o gateway que nascer depois
 // dela e o primeiro dela, nao uma reconexao no meio de nada. Sem zerar aqui, o aviso voltava
@@ -1357,8 +1393,8 @@ function markGatewayRouted() {
 // injetado via CDP. Nao mexe em nada do Discord, so soma um div — furtivo o bastante para nao
 // atrapalhar a transmissao, visivel o bastante para a pessoa perceber e decidir.
 const WARN_BANNER_TEXT = "GoLiveBypass: o gateway reconectou no meio da sessao. Se o video da " +
-    "sua transmissao travou (ficou so o audio), de Ctrl+R no Discord para corrigir " +
-    "-- isso sai da chamada de voz.";
+    "sua transmissao travou (ficou so o audio), clique em \"Reiniciar agora\" abaixo (ou " +
+    "Ctrl+R) -- isso sai da chamada de voz.";
 
 // Reconexao do gateway SEM midia recente (nem call, nem live): o motor de midia
 // (WASM) pode ter ficado stale com o gateway morto — e a PROXIMA tentativa de
@@ -1416,8 +1452,21 @@ function showReconnectWarning(recorrencias) {
         "    var text = document.createElement('div');\n" +
         "    text.id = 'golivebypass-warn-text';\n" +
         "    text.style.cssText = 'color:#d8dadf;';\n" +
+        "    var restartBtn = document.createElement('button');\n" +
+        "    restartBtn.type = 'button';\n" +
+        "    restartBtn.textContent = 'Reiniciar agora';\n" +
+        "    restartBtn.style.cssText = 'margin-top:8px;padding:5px 10px;border:0;" +
+        "border-radius:6px;background:#f0b232;color:#111214;font-weight:600;font-size:12px;" +
+        "cursor:pointer;';\n" +
+        "    restartBtn.onmouseenter = function(){ restartBtn.style.background = '#f5c862'; };\n" +
+        "    restartBtn.onmouseleave = function(){ restartBtn.style.background = '#f0b232'; };\n" +
+        // location.reload() roda no CONTEXTO da pagina do Discord (nao volta para o main
+        // process): equivale exatamente ao Ctrl+R que o texto do banner ja recomendava, so
+        // que num clique em vez de exigir o atalho de teclado.
+        "    restartBtn.onclick = function(){ location.reload(); };\n" +
         "    body.appendChild(title);\n" +
         "    body.appendChild(text);\n" +
+        "    body.appendChild(restartBtn);\n" +
         "    var closeBtn = document.createElement('div');\n" +
         "    closeBtn.textContent = '\\u2715';\n" +
         "    closeBtn.style.cssText = 'cursor:pointer;color:#949ba4;font-size:14px;flex-shrink:0;padding:2px;';\n" +
@@ -1437,11 +1486,139 @@ function showReconnectWarning(recorrencias) {
     win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso: " + error.message));
 }
 
+// Aviso INFORMATIVO (nao e alerta de erro) de que o Discord esta esperando o Tor terminar de
+// subir no arranque frio -- sem isto a pessoa so ve "carregando" parado, sem saber se travou
+// ou se e so demora normal (issue #116: "carregamento infinito ao abrir o aplicativo", visto
+// so em modo tor, so ao ligar o PC junto com o Windows -- a GUI e um processo Electron a
+// parte e o Discord nativo costuma vencer a corrida de arranque). Elemento com id proprio,
+// diferente do banner de reconexao: os dois podem coexistir sem um apagar o outro.
+const TOR_WAIT_BANNER_TEXT = "GoLiveBypass: aguardando o Tor terminar de iniciar para " +
+    "liberar o Discord. Isso e normal logo apos ligar o PC e costuma levar menos de um " +
+    "minuto -- esta janela some sozinha assim que o Tor responder.";
+
+// Quanto insistir achando a janela do cliente antes de desistir do aviso, e de quanto em
+// quanto tempo. O Discord mostra uma splash SEM url discord.com por um tempo antes do app de
+// verdade (clientWindow() so acha a segunda) -- sem retry, chamar showTorBootBanner() uma vez
+// so no start() perderia a janela sempre que ela ainda nao existisse, e o aviso nunca
+// apareceria justamente no caso mais comum (arranque frio == Discord tambem acabou de abrir).
+const TOR_BOOT_BANNER_RETRY_MS = 1500;
+const TOR_BOOT_BANNER_MAX_WAIT_MS = 20_000;
+
+function showTorBootBanner(limiteMs) {
+    // coldTorHoldSince zera assim que settleExit acha uma saida (ver settleExit): se isso
+    // aconteceu enquanto esperavamos a janela aparecer, o aviso perdeu a validade -- mostra-lo
+    // agora só confundiria (diria "aguardando" de algo que ja foi resolvido).
+    if (coldTorHoldSince === 0) return;
+
+    const win = clientWindow();
+    if (win === null) {
+        const limite = limiteMs !== undefined ? limiteMs : Date.now() + TOR_BOOT_BANNER_MAX_WAIT_MS;
+        if (Date.now() >= limite) return; // desiste; a janela nao apareceu a tempo
+        setTimeout(() => showTorBootBanner(limite), TOR_BOOT_BANNER_RETRY_MS);
+        return;
+    }
+
+    // Sem contagem/atualizacao de texto (ao contrario do banner de reconexao): este e um
+    // estado de "ainda nao", nao um evento que se repete -- se o elemento ja existe, nao ha
+    // nada novo para mostrar.
+    const script = "(function(){\n" +
+        "  var el = document.getElementById('golivebypass-tor-wait');\n" +
+        "  if (el) return;\n" +
+        "  el = document.createElement('div');\n" +
+        "  el.id = 'golivebypass-tor-wait';\n" +
+        "  el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;" +
+        "display:flex;align-items:flex-start;gap:10px;width:320px;" +
+        "background:#2b2d31;color:#f2f3f5;padding:14px 16px;border-radius:10px;" +
+        "border-left:4px solid #5865f2;" +
+        "font:13px/1.45 \"gg sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;" +
+        "box-shadow:0 8px 24px rgba(0,0,0,.45);" +
+        "opacity:0;transform:translateY(8px);transition:opacity .2s ease,transform .2s ease;';\n" +
+        "  var icon = document.createElement('div');\n" +
+        "  icon.textContent = '\u23F3';\n" +
+        "  icon.style.cssText = 'font-size:18px;line-height:1;flex-shrink:0;margin-top:1px;';\n" +
+        "  var body = document.createElement('div');\n" +
+        "  body.style.cssText = 'flex:1;min-width:0;';\n" +
+        "  var title = document.createElement('div');\n" +
+        "  title.textContent = 'GoLiveBypass';\n" +
+        "  title.style.cssText = 'font-weight:600;margin-bottom:3px;color:#fff;';\n" +
+        "  var text = document.createElement('div');\n" +
+        "  text.style.cssText = 'color:#d8dadf;';\n" +
+        "  text.textContent = " + JSON.stringify(TOR_WAIT_BANNER_TEXT) + ";\n" +
+        "  body.appendChild(title);\n" +
+        "  body.appendChild(text);\n" +
+        "  el.appendChild(icon);\n" +
+        "  el.appendChild(body);\n" +
+        "  document.body.appendChild(el);\n" +
+        "  requestAnimationFrame(function(){ el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });\n" +
+        "})();";
+
+    win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso de espera do Tor: " + error.message));
+}
+
+function hideTorBootBanner() {
+    const win = clientWindow();
+    if (win === null) return;
+    const script = "(function(){ var el = document.getElementById('golivebypass-tor-wait'); " +
+        "if (el) { el.style.opacity = '0'; setTimeout(function(){ el.remove(); }, 250); } })();";
+    win.webContents.executeJavaScript(script).catch(() => { });
+}
+
+// O Tor respondeu depois de um arranque frio (issue #116): a conexao de gateway que estava
+// segurada pode ja ter sido recusada (TOR_HOLD_BUDGET_MS estourado antes do Tor ficar
+// pronto), e dai em diante quem decide QUANDO tentar de novo e o proprio Discord -- pode ser
+// rapido, pode demorar bem mais que isto. Recarregar a janela agora forca uma tentativa
+// imediata pela saida que acabou de ficar pronta, em vez de confiar no backoff dele. Guardas:
+// saida comprovadamente viva (probe) e cancela se o gateway ja roteou sozinho enquanto o
+// probe rodava (a conexao que estava esperando em currentExit foi entregue direto pelo
+// waitingForExit, sem precisar de reload nenhum).
+function maybeReloadAfterColdHold() {
+    if (reloading) return;
+    const exit = chosenExit;
+    if (exit === null) return;
+
+    reloading = true;
+    probe(exit, 2500).then(ok => {
+        if (ok === null) {
+            log("saida " + safeProxy(exit) + " nao respondeu, adiando a recarga do arranque frio");
+            return;
+        }
+        if (Date.now() - lastRoutedAt < 3000) {
+            log("gateway ja roteou sozinho, recarga do arranque frio desnecessaria");
+            return;
+        }
+        const win = clientWindow();
+        if (win === null) return;
+        reloadCount++;
+        lastReloadAt = Date.now();
+        log("Tor respondeu depois do arranque frio, recarregando atras de " + safeProxy(exit));
+        win.webContents.reload();
+    }).catch(error => {
+        log("a checagem antes da recarga do arranque frio falhou: " + error.message);
+    }).finally(() => {
+        reloading = false;
+    });
+}
+
 // Exposto para a bateria de testes (tests/test-exit-refresh.sh) marcar o sinal sem depender
 // de uma conexao de gateway real no sandbox. Inofensivo em producao: so seta o mesmo
 // timestamp que o serveSocks setaria ao abrir direto.
 function _testMarkGatewayDirect() {
     gatewayWentDirectAt = Date.now();
+}
+
+// Exposto para a bateria de testes: marca o arranque frio em modo tor sem depender do
+// start() inteiro (que sobe roteador local, instala PAC etc. -- pesado demais para o
+// sandbox). Inofensivo em producao: so seta o mesmo timestamp que o start() setaria ao
+// nao achar Tor no arranque.
+function _testMarkColdTorHold() {
+    coldTorHoldSince = Date.now();
+}
+
+// Exposto para a bateria de testes: marca "o gateway acabou de rotear" sem depender de uma
+// conexao real no sandbox. Inofensivo em producao: so seta o mesmo timestamp que
+// markGatewayRouted() setaria.
+function _testMarkGatewayRouted() {
+    lastRoutedAt = Date.now();
 }
 
 // Uma conexao de gateway que chega antes de existir saida espera aqui, e nao para sempre:
@@ -1612,8 +1789,9 @@ async function tryReturnToManual() {
     // "reconexao no meio da sessao" na proxima reconexao. A guarda de midia recente
     // (MIDIA_RECENTE_MS) acima ja garante que NAO estamos em Live agora, mas a proxima
     // reconexao pode acontecer minutos depois, com o timestamp de midia ja ultrapassando
-    // o MIDIA_RECENTE_MS (cenario: Live terminou ha 4-5 min, troca acontece em 5min01,
-    // gateway reconecta em 5min02, banner dispara sem motivo). Zera o contador para que
+    // o MIDIA_RECENTE_MS (cenario: Live terminou pouco antes do fim da janela, a troca
+    // acontece logo depois dela, e o gateway reconecta logo em seguida -- banner dispara
+    // sem motivo). Zera o contador para que
     // a proxima reconexao seja contada como a primeira desta "sub-sessao" (sem recorrencia
     // para o banner). Mantem o cooldown de SWAP_COOLDOWN_MS manualmente para nao abrir
     // porta para trySwapByRtt em seguida.
@@ -2386,6 +2564,8 @@ async function start() {
         // responder settleExit(tor) religa a rota. Vazar direto aqui renasceria o gateway
         // pelo IP brasileiro — exatamente o carregamento infinito que o projeto combate.
         log("modo tor: sem Tor no arranque, conexoes ficam seguradas ate um Tor responder");
+        coldTorHoldSince = Date.now();
+        showTorBootBanner();
     } else {
         settleExit(exit);
         log(exit === null ? "nenhuma saida respondeu, o gateway vai sair direto" : "saida escolhida: " + safeProxy(exit));
