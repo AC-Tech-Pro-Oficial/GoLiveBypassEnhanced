@@ -1,0 +1,100 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import {
+  attemptReplace,
+  buildWindowsUpdateLauncher,
+  buildWindowsUpdateScript,
+  cleanupOldExe,
+  OLD_SUFFIX,
+} from "../electron/updater-replace";
+
+// O cenario do Windows (exe em uso nao apaga, mas renomeia) nao existe no Linux —
+// aqui o que se testa e a coreografia: rename-aside, troca, rollback e limpeza.
+// Os builders do helper (.bat/.vbs) sao testados como conteudo: disparar o helper
+// de verdade (spawnWindowsUpdateHelper) exigiria wscript/cmd e sujaria o %TEMP%
+// real da maquina, entao ele nao roda em teste.
+describe("updater-replace", () => {
+  let dir: string;
+  let target: string;
+  let downloaded: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "golive-replace-test-"));
+    target = path.join(dir, "GoLiveBypass-1.1.11.exe");
+    downloaded = path.join(dir, "GoLiveBypass-1.1.12.exe");
+    fs.writeFileSync(target, "exe em uso");
+    fs.writeFileSync(downloaded, "exe novo");
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("troca o exe no lugar e deixa a versao antiga como .old", () => {
+    attemptReplace(target, downloaded);
+    expect(fs.readFileSync(target, "utf8")).toBe("exe novo");
+    expect(fs.readFileSync(target + OLD_SUFFIX, "utf8")).toBe("exe em uso");
+    expect(fs.existsSync(downloaded)).toBe(false);
+  });
+
+  it("limpa sobra .old de um update anterior antes de trocar", () => {
+    fs.writeFileSync(target + OLD_SUFFIX, "exe velho de ontem");
+    attemptReplace(target, downloaded);
+    expect(fs.readFileSync(target, "utf8")).toBe("exe novo");
+    // O ".old" de agora e o exe que estava em uso; o de ontem foi embora.
+    expect(fs.readFileSync(target + OLD_SUFFIX, "utf8")).toBe("exe em uso");
+  });
+
+  it("faz rollback quando o exe novo nao entra no lugar", () => {
+    fs.rmSync(downloaded); // origem da troca some: o rename-in tem que falhar
+    expect(() => attemptReplace(target, downloaded)).toThrow();
+    expect(fs.readFileSync(target, "utf8")).toBe("exe em uso");
+    expect(fs.existsSync(target + OLD_SUFFIX)).toBe(false);
+  });
+
+  it("cleanupOldExe apaga a sobra quando o exe velho ja nao roda", () => {
+    fs.writeFileSync(target + OLD_SUFFIX, "sobra");
+    cleanupOldExe(target);
+    expect(fs.existsSync(target + OLD_SUFFIX)).toBe(false);
+  });
+
+  it("cleanupOldExe nao falha quando nao ha sobra", () => {
+    expect(() => cleanupOldExe(target)).not.toThrow();
+  });
+
+  it("bat do helper e ASCII puro com caminhos como argumentos (imune ao codepage OEM)", () => {
+    const script = buildWindowsUpdateScript();
+    // cmd le .bat no codepage OEM: qualquer nao-ASCII no conteudo e lido errado.
+    expect(script).toMatch(/^[\x20-\x7E\r\n]+$/);
+    // Os caminhos NUNCA sao embutidos: chegam como %1 (exe novo), %2 (.old, sonda de
+    // espera/limpeza) e %3 (.vbs a limpar).
+    expect(script).toContain('start "" "%~1"');
+    expect(script).toContain('del "%~2" >NUL 2>&1');
+    expect(script).toContain('del "%~3" >NUL 2>&1');
+    // Depois de lancar, o bat apaga a si mesmo.
+    expect(script).toContain('del "%~f0"');
+    // Linhas CRLF: e um arquivo para o cmd do Windows (todo \n precedido de \r).
+    expect(script).not.toMatch(/(^|[^\r])\n/);
+    expect(script.split("\r\n").length).toBeGreaterThan(10);
+    // Esgotou as tentativas, lanca mesmo assim (nao deixa o usuario sem app).
+    expect(script).toContain("goto launch");
+  });
+
+  it("vbs do helper comeca com BOM UTF-16LE e cita os quatro caminhos", () => {
+    const bat = "C:\\Users\\João\\AppData\\Local\\Temp\\g-1.bat";
+    const exe = "C:\\Users\\João\\Desktop\\GoLiveBypass-1.1.12.exe";
+    const vbs = "C:\\Users\\João\\AppData\\Local\\Temp\\g-1.vbs";
+    const launcher = buildWindowsUpdateLauncher(bat, exe, exe + OLD_SUFFIX, vbs);
+    // Sem o BOM o wscript le o arquivo como ANSI e o acento corrompe o script.
+    expect(launcher.charCodeAt(0)).toBe(0xfeff);
+    // Conteudo do arquivo sera gravado em utf16le (o teste cobre o texto logico).
+    expect(launcher).toContain(bat);
+    expect(launcher).toContain(exe);
+    expect(launcher).toContain(vbs);
+    // Cada caminho entre Chr(34): espaco e acento nao quebram a linha de comando.
+    expect(launcher).toContain(`Chr(34) & "${exe}" & Chr(34)`);
+    expect(launcher).toContain(", 0, False");
+  });
+});

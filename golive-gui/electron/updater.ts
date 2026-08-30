@@ -16,13 +16,14 @@ import { join } from "path";
 import { spawn } from "child_process";
 import { autoUpdater } from "electron-updater";
 import { request } from "https";
+import { attemptReplace, cleanupOldExe, OLD_SUFFIX, spawnWindowsUpdateHelper } from "./updater-replace";
 
 const REPO = "bezumiya/GoLiveBypass";
 // O artifactName leva a versao (GoLiveBypass-1.1.5.exe): o AppImageLauncher e
 // outros integradores nao sobrescrevem o arquivo quando o nome muda por versao.
 const EXE_PREFIX = "GoLiveBypass-";
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // re-checa a cada 4h
-const RETRY_COUNT = 10; // o exe em uso no Windows recusa rename por um tempo
+const RETRY_COUNT = 10; // antivirus costuma segurar o exe novo/o alvo por alguns segundos
 const RETRY_DELAY_MS = 1000;
 
 let lastCheckAt = 0;
@@ -152,13 +153,14 @@ function portableExePath(): string | null {
 function tryReplace(target: string, downloaded: string): Promise<boolean> {
   return new Promise((resolve) => {
     const attempt = (tries: number) => {
-      const { rmSync, renameSync } = require("fs");
       try {
-        rmSync(target, { force: true });
-        renameSync(downloaded, target);
+        attemptReplace(target, downloaded);
         resolve(true);
-      } catch {
-        if (tries <= 0) return resolve(false);
+      } catch (error) {
+        if (tries <= 0) {
+          console.error("[updater] substituicao falhou:", error);
+          return resolve(false);
+        }
         setTimeout(() => attempt(tries - 1), RETRY_DELAY_MS);
       }
     };
@@ -195,7 +197,19 @@ async function updateWindowsPortable(url: string, digest: string | null): Promis
 
   // Abre a versao nova e encerra a atual. O quit nao reverte o bypass: o novo
   // processo assume e o before-quit do processo antigo desfaria a injecao.
-  spawn(current, [], { detached: true, stdio: "ignore" }).unref();
+  markQuittingForUpdate();
+  // A troca ja aconteceu (o novo esta no lugar, o velho virou ".old" e segue rodando).
+  // Quem reabre e o helper externo: espera o processo velho morrer de verdade — a sonda
+  // e o delete do proprio ".old", que o Windows recusa enquanto a imagem roda — antes de
+  // lancar o exe novo, sem correr contra o lock de instancia unica (o "fecha mas nao
+  // abre"), e limpa a sobra. Se o helper nao subir (tmp fora do ar, rarissimo), cai para
+  // o spawn direto: corre contra o lock, mas e melhor do que nunca reabrir.
+  if (!spawnWindowsUpdateHelper(current, current + OLD_SUFFIX)) {
+    console.warn("[updater] helper de relanco nao subiu; usando spawn direto.");
+    spawn(current, [], { detached: true, stdio: "ignore" })
+      .on("error", (error) => console.error("[updater] exe novo nao abriu:", error))
+      .unref();
+  }
   return true;
 }
 
@@ -278,6 +292,10 @@ export function setupUpdater(
   }
 
   // Windows portable: checagem periodica em background.
+  // Sobra de um update anterior: o ".old" de ontem nao roda mais, entao agora e a
+  // hora de apagar (no momento da troca ele ainda estava em execucao).
+  const atual = portableExePath();
+  if (atual !== null) cleanupOldExe(atual);
   setInterval(() => void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled), CHECK_INTERVAL_MS);
   void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled);
 }
@@ -322,6 +340,20 @@ export async function checkWindowsUpdate(
       app.quit();
     } else {
       console.error("[updater] falha ao aplicar o update portable.");
+      // Sem isto o clique em "Atualizar agora" morre em silencio (issue #135): o
+      // popup fecha, nada acontece, e a pessoa nao sabe que a versao atual segue
+      // valendo nem o que fazer.
+      const win = getMainWindow();
+      const aviso = {
+        type: "warning" as const,
+        title: "Falha na atualização",
+        message: `Não foi possível instalar o GoLiveBypass ${latest}.`,
+        detail:
+          "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/bezumiya/GoLiveBypass/releases.",
+        buttons: ["OK"],
+      };
+      if (win) dialog.showMessageBoxSync(win, aviso);
+      else dialog.showMessageBoxSync(aviso);
     }
   } finally {
     checking = false;

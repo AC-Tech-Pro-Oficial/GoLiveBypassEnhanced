@@ -56,6 +56,35 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   failed".
 
 ### Corrigido
+- **Auto-update do Windows portable não funcionava — nunca** ([#135](https://github.com/bezumiya/GoLiveBypass/issues/135),
+  "Auto-update não funciona"): o popup aparecia, o download e a conferência de
+  digest passavam, e a instalação morria sempre em "não consegui substituir o
+  exe em uso" — dez retentativas de 1s e silêncio. A causa: a troca tentava
+  **apagar** o executável em execução (`rmSync`), e o Windows nega delete de
+  imagem mapeada em memória com EPERM para sempre, não é questão de esperar.
+  A troca agora acontece em dois tempos. Primeiro, ainda dentro do processo e
+  com rollback: o exe em uso sai do caminho com um **rename** (o Windows
+  permite) para `GoLiveBypass.exe.old` e o baixado entra no lugar — se o novo
+  não entrar, o antigo volta, porque é melhor seguir na versão atual que ficar
+  com atalho quebrado. Segundo, o relançamento: um helper externo (`.bat`
+  disparado por `wscript`, sem janela) espera o processo velho morrer de
+  verdade — a sonda é o próprio delete do `.old`, que o Windows recusa enquanto
+  a imagem roda — antes de abrir o exe novo, sem corrida contra o lock de
+  instância única ("fecha mas não abre"); ao fim limpa a sobra `.old` e a si
+  mesmo. O conteúdo do `.bat` é 100% ASCII com os caminhos chegando como
+  argumento e o `.vbs` vai em UTF-16 com BOM: o cmd lê `.bat` no codepage OEM e
+  o wscript lê `.vbs` como ANSI, então caminho embutido no conteúdo embaralharia
+  para qualquer usuário com acento no nome (João, Conceição — público majoritário
+  do projeto). Esgotadas as esperas, o helper lança mesmo assim, e a falha de
+  instalação passou a mostrar um diálogo dizendo que a versão atual segue
+  funcionando e onde baixar manualmente — em vez do silêncio do relato ("clico
+  para atualizar, e nada acontece"). No caminho do AppImage, o `close` da janela
+  agora respeita a marca de quit-por-update (era a causa latente do mesmo
+  "fecha mas não abre" lá), e o Tor embutido fica de propósito rodando durante a
+  troca: o processo novo o adota pela porta 9060 e o gateway nunca cai. Testes:
+  `tests/updater-replace.test.ts` (troca, sobra de update anterior, rollback,
+  limpeza no boot, conteúdo dos helpers sem disparar nada de verdade).
+
 - **"Falha ao injetar" em cliente paralelo (Vesktop/Equibop/Legcord) sem dizer o motivo real**
   ([#123](https://github.com/bezumiya/GoLiveBypass/issues/123),
   [#130](https://github.com/bezumiya/GoLiveBypass/issues/130),
