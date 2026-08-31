@@ -3126,6 +3126,34 @@ function readRuntimeRouteMode(): string {
   return "";
 }
 
+// O autoRevive que o runtime VAI ler (mesma fonte do readRuntimeRouteMode: o
+// settings.json dentro do asar injetado no Windows/mac, o compartilhado no Linux).
+// O report precisa dizer se o toggle estava ligado NO RUNTIME — um report sem
+// nenhum gw.revive com a GUI ligada e o runtime desligado e drift de settings.
+function readRuntimeAutoRevive(): boolean {
+  if (IS_LINUX) {
+    return readSharedSettings().autoRevive !== false;
+  }
+  for (const install of getDiscordInstalls()) {
+    const nosso = withNoAsar(() => {
+      if (!diskFs.existsSync(path.join(install.resources, "_app.asar"))) return false;
+      return isOurInjection(install.resources);
+    });
+    if (!nosso) continue;
+    try {
+      const data = withNoAsar(() =>
+        JSON.parse(
+          diskFs.readFileSync(path.join(install.resources, "app.asar", "settings.json"), "utf8"),
+        ),
+      );
+      return data?.autoRevive !== false;
+    } catch {
+      return true;
+    }
+  }
+  return true;
+}
+
 ipcMain.handle("report-bug", async (_event, payload: unknown) => {
   const p = (payload ?? {}) as { title?: string; description?: string; includeLogs?: boolean };
   const netMode = readNetMode();
@@ -3145,7 +3173,7 @@ ipcMain.handle("report-bug", async (_event, payload: unknown) => {
   } catch {}
   return submitBugReport(
     { title: String(p.title ?? ""), description: String(p.description ?? ""), includeLogs: !!p.includeLogs },
-    { netMode, routeModeDisco, statusBypass, torAtivo, torPorta, installsFlavours: ultimosFlavoursLinux },
+    { netMode, routeModeDisco, autoRevive: readRuntimeAutoRevive(), statusBypass, torAtivo, torPorta, installsFlavours: ultimosFlavoursLinux },
   );
 });
 

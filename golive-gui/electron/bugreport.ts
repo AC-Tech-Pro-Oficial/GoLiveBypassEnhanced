@@ -171,6 +171,7 @@ export function montarMeta(
   torAtivo: boolean,
   torPorta: number | null,
   routeModeDisco: string,
+  autoRevive?: boolean,
 ): Record<string, string> {
   return {
     versao: app.getVersion(),
@@ -183,6 +184,9 @@ export function montarMeta(
     // modoRoteamento de cima = drift de configuracao (o cenario da issue #108, que
     // dizia tor com o runtime rodando auto).
     routeModeDisco: routeModeDisco === "" ? "ausente" : routeModeDisco,
+    // O revive automatico so age com a flag LIGADA (leitura do RUNTIME, nao da GUI):
+    // report sem nenhum gw.revive com "desligado" aqui e comportamento esperado.
+    autoRevive: autoRevive === false ? "desligado" : "ligado",
     bypass: statusBypass.toLowerCase(),
     tor: torAtivo ? `ativo:${torPorta ?? "?"}` : "inativo",
     uptime_s: String(Math.round(process.uptime())),
@@ -197,6 +201,7 @@ export async function submitBugReport(
   ctx: {
     netMode: string;
     routeModeDisco?: string;
+    autoRevive?: boolean;
     statusBypass: string;
     torAtivo: boolean;
     torPorta: number | null;
@@ -214,7 +219,7 @@ export async function submitBugReport(
     title,
     description: redigir(description, segredos, BUG_API_TOKEN),
     meta: {
-      ...montarMeta(ctx.netMode, ctx.statusBypass, ctx.torAtivo, ctx.torPorta, ctx.routeModeDisco ?? ""),
+      ...montarMeta(ctx.netMode, ctx.statusBypass, ctx.torAtivo, ctx.torPorta, ctx.routeModeDisco ?? "", ctx.autoRevive),
       // Flavours vistos na varredura (discord,vesktop,...) — mostra na hora se
       // um cliente paralelo foi achado ou se o report e de "nao achei o Vesktop".
       ...(ctx.installsFlavours ? { installs_flavours: ctx.installsFlavours } : {}),

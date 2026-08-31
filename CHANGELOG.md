@@ -36,7 +36,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   desligado = detecção e log continuam, a ação fica sendo do usuário). O `gw.probe`
   novo (`dispatch_ha`/`intent_ha`/`aberto_ha`/`geracao`/ops) entrega o veredito
   H1 (servidor envelhecido — close+RESUME cura) vs H2 (store engasgada — só o
-  reload cura) no próximo relato. Testes: `tests/gateway-probe.test.ts` (25
+  reload cura) no próximo relato. O **report de bug** acompanha: a tabela
+  Sistema passou a dizer `autoRevive` na leitura do RUNTIME (mesma lógica do
+  `routeModeDisco` — report sem nenhum `gw.revive` com a flag desligada é
+  comportamento esperado, não bug) e o `estat.sessao` ganhou `revives=` com a
+  contagem de ações da escada na sessão. Testes: `tests/gateway-probe.test.ts` (25
   cenários — shim com zlib REAL comprimido no teste, fechar, gerações, alarme em
   idades, escada) e `tests/test-gateway-zumbi-revive.cjs` (sandbox vm com o script
   real: escada completa, guardas de recorrência, auto-cura, mídia, flag).

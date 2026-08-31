@@ -1375,6 +1375,7 @@ function watchReloads() {
 let sessaoRoteadas = 0;
 let sessaoDiretas = 0;
 let sessaoReloads = 0;
+let sessaoRevives = 0;      // acoes da escada de revive (close 4000 + reloads por zumbi)
 let ultimoVistoAt = 0;      // quando o gateway foi visto pela ultima vez (gw.visto)
 let ultimoRoteadoAt = 0;    // quando o gateway roteou pela ultima vez (gw.roteado)
 let sessaoInicio = Date.now();
@@ -1385,6 +1386,7 @@ function emitirEstat() {
     log("estat.sessao | uptime=" + Math.round((Date.now() - sessaoInicio) / 1000) + "s" +
         " roteadas=" + sessaoRoteadas + " diretas=" + sessaoDiretas +
         " reloads=" + sessaoReloads +
+        " revives=" + sessaoRevives +
         " reconexoes_janela=" + (typeof gatewayReconexoes !== "undefined" ? gatewayReconexoes.length : "?") +
         " saida_atual=" + (chosenExit === null ? "nenhuma" : safeProxy(chosenExit)));
 }
@@ -1767,6 +1769,7 @@ function vigiarZumbi(resumo, win) {
     zumbiTentativaEm.push(agora);
     zumbiUltimaAcaoEm = agora;
     zumbiUltimaAcao = decisao.acao;
+    sessaoRevives++;
     if (decisao.acao === 'fechar') {
         log("gw.revive | nivel=1: fechando o ws do gateway (close 4000) para o cliente renascer com RESUME" +
             " (dispatches=" + resumo.dispatches + " intent_ha=" + idadeSeg(resumo.intentHa) + ")");
@@ -1816,6 +1819,7 @@ function checarGatewaySilente() {
                     zumbiTentativaEm.push(agora);
                     zumbiUltimaAcaoEm = agora;
                     zumbiUltimaAcao = 'reload';
+                    sessaoRevives++;
                     reloadPorRevive("ws nao renasceu apos o close");
                     return;
                 }
