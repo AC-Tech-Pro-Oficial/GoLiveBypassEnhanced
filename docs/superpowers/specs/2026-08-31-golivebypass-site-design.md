@@ -67,7 +67,7 @@ Tema escuro inicial:
 - Texto forte: `#F5F5F7`.
 - Texto principal: `#E6E6EA`.
 - Texto secundário: `#A6A6B0`.
-- Texto discreto: `#6F6F7A`.
+- Texto discreto: `#6F6F7A` na GUI; no site, `#8B8B95` para manter contraste em rótulos pequenos.
 - Linha: `#26262D`.
 - Linha forte: `#34343C`.
 
@@ -79,7 +79,7 @@ Tema claro:
 - Texto: `#2F3437`.
 - Texto forte: `#111111`.
 - Texto secundário: `#6E6C68`.
-- Texto discreto: `#A8A29E`.
+- Texto discreto: `#A8A29E` na GUI; no site, `#706C67` para manter contraste em rótulos pequenos.
 - Linha: `#EAEAEA`.
 - Linha forte: `#D9D9D7`.
 
