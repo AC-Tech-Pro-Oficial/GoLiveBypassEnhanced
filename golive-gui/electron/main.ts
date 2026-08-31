@@ -1025,6 +1025,7 @@ function writeInjection(asar: string, proxyAddress: string) {
         proxy: proxyAddress,
         routeMode: readNetMode(),
         torAddr: `127.0.0.1:${torPortaEmUso}`,
+        autoRevive: readAutoRevive(),
       }),
     );
     diskFs.writeFileSync(
@@ -1034,15 +1035,11 @@ function writeInjection(asar: string, proxyAddress: string) {
   });
 }
 
-// Troca de modo com o bypass ativo: o runtime le as settings UMA VEZ, no boot do
-// Discord, e o settings.json dentro do asar so era reescrito na ATIVACAO. Quem
-// trocava de modo no seletor ficava com o runtime no modo velho atraves de
-// reinicios do Discord (issue #121: GUI em tor, runtime em free, 80 candidatas
-// mortas, gateway direto). Reescrever so o settings.json deixa o disco verdadeiro
-// para o proximo start. No Linux nao precisa: o runtime le o settings
-// compartilhado, que o saveNetMode ja atualizou. Devolve quantos installs
-// reescreveu (0 = bypass inativo, o modo entra na proxima ativacao).
-function updateInjectedNetSettings(mode: string): number {
+// Reescrita generica do settings.json dentro dos asars injetados (Windows/macOS): merge
+// atomico por install, preservando o que ja estava la. No Linux e no-op — o runtime le o
+// settings compartilhado, que o updateSharedSettings ja atualizou. Devolve quantos
+// installs reescreveu (0 = bypass inativo, o valor entra na proxima ativacao).
+function reescreverSettingsInjetado(patch: Record<string, unknown>): number {
   if (IS_LINUX) return 0;
   let reescritos = 0;
   for (const install of getDiscordInstalls()) {
@@ -1056,10 +1053,7 @@ function updateInjectedNetSettings(mode: string): number {
         try {
           atual = JSON.parse(diskFs.readFileSync(settingsPath, "utf8"));
         } catch {}
-        diskFs.writeFileSync(
-          settingsPath,
-          JSON.stringify({ ...atual, routeMode: mode, torAddr: `127.0.0.1:${torPortaEmUso}` }),
-        );
+        diskFs.writeFileSync(settingsPath, JSON.stringify({ ...atual, ...patch }));
         return true;
       } catch {
         return false;
@@ -1068,6 +1062,21 @@ function updateInjectedNetSettings(mode: string): number {
     if (ok) reescritos++;
   }
   return reescritos;
+}
+
+// Troca de modo com o bypass ativo: o runtime le as settings UMA VEZ, no boot do
+// Discord, e o settings.json dentro do asar so era reescrito na ATIVACAO. Quem
+// trocava de modo no seletor ficava com o runtime no modo velho atraves de
+// reinicios do Discord (issue #121: GUI em tor, runtime em free, 80 candidatas
+// mortas, gateway direto). Reescrever so o settings.json deixa o disco verdadeiro
+// para o proximo start.
+function updateInjectedNetSettings(mode: string): number {
+  return reescreverSettingsInjetado({ routeMode: mode, torAddr: `127.0.0.1:${torPortaEmUso}` });
+}
+
+// Toggle do revive automatico com o bypass ativo: mesmo caminho do modo de rede.
+function updateInjectedAutoRevive(enabled: boolean): number {
+  return reescreverSettingsInjetado({ autoRevive: enabled });
 }
 
 // ------------------------------------------------------------------ guarda de ativacao duplicada
@@ -2338,6 +2347,22 @@ export function readAutoUpdate(): boolean {
   }
 }
 
+// Revive automatico do gateway zumbi (issues #145/#149/#153): ligado por padrao.
+export function saveAutoRevive(enabled: boolean) {
+  updateSharedSettings({ autoRevive: enabled });
+}
+
+export function readAutoRevive(): boolean {
+  try {
+    const file = path.join(settingsDir(), "settings.json");
+    if (!fs.existsSync(file)) return true;
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return data.autoRevive !== false;
+  } catch {
+    return true;
+  }
+}
+
 // Detecta Tor disponivel: o embutido (porta dedicada) ou um Tor do sistema (portas classicas).
 
 // IPC de autoUpdate
@@ -2345,6 +2370,15 @@ ipcMain.handle("get-auto-update", () => readAutoUpdate());
 ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
   saveAutoUpdate(enabled !== false);
   refreshTray().catch(() => {});
+});
+
+// IPC do revive automatico (zumbi: issues #145/#149/#153). No Windows/macOS a copia
+// dentro do asar injetado acompanha o toggle — o runtime le o settings do asar, nao o
+// compartilhado.
+ipcMain.handle("get-auto-revive", () => readAutoRevive());
+ipcMain.handle("set-auto-revive", (_event, enabled: unknown) => {
+  saveAutoRevive(enabled !== false);
+  updateInjectedAutoRevive(enabled !== false);
 });
 
 // IPC do modo de rede + Tor embutido.

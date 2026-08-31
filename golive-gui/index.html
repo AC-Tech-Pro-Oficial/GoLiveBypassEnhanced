@@ -357,6 +357,20 @@
               novo a qualquer momento aqui.
             </p>
 
+            <label class="switch-row" id="autoReviveRow">
+              <input type="checkbox" id="autoReviveToggle" checked />
+              <span class="switch-track" aria-hidden="true">
+                <span class="switch-thumb"></span>
+              </span>
+              <span id="autoReviveLabel">Reviver gateway travado automaticamente</span>
+            </label>
+            <p class="settings-dialog__hint">
+              Quando o gateway do Discord fica vivo mas sem dados (telas carregando
+              para sempre), reconecta sozinho sem recarregar a janela — e recarrega
+              só se o reconnect não resolver. Nunca age durante chamadas ou
+              transmissões.
+            </p>
+
             <div class="settings-dialog__actions">
               <button id="settingsClose" type="button" class="bug-btn bug-btn--primary">Fechar</button>
             </div>

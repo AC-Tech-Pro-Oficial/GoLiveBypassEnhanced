@@ -14,6 +14,8 @@ declare global {
       setStartup: (enabled: boolean) => Promise<void>;
       getAutoUpdate: () => Promise<boolean>;
       setAutoUpdate: (enabled: boolean) => Promise<void>;
+      getAutoRevive: () => Promise<boolean>;
+      setAutoRevive: (enabled: boolean) => Promise<void>;
       getNetMode: () => Promise<string>;
       setNetMode: (mode: string) => Promise<{ mode: string; reescritos: number }>;
       getTorStatus: () => Promise<{ presente: boolean; ativo: boolean; porta: number }>;
@@ -146,6 +148,7 @@ const appVersionEl = document.getElementById('appVersion');
 const proxyInput = document.getElementById('proxyInput') as HTMLInputElement;
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const autoUpdateToggle = document.getElementById('autoUpdateToggle') as HTMLInputElement | null;
+const autoReviveToggle = document.getElementById('autoReviveToggle') as HTMLInputElement | null;
 const settingsBtn = document.getElementById('settingsBtn') as HTMLButtonElement | null;
 const settingsDialog = document.getElementById('settingsDialog') as HTMLElement | null;
 const settingsBackdrop = document.getElementById('settingsBackdrop') as HTMLElement | null;
@@ -423,6 +426,9 @@ async function refreshAutoUpdate() {
     if (autoUpdateToggle) {
       autoUpdateToggle.checked = await window.api.getAutoUpdate();
     }
+    if (autoReviveToggle) {
+      autoReviveToggle.checked = await window.api.getAutoRevive();
+    }
   } catch (err) {
     console.error(err);
   }
@@ -619,6 +625,13 @@ startupToggle.addEventListener('change', async () => {
 autoUpdateToggle?.addEventListener('change', async () => {
   if (autoUpdateToggle) {
     await window.api.setAutoUpdate(autoUpdateToggle.checked);
+  }
+});
+
+// Revive automatico do gateway zumbi (issues #145/#149/#153).
+autoReviveToggle?.addEventListener('change', async () => {
+  if (autoReviveToggle) {
+    await window.api.setAutoRevive(autoReviveToggle.checked);
   }
 });
 

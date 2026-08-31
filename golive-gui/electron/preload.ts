@@ -13,6 +13,8 @@ import { ipcRenderer } from 'electron';
   setStartup: (enabled: boolean) => ipcRenderer.invoke('set-startup', enabled),
   getAutoUpdate: () => ipcRenderer.invoke('get-auto-update'),
   setAutoUpdate: (enabled: boolean) => ipcRenderer.invoke('set-auto-update', enabled),
+  getAutoRevive: () => ipcRenderer.invoke('get-auto-revive'),
+  setAutoRevive: (enabled: boolean) => ipcRenderer.invoke('set-auto-revive', enabled),
   getNetMode: () => ipcRenderer.invoke('get-net-mode'),
   setNetMode: (mode: string) => ipcRenderer.invoke('set-net-mode', mode),
   getTorStatus: () => ipcRenderer.invoke('get-tor-status'),

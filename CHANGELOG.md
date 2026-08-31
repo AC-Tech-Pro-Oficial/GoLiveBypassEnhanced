@@ -7,6 +7,39 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Revive automático do gateway zumbi: detecção de dispatch starve + close 4000**
+  ([#153](https://github.com/bezumiya/GoLiveBypass/issues/153), beta 6): o log da
+  #153 trouxe o ground truth que faltava — durante o loading infinito o probe da
+  beta 4 mostrou `estado=aberta srv_ha=1s cli_ha=0s subs=0`: ws aberta,
+  heartbeats respondendo DOS DOIS lados e o usuário travado. O zumbi não é o
+  servidor calado (isso o alarme "silente" já pega): é o servidor que **aceita
+  heartbeat mas não entrega dispatch** — protocolo vivo, dados mortos. Com o shim
+  descomprimindo o fluxo zlib do servidor no renderer (`DecompressionStream`, um
+  stream contínuo por geração de ws), dispatch deixou de ser indistinguível de
+  heartbeat e o caso virou detectável: **zumbi = o usuário pediu algo (qualquer op
+  ≠ 1) e NÃO chegou dispatch nenhum desde o pedido**, com conexão quente dos dois
+  lados e aquecimento de 2min para o READY assentar. O histograma de TODAS as ops
+  do cliente vai no `gw.probe` (o `subs=0` eterno da #153 sugere que o cliente
+  migrou do op 14 — contar tudo decide isso sem chute). A cura sem Ctrl+R existe:
+  **fechar o ws com close(4000)** — o mesmo código que o próprio cliente usa ao
+  receber op 7 (RECONNECT) — faz ele renascer sozinho com RESUME. A escada é
+  automática e conservadora: nível 1 = close 4000; não curou, nível 2 = reload (a
+  cura que sempre funciona); o ws não renasceu em 15s = reload direto (auto-cura);
+  **nunca com mídia aberta ou recente <3min** (§6: reconexão mata o vídeo da live —
+  nesse caso só banner + pill, decisão do usuário); teto de 2 tentativas por 30min
+  com cooldown de 3min; estourou, volta a ser ambiental. A reconexão que o PRÓPRIO
+  revive provoca é reconhecida (TTL de 60s): não vira "recorrência no meio da
+  sessão", não alimenta a rajada e não quarentena a saída sadia. Sucesso só é
+  creditado com a conexão sobrevivendo ao aquecimento com dispatch fluindo (o
+  READY da conexão nova, que sempre chega, não engana o creditar). Toggle "Reviver
+  gateway travado automaticamente" na GUI (settings `autoRevive`, default ligado;
+  desligado = detecção e log continuam, a ação fica sendo do usuário). O `gw.probe`
+  novo (`dispatch_ha`/`intent_ha`/`aberto_ha`/`geracao`/ops) entrega o veredito
+  H1 (servidor envelhecido — close+RESUME cura) vs H2 (store engasgada — só o
+  reload cura) no próximo relato. Testes: `tests/gateway-probe.test.ts` (25
+  cenários — shim com zlib REAL comprimido no teste, fechar, gerações, alarme em
+  idades, escada) e `tests/test-gateway-zumbi-revive.cjs` (sandbox vm com o script
+  real: escada completa, guardas de recorrência, auto-cura, mídia, flag).
 - **Pill de recuperação permanente + probe do gateway no renderer** (beta 4,
   [#149](https://github.com/bezumiya/GoLiveBypass/issues/149)): o teste real do
   William na beta 3 provou que o **zumbi de aplicação é indistinguível na rede** —
@@ -100,6 +133,14 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   failed".
 
 ### Corrigido
+- **Banner de zumbi da beta 4 disparava em falso — e ficava preso** (achado no
+  ciclo da #153): `avaliarSinalGw()` comparava a IDADE do último frame (`srvHa`,
+  em ms desde o evento) como se fosse timestamp (`agora - srvHa`); o gate de
+  3min nunca filtrava e qualquer ws aberta devolvia "silente" — o banner de
+  sessão muda subia ~60s depois de abrir o Discord e o latch só saía se o ws
+  fechasse. O teste antigo passava porque alimentava o resumo com TIMESTAMP —
+  codificava o contrato errado. O contrato agora é de IDADES dos dois lados
+  (shim e teste codificam o real).
 - **Botão ficava em "Ativar" com o bypass já de pé após a reativação de boot**
   ([#149](https://github.com/bezumiya/GoLiveBypass/issues/149), beta 5 —
   confirmado pelo testador na beta 4): a janela costuma carregar NO MEIO da
@@ -246,11 +287,13 @@ infinito ao abrir" para o plugin (o padrão da issue #116 é sobre a corrida
 GUI×Discord no boot do Windows, que não existe da mesma forma aqui), não
 implementei um modo equivalente nesta rodada — adicionar um exigiria nova
 opção de settings e mudança maior na cadeia `pickExit`/`autoExit`. Também
-ficaram de fora o **alarme de "gateway zumbi"** do beta 3 (#145) e o **pill de
-recuperação + probe** do beta 4 (#149): no plugin eles sairiam mais precisos
-(o renderer enxerga o socket do gateway e o timestamp da última mensagem) — o
-pill inclusive é quase direto lá — mas o porte não entrou neste ciclo; o
-plugin segue sem nenhum dos dois até o próximo.
+ficaram de fora o **alarme de "gateway zumbi"** do beta 3 (#145), o **pill de
+recuperação + probe** do beta 4 (#149) e o **revive automático** do beta 6
+(#153 — detecção de dispatch starve + close 4000 + escada até reload): no
+plugin eles sairiam mais precisos (o renderer enxerga o socket do gateway, o
+timestamp da última mensagem e o decompress sem CDP) — o pill e o close do ws
+são quase diretos lá — mas o porte não entrou neste ciclo; o plugin segue sem
+nenhum deles até o próximo.
 
 **Pendência da regra de sincronização (seção 4 do AGENTS.md):** o aviso de
 proxy manual quebrada da issue #134 (ver acima, nesta mesma versão) só foi

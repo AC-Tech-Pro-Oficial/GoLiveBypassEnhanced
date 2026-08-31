@@ -361,12 +361,17 @@ const routeMode = typeof settings.routeMode === "string" ? settings.routeMode : 
 const TOR_ADDR = typeof settings.torAddr === "string" && settings.torAddr !== ""
     ? settings.torAddr
     : "127.0.0.1:9050";
+// Revive automatico do gateway zumbi (issues #145/#149/#153): close 4000 para o cliente
+// renascer com RESUME, escalando para reload. Ligado por default e conservador por
+// desenho (nunca em call/midia recente, teto de 2 tentativas por 30min); a GUI pode desligar.
+const autoRevive = settings.autoRevive !== false;
 
 // Primeira linha do log: o modo EFETIVO que este runtime vai usar. Sem ela, um settings.json
 // regravado sem routeMode (escritor antigo, terceiro, versao anterior) deixava o runtime no
 // "auto" enquanto a GUI jurava tor -- e o log nao tinha como provar o contrario (issue #108).
 log("modo de roteamento: " + routeMode +
     (typeof settings.routeMode === "string" ? " (settings.json)" : " (padrao: settings.json sem routeMode)"));
+if (!autoRevive) log("revive automatico do gateway: desligado (settings.json)");
 
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
@@ -1353,6 +1358,14 @@ function watchReloads() {
 
             log("a janela do Discord recarregou: contagem de reconexao zerada");
             gatewayConnCount = 0;
+            // Reload = sessao nova de verdade: o estado do zumbi/revive expira junto
+            // (o banner era DOM do documento antigo e ja morreu com ele).
+            zumbiBannerAtivo = false;
+            zumbiTentativaEm.length = 0;
+            zumbiUltimaAcaoEm = 0;
+            zumbiUltimaAcao = null;
+            revivePendenteEm = 0;
+            reviveFecharEm = 0;
         });
     });
 }
@@ -1381,26 +1394,26 @@ function agendarEstat() {
     }
 }
 
-// === gateway: probe no renderer + pill de recuperacao (issues #145/#149): inicio ===
+// === gateway: probe no renderer + pill + REVIVE automatico (issues #145/#149/#153) ===
 // A beta.3 provou com logs (issues #149/#150) que o zumbi de aplicacao e
 // INVISIVEL para a rede: durante os vaos (416s e 713s) o tunel seguiu carregando
-// heartbeats — sessao protocolarmente viva, dados nao fluem — e como a conexao e
-// TLS ponta a ponta com payload comprimido, heartbeat e dado sao
-// indistinguiveis do lado de fora. Consequencias do desenho:
-// 1. A recuperacao correta e AMBIENTE: pill permanente de reload dentro do
-//    Discord (o usuario sabe no instante; o reload cura sempre; e decisao dele,
-//    nunca automatica — regra de MIDIA_RECENTE_MS). Esconde sozinho em
-//    fullscreen e com websocket de midia aberto (call/transmissao).
-// 2. A verdade mora no RENDERER: um shim (CDP, antes do bundle) envolve o
-//    WebSocket do gateway e conta frames — cliente vem em JSON texto (o zlib do
-//    Discord e so servidor->cliente): op 1 heartbeat, op 14 subscribe =
-//    intencao de navegar; servidor vem comprimido (contagem/cadencia). O vigia
-//    polla e LOGA — o proximo relato chega com ground truth em vez de deducao.
-// 3. O alarme de rede sobrevive re-escopado: servidor INTEIRO calado (>3min sem
-//    nenhum frame, nem ACK de heartbeat) com o ws constando aberto e morte de
-//    rede de verdade — o banner antecipa o reconnect que o cliente faria em
-//    instantes. O caso "protocolo vivo, dados mortos" nao dispara alarme porque
-//    nao e detectavel — para isso existe o pill.
+// heartbeats — sessao protocolarmente viva, dados nao fluem. A #153 trouxe o
+// ground truth do probe: ws aberta, heartbeats dos DOIS lados (srv_ha=1s,
+// cli_ha=0s) e o usuario em loading infinito — o servidor ACEITA heartbeat mas
+// nao entrega dispatch. Com o shim descomprimindo o servidor (DecompressionStream
+// no renderer), dispatch deixou de ser indistinguivel de heartbeat e o caso
+// "protocolo vivo, dados mortos" virou DETECTAVEL. Consequencias do desenho:
+// 1. A cura SEM reload existe: fechar o ws com close(4000) — o mesmo codigo que o
+//    proprio cliente usa ao receber op 7 (RECONNECT) — faz ele renascer sozinho
+//    com RESUME, sem Ctrl+R. __goliveGwFechar() expoe isso ao main.
+// 2. A escada de revive e automatica mas conservadora: nivel 1 = close 4000;
+//    nivel 2 = reload (a cura que sempre funciona). NUNCA com midia aberta ou
+//    recente (regra de MIDIA_RECENTE_MS/§6 — reconexao de gateway mata o video
+//    da live). Teto de tentativas e cooldown; estourou, volta a ser ambiental
+//    (banner + pill, decisao do usuario).
+// 3. O alarme "silente" segue re-escopado: servidor INTEIRO calado (>3min sem
+//    nenhum frame, nem ACK) e morte de rede de verdade — banner only, o cliente
+//    reconecta sozinho em instantes.
 
 // Shim do renderer: roda ANTES do bundle do Discord (CDP
 // addScriptToEvaluateOnNewDocument, unico ponto sem corrida), no main world.
@@ -1411,14 +1424,80 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "  if (window.__goliveGwShim) return;" +
     "  window.__goliveGwShim = true;" +
     "  var midia = new Set();" +
-    "  var gw = { estado: 'nenhum', srvEm: 0, cliEm: 0, op1Em: 0, subs: 0, srvFrames: 0 };" +
+    "  var geracao = 0;" +
+    "  var opCounts = {};" +
+    "  var gw = { estado: 'nenhum', srvEm: 0, cliEm: 0, op1Em: 0, subs: 0, srvFrames: 0," +
+    "    dispatches: 0, dispatchEm: 0, intentEm: 0, abertoEm: 0, ws: null };" +
+    "  var inflador = null;" +
     "  window.__goliveGwResumo = function () {" +
+    "    var agora = Date.now();" +
     "    return { estado: gw.estado," +
-    "      srvHa: gw.srvEm ? Date.now() - gw.srvEm : -1," +
-    "      cliHa: gw.cliEm ? Date.now() - gw.cliEm : -1," +
-    "      subs: gw.subs, srvFrames: gw.srvFrames };" +
+    "      srvHa: gw.srvEm ? agora - gw.srvEm : -1," +
+    "      cliHa: gw.cliEm ? agora - gw.cliEm : -1," +
+    "      subs: gw.subs, srvFrames: gw.srvFrames," +
+    "      dispatches: gw.dispatches," +
+    "      dispatchHa: gw.dispatchEm ? agora - gw.dispatchEm : -1," +
+    "      intentHa: gw.intentEm ? agora - gw.intentEm : -1," +
+    "      abertoHa: gw.abertoEm ? agora - gw.abertoEm : -1," +
+    "      geracao: geracao," +
+    "      opCounts: opCounts," +
+    "      midiaAberta: midia.size > 0," +
+    "      infladorOk: !!inflador && !inflador.quebrado };" +
     "  };" +
     "  window.__goliveMidiaAberta = function () { return midia.size > 0; };" +
+    "  window.__goliveGwFechar = function () {" +
+    "    var ws = gw.ws;" +
+    "    if (!ws || ws.readyState !== 1) return false;" +
+    "    try { ws.close(4000, 'golive-revive'); return true; } catch (e) { return false; }" +
+    "  };" +
+    // O servidor chega como UM fluxo zlib continuo (encoding=zlib-stream): um
+    // DecompressionStream por geracao de ws, cada mensagem e um bloco escrito no
+    // stream. O texto decodificado e fatiado em payloads (contador de chaves
+    // respeitando strings); op 0 (dispatch) e o UNICO dado de aplicacao — a verdade
+    // que distingue protocolo vivo de zumbi (issues #145/#149/#153).
+    "  function consumirTexto() {" +
+    "    var s = inflador.texto;" +
+    "    var inicio = 0, prof = 0, emStr = false, esc = false;" +
+    "    for (var i = 0; i < s.length; i++) {" +
+    "      var c = s[i];" +
+    "      if (emStr) {" +
+    "        if (esc) esc = false;" +
+    "        else if (c === '\\\\') esc = true;" +
+    "        else if (c === '\"') emStr = false;" +
+    "        continue;" +
+    "      }" +
+    "      if (c === '\"') { emStr = true; continue; }" +
+    "      if (c === '{') prof++;" +
+    "      else if (c === '}') {" +
+    "        prof--;" +
+    "        if (prof === 0) {" +
+    "          try {" +
+    "            var p = JSON.parse(s.slice(inicio, i + 1));" +
+    "            if (p && typeof p === 'object' && p.op === 0) { gw.dispatches++; gw.dispatchEm = Date.now(); }" +
+    "          } catch (e) { }" +
+    "          inicio = i + 1;" +
+    "        } else if (prof < 0) { prof = 0; inicio = i + 1; }" +
+    "      }" +
+    "    }" +
+    "    if (inicio > 0) inflador.texto = s.slice(inicio);" +
+    "  }" +
+    "  function iniciarInflador() {" +
+    "    if (typeof DecompressionStream === 'undefined') { inflador = null; return; }" +
+    "    try {" +
+    "      var ds = new DecompressionStream('deflate');" +
+    "      var decod = new TextDecoder();" +
+    "      inflador = { quebrado: false, texto: '', writer: ds.writable.getWriter() };" +
+    "      var reader = ds.readable.getReader();" +
+    "      (function passo() {" +
+    "        reader.read().then(function (r) {" +
+    "          if (r.done) return;" +
+    "          inflador.texto += decod.decode(r.value, { stream: true });" +
+    "          try { consumirTexto(); } catch (e) { }" +
+    "          passo();" +
+    "        }, function () { if (inflador) inflador.quebrado = true; });" +
+    "      })();" +
+    "    } catch (e) { inflador = null; }" +
+    "  }" +
     "  var OriginalWebSocket = window.WebSocket;" +
     "  function GoliveWebSocket(url, protocolos) {" +
     "    var ws = protocolos === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocolos);" +
@@ -1432,22 +1511,51 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "        ws.addEventListener('close', function () { midia.delete(ws); });" +
     "      }" +
     "      if (ehGw) {" +
+    // Contadores por GERACAO (o cliente recria o ws a cada reconexao): intencao e
+    // dispatch so significam dentro da mesma conexao.
+    "        geracao++;" +
     "        gw.estado = 'conectando';" +
-    "        ws.addEventListener('open', function () { gw.estado = 'aberta'; });" +
-    "        ws.addEventListener('close', function () { gw.estado = 'fechada'; });" +
+    "        gw.srvEm = 0; gw.cliEm = 0; gw.op1Em = 0; gw.subs = 0; gw.srvFrames = 0;" +
+    "        gw.dispatches = 0; gw.dispatchEm = 0; gw.intentEm = 0; gw.abertoEm = 0;" +
+    "        gw.ws = ws;" +
+    "        opCounts = {};" +
+    "        iniciarInflador();" +
+    "        ws.addEventListener('open', function () { gw.estado = 'aberta'; gw.abertoEm = Date.now(); });" +
+    "        ws.addEventListener('close', function () { gw.estado = 'fechada'; gw.ws = null; });" +
     "        ws.addEventListener('message', function (ev) {" +
     "          gw.srvEm = Date.now(); gw.srvFrames++;" +
+    "          if (inflador && !inflador.quebrado && ev.data && inflador.writer) {" +
+    "            var pedaco = ev.data;" +
+    "            if (typeof pedaco.arrayBuffer === 'function') {" +
+    "              pedaco.arrayBuffer().then(function (ab) {" +
+    "                if (inflador && !inflador.quebrado && inflador.writer) {" +
+    "                  inflador.writer.write(ab).catch(function () { inflador.quebrado = true; });" +
+    "                }" +
+    "              }, function () { if (inflador) inflador.quebrado = true; });" +
+    "            } else {" +
+    "              try { inflador.writer.write(pedaco).catch(function () { inflador.quebrado = true; }); }" +
+    "              catch (e) { inflador.quebrado = true; }" +
+    "            }" +
+    "          }" +
     "          try {" +
     "            if (typeof ev.data === 'string' && JSON.parse(ev.data).op === 11) gw.ackEm = Date.now();" +
     "          } catch (e) { }" +
     "        });" +
+    // O cliente vai em JSON texto: op 1 = heartbeat (manutencao); QUALQUER outra op
+    // e o usuario/cliente PEDINDO algo — a assinatura do zumbi e "pediu e nada
+    // voltou". Histograma de ops (14/37 = subscribe; o cliente pode ter migrado de
+    // opcode — contar TODOS settle isso no log sem apostar em chute).
     "        var enviar = ws.send.bind(ws);" +
     "        ws.send = function (dados) {" +
+    "          gw.cliEm = Date.now();" +
     "          try {" +
-    "            gw.cliEm = Date.now();" +
     "            var op = JSON.parse(dados).op;" +
-    "            if (op === 1) gw.op1Em = Date.now();" +
-    "            if (op === 14) gw.subs++;" +
+    "            opCounts[op] = (opCounts[op] || 0) + 1;" +
+    "            if (op === 1) { gw.op1Em = gw.cliEm; }" +
+    "            else {" +
+    "              gw.intentEm = gw.cliEm;" +
+    "              if (op === 14 || op === 37) gw.subs++;" +
+    "            }" +
     "          } catch (e) { }" +
     "          return enviar(dados);" +
     "        };" +
@@ -1459,7 +1567,7 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "  GoliveWebSocket.CONNECTING = 0; GoliveWebSocket.OPEN = 1;" +
     "  GoliveWebSocket.CLOSING = 2; GoliveWebSocket.CLOSED = 3;" +
     "  window.WebSocket = GoliveWebSocket;" +
-"})();";
+    "})();";
 
 // Pill de recuperacao: elemento permanente, discreto, com reload a um clique —
 // o usuario aperta no primeiro segundo de loading em vez de esperar o
@@ -1496,19 +1604,69 @@ const REVIVE_SRC = "(function(){" +
 "})();";
 
 let zumbiBannerAtivo = false;
+// Estado da escada de revive (ver decidirRevive). Tudo morre com reload da janela
+// (watchReloads) — reload e sessao nova de verdade.
+let zumbiTentativaEm = [];       // timestamps das tentativas (janela de GW_ZUMBI_JANELA_MS)
+let zumbiUltimaAcaoEm = 0;       // cooldown entre acoes
+let zumbiUltimaAcao = null;      // 'fechar' | 'reload'
+let revivePendenteEm = 0;        // reconexao provocada pelo NOSSO close (TTL: fora da rajada/recorrencia)
+let reviveFecharEm = 0;          // quando fechamos o ws (auto-cura se o cliente NAO renascer)
+let reviveFecharGeracao = 0;     // geracao na hora do close
 
-// Alarme re-escopado pelo probe: servidor INTEIRO calado (nem ACK de heartbeat)
-// com o ws constando aberto — morte de rede real, o cliente morre em instantes e
-// o banner antecipa. O caso "protocolo vivo, dados mortos" nao dispara alarme
-// porque nao e detectavel — para isso existe o pill.
+// Alarme re-escopado: "silente" = servidor INTEIRO calado (nem ACK de heartbeat) com o ws
+// constando aberto — morte de rede real, o cliente renasce sozinho e o banner antecipa.
+// "zumbi" = protocolo vivo dos dois lados (heartbeats respondendo) mas o usuario PEDIU algo
+// e NAO chegou dispatch nenhum desde o pedido (issues #145/#149/#153). Precisa do inflador
+// funcionando: sem decompress, dispatch e indistinguivel de heartbeat e o caso nao dispara.
 const GW_SERVIDOR_SILENCIOSO_MS = 3 * 60_000;
 const GW_PROBE_CHECAGEM_MS = 60_000;
+// Deixa READY/RESUMED assentar apos abrir a conexao.
+const GW_ZUMBI_AQUECIMENTO_MS = 2 * 60_000;
+// Cliente mandando heartbeat (intervalo ~41s).
+const GW_ZUMBI_CLIENTE_VIVO_MS = 90_000;
+// Espera pos-intencao antes de declarar zumbi.
+const GW_ZUMBI_ESPERA_MS = 30_000;
+// Teto de tentativas da escada na janela.
+const GW_ZUMBI_TENTATIVAS = 2;
+// Janela de contagem das tentativas.
+const GW_ZUMBI_JANELA_MS = 30 * 60_000;
+// Cooldown entre tentativas da escada.
+const GW_ZUMBI_COOLDOWN_MS = 3 * 60_000;
+// A reconexao do nosso close deixa de ser "revive" (sair da rajada/recorrencia) depois disto.
+const GW_REVIVE_TTL_MS = 60_000;
+// Midia fechada ha menos de 3min: pode ainda ter call viva — nao age automatico.
+const GW_REVIVE_MIDIA_GRACA_MS = 3 * 60_000;
+// Prazo do cliente renascer o ws apos o close 4000.
+const GW_REVIVE_RENASCE_MS = 15_000;
 
+// Funcao pura — os campos *Ha sao IDADES em ms desde o ultimo evento (o shim mede no
+// momento do poll), comparadas DIRETO contra os prazos. A beta.4 fazia `agora - srvHa`
+// (idade tratada como timestamp): o gate nunca filtrava e o banner disparava em falso.
 function avaliarSinalGw(resumo, agora) {
     if (!resumo || resumo.estado !== 'aberta') return null;
-    if (resumo.srvHa < 0) return null;
-    if (agora - resumo.srvHa < GW_SERVIDOR_SILENCIOSO_MS) return null;
-    return 'silente';
+    if (resumo.srvHa >= GW_SERVIDOR_SILENCIOSO_MS) return 'silente';
+    if (resumo.infladorOk !== true) return null;
+    if (resumo.abertoHa < 0 || resumo.abertoHa < GW_ZUMBI_AQUECIMENTO_MS) return null;
+    if (resumo.cliHa < 0 || resumo.cliHa >= GW_ZUMBI_CLIENTE_VIVO_MS) return null;
+    if (resumo.intentHa < 0 || resumo.intentHa < GW_ZUMBI_ESPERA_MS) return null;
+    // Dispatch DEPOIS da intencao = dado chegando (saudavel). Antes (ou nunca) = pedido
+    // ignorado: o servidor aceita heartbeat mas nao entrega dado — zumbi.
+    if (resumo.dispatchHa >= 0 && resumo.dispatchHa < resumo.intentHa) return null;
+    return 'zumbi';
+}
+
+// Funcao pura da escada (testavel): com o zumbi confirmado, decide a acao.
+// ctx: { agora, midiaAberta, midiaRecente, tentativas[], ultimaAcaoEm, ultimaAcao }
+function decidirRevive(ctx) {
+    // §6/AGENTS.md: reconexao de gateway mata o video de call/live em andamento — nunca agir.
+    if (ctx.midiaAberta || ctx.midiaRecente) return { acao: 'banner', motivo: 'midia' };
+    const tentativas = ctx.tentativas.filter(t => t >= ctx.agora - GW_ZUMBI_JANELA_MS);
+    if (tentativas.length >= GW_ZUMBI_TENTATIVAS) return { acao: 'banner', motivo: 'teto_tentativas' };
+    if (ctx.ultimaAcaoEm > 0 && ctx.agora - ctx.ultimaAcaoEm < GW_ZUMBI_COOLDOWN_MS) return { acao: 'nenhum', motivo: 'cooldown' };
+    // Escada: a primeira acao e fechar (close 4000, RESUME preserva a sessao); se o close
+    // nao curou, sobe para o reload — a cura que sempre funciona.
+    if (ctx.ultimaAcao === 'fechar') return { acao: 'reload', motivo: 'nivel2' };
+    return { acao: 'fechar', motivo: 'nivel1' };
 }
 
 const ZUMBI_BANNER_TEXT = "GoLiveBypass: a sessao do gateway esta sem resposta ha alguns " +
@@ -1568,24 +1726,124 @@ function showZumbiBanner() {
     win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso de sessao muda: " + error.message));
 }
 
+function idadeSeg(ha) {
+    return ha < 0 ? "?" : Math.round(ha / 1000) + "s";
+}
+
+function reloadPorRevive(motivo) {
+    if (reloading) return;
+    const win = clientWindow();
+    if (win === null) return;
+    log("gw.revive | recarregando a janela (" + motivo + ")");
+    win.webContents.reload();
+}
+
+function vigiarZumbi(resumo, win) {
+    const agora = Date.now();
+    const decisao = decidirRevive({
+        agora,
+        midiaAberta: resumo.midiaAberta === true,
+        midiaRecente: agora - ultimaMidiaEm < GW_REVIVE_MIDIA_GRACA_MS,
+        tentativas: zumbiTentativaEm,
+        ultimaAcaoEm: zumbiUltimaAcaoEm,
+        ultimaAcao: zumbiUltimaAcao
+    });
+    if (decisao.acao === 'nenhum') return;
+    if (decisao.acao === 'banner') {
+        // Ambiental: em call/midia recente (§6) ou teto de tentativas estourado — o usuario decide.
+        if (!zumbiBannerAtivo) {
+            log("gw.zumbi | confirmado mas acao manual (" + decisao.motivo + "): dispatches=" +
+                resumo.dispatches + " intent_ha=" + idadeSeg(resumo.intentHa));
+            zumbiBannerAtivo = true;
+            showZumbiBanner();
+        }
+        return;
+    }
+    if (!autoRevive) {
+        // Flag desligada: deteccao e log continuam, acao fica sendo do usuario (banner).
+        if (!zumbiBannerAtivo) { zumbiBannerAtivo = true; showZumbiBanner(); }
+        return;
+    }
+    zumbiTentativaEm.push(agora);
+    zumbiUltimaAcaoEm = agora;
+    zumbiUltimaAcao = decisao.acao;
+    if (decisao.acao === 'fechar') {
+        log("gw.revive | nivel=1: fechando o ws do gateway (close 4000) para o cliente renascer com RESUME" +
+            " (dispatches=" + resumo.dispatches + " intent_ha=" + idadeSeg(resumo.intentHa) + ")");
+        reviveFecharEm = agora;
+        reviveFecharGeracao = resumo.geracao;
+        revivePendenteEm = agora;
+        win.webContents.executeJavaScript('window.__goliveGwFechar ? window.__goliveGwFechar() : false')
+            .then(ok => {
+                if (ok !== true) log("gw.revive | nao consegui fechar o ws (shim ausente ou ws nao aberto)");
+            })
+            .catch(error => log("gw.revive | falhei ao fechar o ws: " + error.message));
+    } else {
+        log("gw.revive | nivel=2: o close nao curou (dispatches=" + resumo.dispatches + "), recarregando a janela");
+        reviveFecharEm = 0;
+        reloadPorRevive("zumbi persiste apos o close");
+    }
+}
+
 function checarGatewaySilente() {
     const win = clientWindow();
     if (win === null) return;
     win.webContents.executeJavaScript('window.__goliveGwResumo ? window.__goliveGwResumo() : null', true)
         .then(resumo => {
             if (!resumo) return;
+            const agora = Date.now();
             log("gw.probe | estado=" + resumo.estado +
-                " srv_ha=" + (resumo.srvHa < 0 ? "?" : Math.round(resumo.srvHa / 1000) + "s") +
-                " cli_ha=" + (resumo.cliHa < 0 ? "?" : Math.round(resumo.cliHa / 1000) + "s") +
+                " srv_ha=" + idadeSeg(resumo.srvHa) +
+                " cli_ha=" + idadeSeg(resumo.cliHa) +
                 " subs=" + resumo.subs +
-                " srv_frames=" + resumo.srvFrames);
-            if (avaliarSinalGw(resumo, Date.now()) === 'silente') {
-                if (zumbiBannerAtivo) return;
-                zumbiBannerAtivo = true;
-                showZumbiBanner();
-            } else if (zumbiBannerAtivo) {
+                " srv_frames=" + resumo.srvFrames +
+                " dispatch_ha=" + idadeSeg(resumo.dispatchHa) +
+                " dispatches=" + resumo.dispatches +
+                " intent_ha=" + idadeSeg(resumo.intentHa) +
+                " aberto_ha=" + idadeSeg(resumo.abertoHa) +
+                " geracao=" + resumo.geracao +
+                " ops=" + JSON.stringify(resumo.opCounts || {}) +
+                (resumo.infladorOk === false ? " (sem decompress)" : ""));
+            // Auto-cura do nivel 1: fechamos o ws e o cliente NAO renasceu a conexao —
+            // o close nao surtiu; sobe direto pro reload (a cura que sempre funciona).
+            if (reviveFecharEm > 0) {
+                if (resumo.geracao !== reviveFecharGeracao || resumo.estado === 'aberta') {
+                    reviveFecharEm = 0; // renasceu: a escada segue do ponto certo
+                } else if ((resumo.estado === 'fechada' || resumo.estado === 'nenhum') &&
+                    agora - reviveFecharEm > GW_REVIVE_RENASCE_MS) {
+                    log("gw.revive | o ws nao renasceu apos o close, subindo direto pro reload");
+                    reviveFecharEm = 0;
+                    zumbiTentativaEm.push(agora);
+                    zumbiUltimaAcaoEm = agora;
+                    zumbiUltimaAcao = 'reload';
+                    reloadPorRevive("ws nao renasceu apos o close");
+                    return;
+                }
+            }
+            const sinal = avaliarSinalGw(resumo, agora);
+            if (sinal === 'zumbi') {
+                vigiarZumbi(resumo, win);
+                return;
+            }
+            if (sinal === 'silente') {
+                if (!zumbiBannerAtivo) { zumbiBannerAtivo = true; showZumbiBanner(); }
+                return;
+            }
+            // Recuperacao: remover o banner e creditar a escada. O credito so vale com a
+            // conexao SOBREVIVENDO ao aquecimento com dado fluindo — senao o READY da
+            // conexao nova (que sempre chega) creditaria sucesso a um revive que nao curou.
+            const servidorFalando = resumo.estado === 'aberta' && resumo.srvHa >= 0 && resumo.srvHa < GW_SERVIDOR_SILENCIOSO_MS;
+            const dadoFluindo = resumo.dispatchHa >= 0 && resumo.dispatchHa < 60_000;
+            if (zumbiBannerAtivo && servidorFalando && (dadoFluindo || resumo.infladorOk !== true)) {
                 zumbiBannerAtivo = false;
                 log("gateway voltou a responder: banner de sessao muda removido");
+            }
+            if (zumbiTentativaEm.length > 0 && servidorFalando && dadoFluindo &&
+                resumo.abertoHa >= GW_ZUMBI_AQUECIMENTO_MS) {
+                log("gw.revive | sucesso: dispatches voltaram apos " + zumbiTentativaEm.length + " tentativa(s)");
+                zumbiTentativaEm.length = 0;
+                zumbiUltimaAcaoEm = 0;
+                zumbiUltimaAcao = null;
             }
         })
         .catch(() => { });
@@ -1638,7 +1896,13 @@ function markGatewayRouted() {
     log("gw.roteado | n_sessao=" + gatewayConnCount +
         " visto_ha=" + (vistoHa < 0 ? "?" : vistoHa + "ms") +
         " saida=" + (chosenExit === null ? "nenhuma" : safeProxy(chosenExit)));
-    if (gatewayConnCount > 1) {
+    if (revivePendenteEm > 0 && Date.now() - revivePendenteEm < GW_REVIVE_TTL_MS) {
+        // Esta conexao foi provocada pelo NOSSO revive (close 4000): nao e recorrencia,
+        // e a cura chegando. Sem aviso, sem auto-reload; a sessao recomeca a contar.
+        log("gw.revive | reconexao do revive chegou: sessao renasce limpa");
+        revivePendenteEm = 0;
+        gatewayConnCount = 1;
+    } else if (gatewayConnCount > 1) {
         const comMidia = Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS;
         log("gateway reconectou no meio da sessao (recorrencia " + (gatewayConnCount - 1) + ")"
             + (comMidia ? ": avisando na tela" : ", sem chamada em andamento"));
@@ -2832,7 +3096,12 @@ async function start() {
                     " | " + saidaInfo);
 
                 // Reconexao em rajada (ignora a primeira conexao da sessao, que nao e sinal).
-                if (chosenExit !== null) {
+                // A reconexao provocada pelo NOSSO revive tambem nao conta: alimentaria a
+                // rajada e quarentenaria a saida sadia por uma acao nossa (o close 4000 do
+                // revive SEMPRE causa uma reconexao — e o previsto).
+                if (revivePendenteEm > 0 && agora - revivePendenteEm < GW_REVIVE_TTL_MS) {
+                    log("gw.revive | reconexao do revive: fora da janela de rajada");
+                } else if (chosenExit !== null) {
                     gatewayReconexoes.push(agora);
                     while (gatewayReconexoes.length > 0 && gatewayReconexoes[0] < agora - RECONEXAO_JANELA_MS) gatewayReconexoes.shift();
 
