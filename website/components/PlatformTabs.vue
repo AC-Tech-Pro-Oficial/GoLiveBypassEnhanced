@@ -3,9 +3,17 @@ import type { IconName } from './BaseIcon.vue'
 
 export type Platform = 'windows' | 'macos' | 'linux'
 
-defineProps<{
-  modelValue: Platform
-}>()
+const props = withDefaults(
+  defineProps<{
+    modelValue: Platform
+    idPrefix?: string
+    ariaLabel?: string
+  }>(),
+  {
+    idPrefix: 'platform',
+    ariaLabel: 'Escolha o sistema operacional',
+  },
+)
 
 const emit = defineEmits<{
   'update:modelValue': [value: Platform]
@@ -19,17 +27,17 @@ const platforms: Array<{ id: Platform; label: string; icon: IconName }> = [
 </script>
 
 <template>
-  <div class="platform-tabs" role="tablist" aria-label="Escolha o sistema operacional">
+  <div class="platform-tabs" role="tablist" :aria-label="props.ariaLabel">
     <button
       v-for="platform in platforms"
-      :id="`platform-tab-${platform.id}`"
+      :id="`${props.idPrefix}-tab-${platform.id}`"
       :key="platform.id"
       class="platform-tab"
-      :class="{ 'platform-tab--active': modelValue === platform.id }"
+      :class="{ 'platform-tab--active': props.modelValue === platform.id }"
       type="button"
       role="tab"
-      :aria-selected="modelValue === platform.id"
-      :aria-controls="`platform-panel-${platform.id}`"
+      :aria-selected="props.modelValue === platform.id"
+      :aria-controls="`${props.idPrefix}-panel-${platform.id}`"
       @click="emit('update:modelValue', platform.id)"
     >
       <BaseIcon :name="platform.icon" :size="17" />

@@ -16,7 +16,7 @@ A primeira entrega será validada localmente. Hospedagem, proxy reverso, DNS, PM
 
 - Explicar em linguagem simples o que o projeto faz e quais são seus limites.
 - Levar a pessoa ao caminho de instalação correto em poucos passos.
-- Oferecer downloads diretos dos artefatos hospedados no GitHub.
+- Oferecer downloads diretos da GUI e comandos copiáveis para os instaladores hospedados no GitHub.
 - Manter a identidade visual alinhada à GUI existente.
 - Funcionar bem em 375px, 768px, 1024px e desktop largo.
 - Ser navegável por teclado, ter foco visível, contraste adequado e movimento reduzido.
@@ -36,7 +36,7 @@ A primeira entrega será validada localmente. Hospedagem, proxy reverso, DNS, PM
 O site será multipágina, com navegação global e páginas Nuxt independentes:
 
 - `/` — apresentação, proposta e escolha rápida do caminho.
-- `/downloads` — GUI por plataforma, CLI, standalone e plugin.
+- `/downloads` — GUI por plataforma e comandos copiáveis para instalador, standalone e plugin.
 - `/instalacao` — orientações por caminho, comandos copiáveis e pré-requisitos.
 - `/como-funciona` — explicação do gateway, do roteamento seletivo e da mídia direta.
 - `/faq` — dúvidas de instalação, permissões, atualizações, tela preta e compatibilidade.
@@ -112,7 +112,8 @@ Componentes compartilhados em `website/components/`:
 - `AppShell` — container, canvas, ambientação e estrutura de tema.
 - `AppHeader` — wordmark, navegação, tema e Discord.
 - `StatusPanel` — prévia de status inspirada na GUI.
-- `DownloadCard` — plataforma, tipo, versão, ação e fallback.
+- `DownloadCard` — plataforma, tipo, versão, ação e fallback da GUI.
+- `CommandPathCard` — caminho de instalação, comandos TUI e sem TUI, copiar e aviso de compatibilidade.
 - `InstallCommand` — sistema, comando, copiar e feedback textual.
 - `PlatformTabs` — escolha acessível de sistema operacional.
 - `FaqAccordion` — pergunta expansível com controle de teclado.
@@ -151,7 +152,7 @@ https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}
 https://raw.githubusercontent.com/{owner}/{repo}/main/{path}
 ```
 
-Os scripts de instalação e standalone usarão `raw.githubusercontent.com` quando o arquivo correto for mantido na branch `main`. Assets versionados usarão a URL da release. Cada cartão exibirá a versão e terá um link “Ver todos os arquivos no GitHub”.
+Os scripts de instalação e standalone serão apresentados como comandos que baixam os arquivos corretos de `raw.githubusercontent.com` e preservam o TTY para a TUI. O `golivebypass.js` é payload interno do standalone, não um download principal. Assets versionados da GUI usarão a URL da release. O ZIP do plugin fica apenas como caminho manual avançado.
 
 Como o site não consulta a API nem faz verificação de runtime, o cartão terá fallback explícito para a página da release. A atualização de uma release consiste em alterar tag, versão e nomes dos assets em um único arquivo. O site não fingirá que um arquivo está disponível se o GitHub retornar erro; o fallback ficará sempre visível como alternativa.
 
@@ -176,7 +177,9 @@ Os links externos terão `target="_blank"` e `rel="noopener noreferrer"`. Não h
 A primeira versão reutilizará e simplificará os fatos já documentados no README:
 
 - GUI é portátil para Windows, macOS e Linux.
-- CLI/instalador oferece PowerShell e shells POSIX.
+- Instaladores de terminal oferecem modo TUI e modo direto, com comandos para PowerShell e shells POSIX.
+- O standalone é um instalador de terminal; seu JavaScript é baixado pelo script.
+- O plugin tem instalador TUI, flags sem TUI e fluxo manual por ZIP.
 - Standalone não requer Node, pnpm, Git, Vencord ou Equicord.
 - Plugin é o caminho para quem já usa Vencord ou Equicord.
 - Somente sinalização/gateway passa pelo roteamento seletivo; WebRTC de áudio e vídeo permanece direto.
@@ -212,8 +215,8 @@ Durante a implementação:
 
 - O frontend está isolado em `website/` e roda com Nuxt.
 - Todas as rotas descritas carregam e têm navegação entre si.
-- GUI, CLI, standalone e plugin aparecem como caminhos distintos.
-- Downloads apontam diretamente para GitHub/raw GitHub sem API.
+- A GUI aparece como download; instalador, standalone e plugin aparecem como comandos copiáveis.
+- Os comandos TUI e sem TUI apontam diretamente para GitHub/raw GitHub sem API.
 - A tag e os nomes de assets são mantidos em um único arquivo.
 - O Discord usa exatamente `https://discord.gg/7cWbtr82rG`.
 - O site abre em tema escuro, permite tema claro e mantém o padrão visual da GUI.

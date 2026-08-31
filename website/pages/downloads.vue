@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { downloads, githubReleasePageUrl, release } from '~/data/release'
+import { terminalCommands } from '~/data/install'
 import type { Platform } from '~/components/PlatformTabs.vue'
 
 useSeoMeta({
@@ -7,16 +8,25 @@ useSeoMeta({
   description:
     'Baixe a GUI do GoLiveBypass para Windows, macOS e Linux ou escolha a instalação por terminal, standalone e plugin.',
   ogTitle: 'Downloads — GoLiveBypass',
-  ogDescription: 'Escolha a versão do GoLiveBypass para a sua plataforma.',
+  ogDescription: 'Escolha a GUI ou copie o comando de instalação para a sua plataforma.',
   ogUrl: 'https://golivebypass.dev/downloads',
 })
 
 const selectedPlatform = ref<Platform>('windows')
+const commandPlatform = ref<Platform>('windows')
+
+const activeTerminalCommands = computed(() => terminalCommands[commandPlatform.value === 'linux' ? 'linux' : 'windows'])
 
 onMounted(() => {
   const userAgent = navigator.userAgent.toLowerCase()
-  if (userAgent.includes('mac')) selectedPlatform.value = 'macos'
-  if (userAgent.includes('linux')) selectedPlatform.value = 'linux'
+  if (userAgent.includes('mac')) {
+    selectedPlatform.value = 'macos'
+    commandPlatform.value = 'macos'
+  }
+  if (userAgent.includes('linux')) {
+    selectedPlatform.value = 'linux'
+    commandPlatform.value = 'linux'
+  }
 })
 </script>
 
@@ -25,7 +35,7 @@ onMounted(() => {
     <PageIntro
       eyebrow="BAIXAR O PROJETO"
       title="Escolha a ferramenta para a sua máquina."
-      description="Os arquivos abaixo vêm diretamente das releases do GitHub. Não há conta, instalador intermediário ou chamada à API neste site."
+      description="A GUI vem diretamente da release do GitHub. Para terminal, standalone e plugin, copie o comando oficial correspondente ao seu sistema."
     />
 
     <section id="gui" class="release-banner reveal reveal--first">
@@ -107,58 +117,68 @@ onMounted(() => {
       </div>
     </section>
 
-    <section class="section section--page-section reveal reveal--third" aria-labelledby="other-title">
+    <section class="section section--page-section reveal reveal--third" aria-labelledby="command-title">
       <div class="section-heading">
         <div>
-          <span class="eyebrow">OUTROS CAMINHOS</span>
-          <h2 id="other-title">Terminal, standalone ou plugin.</h2>
+          <span class="eyebrow">INSTALAÇÃO POR COMANDO</span>
+          <h2 id="command-title">Copie e cole no terminal.</h2>
         </div>
-        <p>Use a GUI se quiser evitar comandos. Os outros caminhos continuam disponíveis para quem prefere controle manual.</p>
+        <p>Terminal, standalone e plugin não são downloads de aplicativo. Cada caminho baixa o instalador oficial e oferece uma versão com TUI e outra sem TUI.</p>
       </div>
 
-      <div class="download-grid">
-        <DownloadCard
-          icon="terminal"
-          kicker="CLI / INSTALADOR"
-          title="Instalação pelo terminal"
-          description="O instalador detecta o Discord e o mod. Escolha a opção e acompanhe tudo no próprio terminal."
-          meta="PowerShell · bash · zsh · fish · sh"
-          primary-label="PowerShell"
-          :primary-href="downloads.installerWindows"
-          secondary-label="Shell POSIX"
-          :secondary-href="downloads.installerPosix"
-        />
-        <DownloadCard
-          icon="route"
-          kicker="DISCORD PURO"
-          title="Standalone"
-          description="Bypass direto no Discord, sem Node, pnpm, Git, Vencord ou Equicord."
-          :meta="`${release.assets.standaloneJs} · código e instruções na release`"
-          primary-label="Baixar standalone"
-          :primary-href="downloads.standaloneJs"
-          secondary-label="Ver instruções"
-          secondary-href="/instalacao#standalone"
-        />
-        <DownloadCard
+      <PlatformTabs
+        v-model="commandPlatform"
+        id-prefix="command-platform"
+        aria-label="Escolha o sistema operacional para os comandos"
+      />
+
+      <div v-if="commandPlatform !== 'macos'" :id="`command-platform-panel-${commandPlatform}`" class="command-path-grid" role="tabpanel" :aria-labelledby="`command-platform-tab-${commandPlatform}`">
+        <CommandPathCard
           icon="code"
           kicker="VENCORD / EQUICORD"
           title="Plugin do Discord"
-          description="Para quem já usa um mod. O ZIP contém o plugin e o manual para instalar sem perder os demais recursos."
-          meta="goLiveBypass-vencord.zip · checksum SHA-256 disponível"
-          primary-label="Baixar plugin"
-          :primary-href="downloads.plugin"
-          secondary-label="Checksum"
-          :secondary-href="downloads.pluginSha"
+          description="Use quando você já usa Vencord ou Equicord. A TUI detecta o mod e guia a instalação; o modo direto instala com Equicord sem abrir o menu."
+          :platform="commandPlatform === 'windows' ? 'Windows · PowerShell' : 'Linux · shell POSIX'"
+          :tui-command="activeTerminalCommands.plugin.tui"
+          :direct-command="activeTerminalCommands.plugin.direct"
+          :direct-note="activeTerminalCommands.plugin.directNote"
           tone="discord"
         />
+        <CommandPathCard
+          icon="route"
+          kicker="DISCORD PURO"
+          title="Standalone"
+          description="Use somente no Discord sem mod. O script é o instalador com TUI; o arquivo JavaScript é baixado por ele e não precisa ser baixado separadamente."
+          :platform="commandPlatform === 'windows' ? 'Windows · PowerShell' : 'Linux · shell POSIX'"
+          :tui-command="activeTerminalCommands.standalone.tui"
+          :direct-command="activeTerminalCommands.standalone.direct"
+          :direct-note="activeTerminalCommands.standalone.directNote"
+          tone="success"
+        />
+      </div>
+
+      <div v-else :id="`command-platform-panel-${commandPlatform}`" class="info-note command-platform-unavailable" role="tabpanel" :aria-labelledby="`command-platform-tab-${commandPlatform}`">
+        <span class="icon-frame icon-frame--muted"><BaseIcon name="apple" :size="18" /></span>
+        <div>
+          <strong>No macOS, use a GUI.</strong>
+          <p>O README documenta os instaladores de terminal para Windows e Linux. No macOS, baixe a GUI acima para ativar o bypass sem comandos.</p>
+        </div>
+      </div>
+
+      <div class="command-section-footnote">
+        <span class="icon-frame icon-frame--muted"><BaseIcon name="lock" :size="17" /></span>
+        <div>
+          <strong>O comando roda os scripts oficiais do repositório.</strong>
+          <p>O modo TUI abre o menu interativo. O modo sem TUI usa as flags de automação. Se preferir instalar o plugin manualmente, o <a :href="downloads.plugin" target="_blank" rel="noopener noreferrer">ZIP do plugin</a> continua disponível como caminho avançado.</p>
+        </div>
       </div>
     </section>
 
     <section class="info-note reveal reveal--third">
       <span class="icon-frame icon-frame--muted"><BaseIcon name="lock" :size="18" /></span>
       <div>
-        <strong>Downloads sem API do GitHub</strong>
-        <p>A página usa links estáticos para a release configurada no projeto. Se uma versão mudar, a tag e os nomes dos arquivos são atualizados em um único arquivo do site.</p>
+        <strong>Links e comandos sem API do GitHub</strong>
+        <p>A página usa links estáticos para a release e para os scripts oficiais. Se uma versão mudar, a tag, os assets e os comandos ficam centralizados nos arquivos de dados do site.</p>
       </div>
     </section>
 

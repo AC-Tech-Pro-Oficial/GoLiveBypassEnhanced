@@ -19,12 +19,12 @@ useSeoMeta({
         <span class="eyebrow">GO LIVE · BRASIL</span>
         <h1>Go Live de volta ao Discord.</h1>
         <p class="hero__lead">
-          Escolha uma interface ou instale pelo terminal. O GoLiveBypass organiza o caminho certo para a sua máquina e aponta para os arquivos oficiais do projeto.
+          Escolha uma interface ou copie um comando no terminal. O GoLiveBypass organiza o caminho certo para a sua máquina e aponta para os arquivos oficiais do projeto.
         </p>
         <div class="hero__actions">
           <NuxtLink class="button button--primary" to="/downloads">
             <BaseIcon name="download" :size="17" />
-            Escolher download
+            Escolher instalação
             <BaseIcon name="arrow-right" :size="16" />
           </NuxtLink>
           <a
@@ -99,9 +99,9 @@ useSeoMeta({
           icon="code"
           eyebrow="PARA QUEM JÁ USA MOD"
           title="Uso Vencord ou Equicord"
-          description="Instale o plugin dentro do mod e preserve os outros plugins do seu Discord."
-          link-label="Ver instalação do plugin"
-          to="/instalacao#plugin"
+          description="Instale o plugin pelo terminal e preserve os outros plugins do seu Discord."
+          link-label="Ver comando do plugin"
+          to="/instalacao#terminal"
         />
         <PathCard
           icon="route"

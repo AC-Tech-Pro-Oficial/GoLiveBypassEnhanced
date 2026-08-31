@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { downloads, githubReleasePageUrl, release } from '~/data/release'
+import { downloads, githubReleasePageUrl } from '~/data/release'
+import { terminalCommands } from '~/data/install'
+import type { Platform } from '~/components/PlatformTabs.vue'
 
 useSeoMeta({
   title: 'Instalação',
@@ -10,8 +12,14 @@ useSeoMeta({
   ogUrl: 'https://golivebypass.dev/instalacao',
 })
 
-const windowsInstallerCommand = 'irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile $env:TEMP\glb.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb.ps1"'
-const posixInstallerCommand = 'curl -fsSL https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/golivebypass-installer.sh -o /tmp/glb.sh && chmod +x /tmp/glb.sh && /tmp/glb.sh'
+const installPlatform = ref<Platform>('windows')
+const activeInstallCommands = computed(() => terminalCommands[installPlatform.value === 'linux' ? 'linux' : 'windows'])
+
+onMounted(() => {
+  const userAgent = navigator.userAgent.toLowerCase()
+  if (userAgent.includes('mac')) installPlatform.value = 'macos'
+  if (userAgent.includes('linux')) installPlatform.value = 'linux'
+})
 </script>
 
 <template>
@@ -43,10 +51,10 @@ const posixInstallerCommand = 'curl -fsSL https://raw.githubusercontent.com/bezu
           <span>Use o instalador automático pelo PowerShell ou shell POSIX.</span>
           <BaseIcon name="arrow-right" :size="16" />
         </NuxtLink>
-        <NuxtLink class="decision-card" to="#plugin">
+        <NuxtLink class="decision-card" to="#terminal">
           <span class="decision-card__index">03</span>
           <strong>Já uso Vencord ou Equicord</strong>
-          <span>Instale o plugin para preservar os recursos do seu mod.</span>
+          <span>Instale o plugin com TUI ou em modo direto, sem perder os outros recursos.</span>
           <BaseIcon name="arrow-right" :size="16" />
         </NuxtLink>
         <NuxtLink class="decision-card" to="#standalone">
@@ -91,27 +99,55 @@ const posixInstallerCommand = 'curl -fsSL https://raw.githubusercontent.com/bezu
       <div class="section-heading">
         <div>
           <span class="eyebrow">CAMINHO 02</span>
-          <h2 id="install-terminal-title">Instalador pelo terminal</h2>
+          <h2 id="install-terminal-title">Instaladores pelo terminal</h2>
         </div>
-        <p>O instalador detecta o Discord e o mod, pergunta o que deve fazer e mantém o processo reversível.</p>
+        <p>Standalone e plugin são scripts de instalação. Copie o comando com TUI para escolher as opções ou use o modo direto para automação.</p>
       </div>
-      <div class="command-stack">
-        <InstallCommand
-          label="Instalador automático"
-          platform="Windows · PowerShell"
-          :command="windowsInstallerCommand"
+
+      <PlatformTabs
+        v-model="installPlatform"
+        id-prefix="install-platform"
+        aria-label="Escolha o sistema operacional para a instalação por terminal"
+      />
+
+      <div v-if="installPlatform !== 'macos'" :id="`install-platform-panel-${installPlatform}`" class="command-path-grid" role="tabpanel" :aria-labelledby="`install-platform-tab-${installPlatform}`">
+        <CommandPathCard
+          icon="code"
+          kicker="VENCORD / EQUICORD"
+          title="Plugin do Discord"
+          description="Use para preservar Vencord ou Equicord e os outros plugins. Sem flags, o instalador abre a TUI e detecta ou instala o mod escolhido."
+          :platform="installPlatform === 'windows' ? 'Windows · PowerShell' : 'Linux · shell POSIX'"
+          :tui-command="activeInstallCommands.plugin.tui"
+          :direct-command="activeInstallCommands.plugin.direct"
+          :direct-note="activeInstallCommands.plugin.directNote"
+          tone="discord"
         />
-        <InstallCommand
-          label="Instalador automático"
-          platform="Linux e macOS · shell POSIX"
-          :command="posixInstallerCommand"
+        <CommandPathCard
+          icon="route"
+          kicker="DISCORD PURO"
+          title="Standalone"
+          description="Use somente no Discord sem mod. O instalador abre a TUI, baixa o bypass e injeta direto no Discord."
+          :platform="installPlatform === 'windows' ? 'Windows · PowerShell' : 'Linux · shell POSIX'"
+          :tui-command="activeInstallCommands.standalone.tui"
+          :direct-command="activeInstallCommands.standalone.direct"
+          :direct-note="activeInstallCommands.standalone.directNote"
+          tone="success"
         />
       </div>
+
+      <div v-else :id="`install-platform-panel-${installPlatform}`" class="info-note command-platform-unavailable" role="tabpanel" :aria-labelledby="`install-platform-tab-${installPlatform}`">
+        <span class="icon-frame icon-frame--muted"><BaseIcon name="apple" :size="18" /></span>
+        <div>
+          <strong>No macOS, use a GUI.</strong>
+          <p>Os instaladores de terminal documentados pelo projeto são para Windows e Linux. No macOS, use a GUI para ativar o bypass.</p>
+        </div>
+      </div>
+
       <div class="info-note info-note--dark">
         <span class="icon-frame icon-frame--muted"><BaseIcon name="alert" :size="18" /></span>
         <div>
-          <strong>Baixe como arquivo antes de executar.</strong>
-          <p>O método preserva o terminal interativo para o menu e evita que o shell consuma as perguntas do instalador. Para automação, consulte os parâmetros documentados no README.</p>
+          <strong>Com TUI é o fluxo recomendado.</strong>
+          <p>Abra o comando em um terminal interativo. Use as flags sem TUI apenas em automação ou quando já souber qual mod e caminho quer usar.</p>
         </div>
       </div>
     </section>
@@ -122,26 +158,38 @@ const posixInstallerCommand = 'curl -fsSL https://raw.githubusercontent.com/bezu
           <span class="eyebrow">CAMINHO 03</span>
           <h2 id="install-standalone-title">Standalone para Discord puro</h2>
         </div>
-        <p>Escolha esta opção se você não usa Vencord ou Equicord. Ela injeta o bypass diretamente no Discord.</p>
+        <p>O standalone não é um arquivo para abrir. É um instalador de terminal que baixa o payload, mostra a TUI e injeta o bypass diretamente no Discord.</p>
       </div>
-      <div class="standalone-layout">
-        <div class="prose-block">
-          <h3>Antes de começar</h3>
+
+      <div v-if="installPlatform !== 'macos'" class="standalone-command-layout">
+        <CommandPathCard
+          icon="route"
+          kicker="INSTALADOR STANDALONE"
+          title="Com TUI ou sem TUI"
+          description="Escolha o modo com menu para configurar saída, status e remoção. No modo direto, o script instala sem fazer perguntas."
+          :platform="installPlatform === 'windows' ? 'Windows · PowerShell' : 'Linux · shell POSIX'"
+          :tui-command="activeInstallCommands.standalone.tui"
+          :direct-command="activeInstallCommands.standalone.direct"
+          :direct-note="activeInstallCommands.standalone.directNote"
+          tone="success"
+        />
+        <div class="prose-block prose-block--note">
+          <span class="icon-frame icon-frame--success"><BaseIcon name="check" :size="19" /></span>
+          <h3>Quando escolher</h3>
           <ul class="check-list">
-            <li><BaseIcon name="check" :size="16" /> Não requer Node, pnpm ou Git.</li>
-            <li><BaseIcon name="check" :size="16" /> Não instala um mod paralelo no Discord.</li>
-            <li><BaseIcon name="alert" :size="16" /> Não use por cima de Vencord ou Equicord.</li>
+            <li><BaseIcon name="check" :size="16" /> Discord instalado sem Vencord ou Equicord.</li>
+            <li><BaseIcon name="check" :size="16" /> Sem Node, pnpm ou Git.</li>
+            <li><BaseIcon name="alert" :size="16" /> Não use por cima de um mod já injetado.</li>
           </ul>
-          <p class="muted-copy">Baixe o bypass da release e use o script do seu sistema para instalar, consultar o status ou restaurar o Discord original.</p>
-          <div class="inline-actions">
-            <a class="button button--small button--primary" :href="downloads.standaloneJs" target="_blank" rel="noopener noreferrer"><BaseIcon name="download" :size="16" /> Baixar bypass</a>
-            <a class="text-link" :href="downloads.standaloneSha" target="_blank" rel="noopener noreferrer">SHA-256 <BaseIcon name="external" :size="15" /></a>
-          </div>
+          <p>Para consultar ou desfazer depois, acrescente <code>-Mode Status</code> ou <code>-Mode Uninstall</code> no PowerShell. No Linux, use <code>--status</code> ou <code>--uninstall</code>.</p>
         </div>
-        <div class="script-links">
-          <a class="script-link" :href="downloads.standaloneWindows" target="_blank" rel="noopener noreferrer"><BaseIcon name="windows" :size="18" /><span><strong>PowerShell</strong><small>GoLiveBypass-Standalone.ps1</small></span><BaseIcon name="external" :size="15" /></a>
-          <a class="script-link" :href="downloads.standaloneWindowsBat" target="_blank" rel="noopener noreferrer"><BaseIcon name="windows" :size="18" /><span><strong>Duplo clique</strong><small>GoLiveBypass-Standalone.bat</small></span><BaseIcon name="external" :size="15" /></a>
-          <a class="script-link" :href="downloads.standalonePosix" target="_blank" rel="noopener noreferrer"><BaseIcon name="terminal" :size="18" /><span><strong>Linux e macOS</strong><small>golivebypass-standalone.sh</small></span><BaseIcon name="external" :size="15" /></a>
+      </div>
+
+      <div v-else class="info-note command-platform-unavailable">
+        <span class="icon-frame icon-frame--muted"><BaseIcon name="apple" :size="18" /></span>
+        <div>
+          <strong>No macOS, use a GUI.</strong>
+          <p>O caminho de terminal do standalone não é documentado para macOS. Baixe a GUI na página de downloads.</p>
         </div>
       </div>
     </section>
@@ -149,22 +197,27 @@ const posixInstallerCommand = 'curl -fsSL https://raw.githubusercontent.com/bezu
     <section id="plugin" class="section section--page-section reveal reveal--third" aria-labelledby="install-plugin-title">
       <div class="section-heading">
         <div>
-          <span class="eyebrow">CAMINHO 04</span>
-          <h2 id="install-plugin-title">Plugin para Vencord e Equicord</h2>
+          <span class="eyebrow">CAMINHO AVANÇADO</span>
+          <h2 id="install-plugin-title">Plugin manual para Vencord e Equicord</h2>
         </div>
-        <p>Este é o caminho correto para manter seu mod e os outros plugins instalados.</p>
+        <p>O instalador por comando acima é o caminho recomendado. Use este fluxo apenas se quiser baixar o ZIP e fazer cada etapa manualmente.</p>
       </div>
       <div class="plugin-layout">
-        <ol class="numbered-list numbered-list--plain">
-          <li><span>01</span><p>Baixe o ZIP do plugin na <NuxtLink to="/downloads">página de downloads</NuxtLink>.</p></li>
-          <li><span>02</span><p>Extraia a pasta <code>goLiveBypass</code> no diretório de plugins do Vencord ou Equicord.</p></li>
-          <li><span>03</span><p>Compile o mod e reinicie o Discord conforme o fluxo do seu mod.</p></li>
-        </ol>
+        <div class="prose-block">
+          <h3>Passo a passo</h3>
+          <ol class="numbered-list numbered-list--plain">
+            <li><span>01</span><p>Baixe o <a :href="downloads.plugin" target="_blank" rel="noopener noreferrer">ZIP do plugin</a> e extraia a pasta <code>goLiveBypass</code>.</p></li>
+            <li><span>02</span><p>Copie-a para <code>src/userplugins/goLiveBypass</code> dentro do seu clone do Vencord ou Equicord. A pasta <code>userplugins</code> fica ao lado de <code>plugins</code>.</p></li>
+            <li><span>03</span><p>Na raiz do mod, rode <code>pnpm install</code> e <code>pnpm build</code>.</p></li>
+            <li><span>04</span><p>Feche o Discord, rode <code>pnpm inject</code> e abra o Discord novamente. No Vesktop, aponte o campo <strong>Vencord Location</strong> para a pasta <code>dist</code> em vez de usar <code>pnpm inject</code>.</p></li>
+          </ol>
+        </div>
         <div class="warning-card">
           <BaseIcon name="alert" :size="20" />
           <div>
-            <strong>Não substitua o app.asar sem entender o conflito.</strong>
-            <p>O standalone e o mod ocupam o mesmo lugar dentro do Discord. Se você já usa Vencord ou Equicord, prefira o plugin.</p>
+            <strong>Não misture os caminhos.</strong>
+            <p>O standalone ocupa o lugar do mod e pode remover outros plugins. Se Vencord ou Equicord já estiver instalado, use o instalador do plugin ou este fluxo manual — nunca o standalone.</p>
+            <a class="text-link" :href="githubReleasePageUrl" target="_blank" rel="noopener noreferrer">Ver release e checksums <BaseIcon name="external" :size="15" /></a>
           </div>
         </div>
       </div>
