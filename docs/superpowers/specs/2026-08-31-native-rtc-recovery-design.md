@@ -32,9 +32,9 @@ real e a recuperação por WebSocket não reinicializa o estado nativo preso.
 ## Objetivo
 
 Detectar o estado zumbi pelo `discord_voice` e recuperá-lo sem o bypass chamar
-reload. É aceitável um corte breve de áudio e uma reconstrução interna iniciada
-pelo próprio Discord, desde que o estado lógico da call/Live seja restaurado
-sozinho.
+reload, destruir o transporte RTC ou retirar o usuário da call. É aceitável um
+corte breve somente no vídeo enquanto a fonte/encoder é reinicializada no mesmo
+objeto nativo.
 
 Não são objetivos:
 
@@ -64,6 +64,14 @@ Discord não oferecer uma classificação inequívoca, a conexão fica como
 Cada registro mantém identificador local, tipo, instante de criação, estado de
 destruição e amostras sanitizadas. IDs de usuário, canal, guilda, endereço e
 token não entram no resumo nem no log.
+
+No mesmo registro, o shim envolve `setDesktopSource` e
+`setDesktopSourceWithOptions`. A última configuração confirmada da fonte fica
+somente em memória, por referência, junto da conexão exata que a recebeu. Os
+argumentos nunca atravessam o world isolado, nunca entram em resumo/log e são
+descartados quando o Discord chama `clearDesktopSource`, destrói a conexão ou
+recarrega o documento. Isso permite repetir a operação nativa que o próprio
+cliente usou, sem tentar reconstruir IDs de tela, callbacks ou opções privadas.
 
 ### 2. Stats reais e sinal de demanda
 
@@ -120,26 +128,36 @@ recente da stream reinicia o aquecimento e não dispara ação.
 
 ### 4. Escada de recuperação
 
-Nível 1 — stream nativa:
+O segundo ensaio invalidou `destroy()` como mecanismo de cura: ele é uma API de
+encerramento, não de renegociação, e remove a associação da captura. A escada
+passa a operar somente na fonte de desktop já configurada.
+
+Nível 1 — reaplicação idempotente:
 
 1. marcar a tentativa e suspender novas decisões;
-2. chamar `destroy()` somente na conexão nativa `stream` atual;
-3. não fechar WebSocket no nível 1, pois a associação URL → stream não é
-   inequívoca no cliente atual;
-4. aguardar 60 s pelo teardown tardio. Se voice/mídia já estiverem fechando,
-   conceder mais 45 s ao controlador; toda geração nova recebe 30 s próprios de
-   aquecimento. A cura só vale com progressão estável por pelo menos 10 s.
+2. repetir, na mesma conexão, a última chamada confirmada de
+   `setDesktopSource*`, com os mesmos argumentos mantidos somente em memória;
+3. não destruir conexão, não fechar WebSocket e não tocar no gateway;
+4. aguardar até 20 s por progressão real do encoder.
 
-Nível 2 — RTC completo, sem reload:
+Nível 2 — reinicialização da fonte, sem destruir RTC:
 
-1. destruir as conexões nativas `stream` e `default` conhecidas;
-2. fechar todos os WebSockets `discord.media` com código 4000;
-3. deixar o controlador do Discord reconstruir a call e a stream;
-4. aceitar um corte breve de áudio, mas conferir que o canal lógico continua
-   selecionado e que uma geração nativa nova nasceu.
+1. chamar `clearDesktopSource()` na conexão exata, sob uma guarda interna que
+   preserva a configuração para esta recuperação;
+2. após uma pausa curta, reaplicar a última chamada `setDesktopSource*`;
+3. aguardar até 30 s, mantendo voz, transporte e estado lógico da Live;
+4. considerar cura tanto na mesma geração quanto numa geração que o próprio
+   Discord tenha criado, mas somente com saída progredindo por 10 s.
 
-Se o nível 2 não recuperar em 45 s, a automação para e mostra banner dedicado.
-Não há nível de reload automático. O teto é de duas tentativas em 30 minutos.
+Se a configuração não foi observada, a conexão já morreu ou o nível 2 não
+recuperar, a automação para e mostra banner dedicado. Não existe fallback para
+`destroy()`, fechamento de mídia ou reload. O teto continua em duas ações por
+30 minutos.
+
+Demanda zerada depois de uma ação não é interpretada imediatamente como saída
+do espectador: pode ser efeito transitório da reinicialização. Ela suspende a
+escalada; se não voltar dentro de 60 s, a observação termina sem segunda ação e
+sem declarar sucesso.
 
 Sucesso só é creditado quando demanda continua positiva e quadros ou bytes de
 vídeo progridem durante o aquecimento. Um único quadro-chave ou `viewer=1`
@@ -161,9 +179,27 @@ renasceu nos primeiros 30 s, mas iniciou uma reconstrução tardia sem ação ú
 do nível 2: voice/mídia fecharam, o Discord criou documento/preload novos,
 reentrou na call e recriou a Live. A nova geração chegou a dois receptores e
 estabilizou em aproximadamente 60 fps, 1920×1088; em uma janela adicional de
-25 s, `framesEncoded` cresceu continuamente de 3.209 para 4.711. Portanto, o
-nível 1 é uma cura válida, porém assíncrona, e a escada precisa reconhecer o
-teardown/reload interno em vez de atropelá-lo.
+25 s, `framesEncoded` cresceu continuamente de 3.209 para 4.711. Naquele ensaio
+isolado, o nível 1 pareceu uma cura assíncrona; a ocorrência seguinte, descrita
+abaixo, mostrou que a reconstrução foi circunstancial e não autoriza usar
+`destroy()` como mecanismo.
+
+### Revisão após a terceira ocorrência natural
+
+Uma nova falha às 11:43 confirmou novamente a assinatura: captura em 60 fps,
+demanda positiva e `framesEncoded=0`/`encodeFrameRate=0`. A beta executou
+`destroy(stream)` aos 20 s. A demanda caiu como consequência da própria ação e
+a máquina de estados a confundiu com a saída do espectador, cancelando a
+observação. A stream não renasceu em 90 s; o nível 2 aplicado manualmente
+destruiu uma voice e fechou dois sockets de mídia.
+
+O Discord acabou criando voice/stream novas, mas a stream permaneceu
+`stats=sem-video`: havia transporte, porém nenhuma fonte de desktop associada.
+Uma parada limpa pela interface removeu a stream sem sair da call. Esse ensaio
+prova que a recuperação anterior foi circunstancial e que `destroy()` não pode
+ser usado em produção. Também revelou diretamente no objeto nativo os métodos
+`setDesktopSource`, `setDesktopSourceWithOptions` e `clearDesktopSource`, que
+formam a nova fronteira segura da cura.
 
 ## Falha segura e compatibilidade
 
@@ -173,6 +209,10 @@ teardown/reload interno em vez de atropelá-lo.
 - O hook é idempotente e sobrevive a múltiplas vias de injeção.
 - Nenhuma URL completa de WebSocket, opção bruta de conexão ou objeto de stats é
   persistido.
+- Argumentos de fonte podem conter identificadores privados; permanecem por
+  referência no closure do preload e jamais aparecem em IPC, resumo ou log.
+- `destroy()`, `fastUdpReconnect()` e fechamento de `discord.media` ficam fora
+  da recuperação automática de encoder.
 - A decisão continua proibida durante criação, encerramento voluntário e período
   de aquecimento.
 - O comportamento deve ser portado para a GUI pelo `sync-bypass`. O plugin
@@ -201,8 +241,10 @@ Novas linhas resumidas:
 - detector não age sem demanda, sem captura viva, durante aquecimento ou com
   amostra desconhecida;
 - detector age com demanda positiva + entrada viva + saída congelada;
-- nível 1 destrói somente `stream`;
-- nível 2 destrói `stream` e `default` e fecha mídia;
+- nível 1 repete a configuração de fonte sem destruir stream/voice;
+- nível 2 limpa e reaplica a fonte sem fechar mídia;
+- `clearDesktopSource` voluntário invalida a configuração e impede replay;
+- resumo e logs não expõem nenhum argumento capturado;
 - sucesso exige progressão sustentada, não pulso transitório;
 - teto, cooldown e logs sem identificadores sensíveis.
 
@@ -213,7 +255,8 @@ Novas linhas resumidas:
    antigo continua irrelevante;
 3. aguardar a falha natural ou reproduzir a condição sem derrubar gateway;
 4. confirmar a assinatura de zumbi;
-5. observar o nível 1; se falhar, o nível 2 deve manter o usuário no canal;
+5. observar o nível 1; se falhar, o nível 2 deve manter voz, mídia e usuário no
+   canal;
 6. considerar sucesso apenas com pelo menos 60 s de vídeo contínuo após a cura;
 7. repetir sem espectador por dez minutos para provar ausência de falso positivo.
 

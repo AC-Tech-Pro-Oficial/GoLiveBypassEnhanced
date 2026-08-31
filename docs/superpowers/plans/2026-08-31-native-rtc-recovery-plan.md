@@ -6,13 +6,14 @@ Especificação: `docs/superpowers/specs/2026-08-31-native-rtc-recovery-design.m
 
 - Instrumentação, formato real e detector: concluídos.
 - API confirmada: `getFilteredStats(2, callback)`, não `getStats()`.
-- Falha natural reproduzida e nível 1 validado: `destroy(stream)` provocou a
-  reconstrução tardia do próprio Discord e o vídeo voltou estável a ~60 fps.
-- Escada recalibrada para teardown em 60 s + graça de 45 s e aquecimento de 30 s
-  para geração nova; o nível 2 não chegou a executar no ensaio.
-- Testes do shim, detector, mundo isolado, gateway e GUI passaram; falta rodar o
-  runtime novo em uma próxima ocorrência natural e completar o cenário sem
-  espectador por dez minutos.
+- Uma terceira ocorrência invalidou a escada destrutiva: `destroy(stream)` fez a
+  demanda cair, e o nível 2 recriou voice/stream sem fonte de vídeo
+  (`stats=sem-video`).
+- O objeto nativo confirmou a API segura para o novo desenho:
+  `setDesktopSource`, `setDesktopSourceWithOptions` e `clearDesktopSource`.
+- Próxima implementação: guardar a última configuração somente em memória,
+  reaplicá-la no nível 1 e fazer clear + replay no nível 2, sem destruir RTC nem
+  fechar mídia.
 
 ## 1. Instrumentação nativa isolada
 
@@ -28,10 +29,12 @@ Passos:
 2. Envolver `DiscordNative.nativeModules.requireModule` de forma idempotente.
 3. Envolver os dois criadores de conexão sem alterar argumentos, `this`, retorno
    ou exceções.
-4. Manter registros locais sanitizados e expor um resumo somente leitura.
-5. Criar testes com módulos falsos para transparência, idempotência, falha
+4. Envolver `setDesktopSource*`/`clearDesktopSource`, mantendo os argumentos por
+   referência apenas no closure e nunca no resumo.
+5. Manter registros locais sanitizados e expor um resumo somente leitura.
+6. Criar testes com módulos falsos para transparência, idempotência, falha
    segura e ausência de IDs no resumo.
-6. Rodar `node tests/test-native-rtc-recovery.cjs`.
+7. Rodar `node tests/test-native-rtc-recovery.cjs`.
 
 ## 2. Descoberta controlada do formato real
 
@@ -81,10 +84,10 @@ Passos:
 
 1. Implementar `avaliarRtcNativo` como função pura.
 2. Cobrir todas as guardas da especificação com relógio controlado.
-3. Implementar nível 1: destruir somente a geração `stream` corrente e, apenas
-   quando associável com confiança, seu WebSocket de mídia.
-4. Implementar nível 2: destruir `stream` e `voice`, fechar mídia com código
-   4000 e aguardar o controlador do Discord.
+3. Implementar nível 1: reaplicar a última chamada `setDesktopSource*` na mesma
+   conexão, sem destruir nada.
+4. Implementar nível 2: `clearDesktopSource()` + replay após pausa curta, sem
+   fechar voice, stream, mídia ou gateway.
 5. Implementar cooldown, teto, aquecimento e crédito de sucesso sustentado.
 6. Remover o probe de `window.RTCPeerConnection` da tomada de decisão; mantê-lo
    temporariamente apenas como diagnóstico legado se não gerar confusão.
@@ -134,8 +137,10 @@ gerado fora de sincronia nem alteração incidental do usuário.
 ## Critérios de parada segura
 
 - Não destruir conexão `unknown`.
+- Não chamar `destroy()` em conexão conhecida como forma de recuperação.
 - Não escalar com stats incompletos.
 - Não usar reload automático.
 - Não mexer no gateway durante mídia ativa.
-- Se o controlador do Discord não recriar a call após o nível 2, desabilitar a
-  ação automática e manter apenas telemetria/banner até novo desenho.
+- Se clear + replay não restabelecer progressão após o nível 2, desabilitar a
+  ação automática e manter apenas telemetria/banner; nunca voltar à escada
+  destrutiva.
