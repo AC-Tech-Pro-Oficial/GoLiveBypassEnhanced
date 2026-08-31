@@ -7,6 +7,36 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Injeção à prova de corrida: o shim vira preload de sessão** (beta 10,
+  [#163](https://github.com/bezumiya/GoLiveBypass/issues/163)): a #163 pegou uma
+  sessão inteira **cega** — o CDP não anexou, o fallback do `did-finish-load`
+  reinjetou DEPOIS do gateway já ter conectado, e o gateway não reconectou mais
+  (25+ min de túnel saudável): 17 minutos de probes `estado=nenhum`. Como nós
+  controlamos o app.asar injetado, o shim agora é gravado em
+  `golive-shim.js` e registrado como **preload de sessão**
+  (`registerPreloadScript`, com fallback para `setPreloads`) — preload roda
+  antes de qualquer script da página, em toda janela/frame, sem CDP e sem
+  corrida. CDP e fallback ficam como reforço (tudo self-guardado: injeção dupla
+  é inofensiva).
+- **Instrumentação RTC + gatilho "áudio vivo, vídeo parado" + cura de voz**
+  (beta 10): o nyxxy revelou o sintoma decisivo — **o áudio da transmissão
+  toca, mas o vídeo nunca sai**. Áudio de Go Live vai por RTC/UDP (não pelo
+  gateway): a conexão de voz ESTÁ de pé — o que trava é a ativação do vídeo.
+  - O shim agora envolve o `RTCPeerConnection`: `__goliveRtcResumo()` agrega
+    `getStats()` por PC — bytes inbound de **áudio vs vídeo**, se existe track
+    de vídeo esperada e se o usuário é quem transmite.
+  - Linha nova no vigia: `rtc.probe | pcs=.. audio_ha=.. video_ha=.. track=..
+    enviando=..` — junto do `gw.probe`, o log conta sinalização + mídia.
+  - **Gatilho** (`avaliarRtcVideo`, função pura): mídia aberta há ≥ 20s +
+    **áudio vivo** (< 60s) + **track de vídeo esperada** (call só de voz nunca
+    dispara) + **vídeo parado** (nunca chegou byte ou ≥ 120s) + **não é quem
+    transmite** = video-travado.
+  - **Cura**: reconstruir a VOZ, não a janela — `__goliveMidiaFechar()` fecha o
+    ws `*.discord.media` com close(4000); o cliente reconecta/resume a voz e
+    re-negocia o vídeo, **sem derrubar a sessão do Discord** (a regra §6 segue
+    intacta — sem reload com mídia aberta). Escada própria: 2 tentativas/30min
+    com cooldown de 3min; exauriu → banner dedicado (`golivebypass-video`) que
+    explica o que aconteceu. Recuperação: vídeo voltou a crescer → sucesso.
 - **Gatilho de stream travada: sniff do op 4 + fluxo de mídia** (beta 9,
   retorno da beta 8 nas issues [#159](https://github.com/bezumiya/GoLiveBypass/issues/159),
   [#160](https://github.com/bezumiya/GoLiveBypass/issues/160) e

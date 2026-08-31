@@ -38,12 +38,32 @@ class FakeWS {
   constructor(url: string) { this.url = url; }
   addEventListener(t: string, f: (e?: unknown) => void) { (this.l[t] ??= []).push(f); }
   emitir(t: string, ev?: unknown) { (this.l[t] ?? []).forEach(f => f(ev)); }
-  send(d: string) { this.sent.push(d); }
+  send(d: string | ArrayBuffer | Uint8Array) { this.sent.push(d as string); }
   close(code?: number, reason?: string) {
     this.closes.push({ code, reason });
     this.readyState = 3;
     this.emitir("close");
   }
+}
+
+// RTCStatsReport de mentira: lista com forEach, como o getStats real devolve.
+class FakeRTC {
+  private l: Record<string, ((e?: unknown) => void)[]> = {};
+  constructor(public stats: Array<Record<string, unknown>>) { }
+  addEventListener(t: string, f: (e?: unknown) => void) { (this.l[t] ??= []).push(f); }
+  emitir(t: string) { (this.l[t] ?? []).forEach(f => f()); }
+  getStats() { return Promise.resolve({ forEach: (f: (s: Record<string, unknown>) => void) => this.stats.forEach(s => f(s)) }); }
+  close() { this.emitir("close"); }
+}
+
+interface RtcResumo {
+  pcs: number;
+  audioBytes: number;
+  videoBytes: number;
+  audioHa: number;
+  videoHa: number;
+  videoTrack: boolean;
+  enviando: boolean;
 }
 
 interface Resumo {
@@ -71,12 +91,18 @@ interface Resumo {
 function rodarShim(opts: { semInflador?: boolean } = {}): {
   win: Record<string, unknown>;
   ws: (url: string) => FakeWS;
+  pc: (stats: Array<Record<string, unknown>>) => FakeRTC;
   resumo: () => Resumo;
+  rtcResumo: () => Promise<RtcResumo>;
   midiaAberta: () => boolean;
+  midiaFechar: () => number;
   fechar: () => boolean;
 } {
   const shim = extrairConst("SHIM_GATEWAY_SRC");
-  const win = { WebSocket: FakeWS as unknown } as Record<string, unknown>;
+  const win = {
+    WebSocket: FakeWS as unknown,
+    RTCPeerConnection: FakeRTC as unknown,
+  } as Record<string, unknown>;
   // 1) avalia a EXPRESSAO (concatenacao de strings) para obter o codigo fonte;
   // 2) executa o codigo fonte contra o window falso.
   const fonte = new Function("window", "return " + shim)(win) as string;
@@ -90,8 +116,11 @@ function rodarShim(opts: { semInflador?: boolean } = {}): {
   return {
     win,
     ws: (url: string) => new (win.WebSocket as unknown as new (u: string) => FakeWS)(url),
+    pc: (stats: Array<Record<string, unknown>>) => new (win.RTCPeerConnection as unknown as new (c: unknown) => FakeRTC)(stats),
     resumo: () => (win.__goliveGwResumo as () => Resumo)(),
+    rtcResumo: () => (win.__goliveRtcResumo as () => Promise<RtcResumo>)(),
     midiaAberta: () => (win.__goliveMidiaAberta as () => boolean)(),
+    midiaFechar: () => (win.__goliveMidiaFechar as () => number)(),
     fechar: () => (win.__goliveGwFechar as () => boolean)(),
   };
 }
@@ -156,6 +185,15 @@ function rodarEscada(): (ctx: CtxRevive) => { acao: string; motivo: string } {
     "const GW_ZUMBI_COOLDOWN_MS = (" + extrairConst("GW_ZUMBI_COOLDOWN_MS") + ");\n" +
     extrairFuncao("decidirRevive") + "\nreturn decidirRevive;";
   return new Function(codigo)() as (ctx: CtxRevive) => { acao: string; motivo: string };
+}
+
+function rodarGatilhoVideo(): (resumo: Resumo, rtc: Partial<RtcResumo> | null) => string | null {
+  const codigo =
+    "const GW_VIDEO_MIDIA_MIN_MS = (" + extrairConst("GW_VIDEO_MIDIA_MIN_MS") + ");\n" +
+    "const GW_VIDEO_AUDIO_VIVO_MS = (" + extrairConst("GW_VIDEO_AUDIO_VIVO_MS") + ");\n" +
+    "const GW_VIDEO_PARADO_MS = (" + extrairConst("GW_VIDEO_PARADO_MS") + ");\n" +
+    extrairFuncao("avaliarRtcVideo") + "\nreturn avaliarRtcVideo;";
+  return new Function(codigo)() as (resumo: Resumo, rtc: Partial<RtcResumo> | null) => string | null;
 }
 
 beforeEach(() => vi.useFakeTimers());
@@ -330,12 +368,98 @@ describe("shim do gateway (codigo real do renderer)", () => {
 
   it("preserva a identidade do WebSocket original (prototype e estaticos)", () => {
     const shim = extrairConst("SHIM_GATEWAY_SRC");
-    const win = { WebSocket: FakeWS } as Record<string, unknown>;
+    const win = { WebSocket: FakeWS, RTCPeerConnection: FakeRTC } as Record<string, unknown>;
     const fonte = new Function("window", "return " + shim)(win) as string;
     new Function("window", fonte)(win);
     const Construtor = win.WebSocket as unknown as { prototype: unknown; OPEN: number };
     expect(Construtor.prototype).toBe(FakeWS.prototype);
     expect(Construtor.OPEN).toBe(1);
+    const ConstrutorRTC = win.RTCPeerConnection as unknown as { prototype: unknown };
+    expect(ConstrutorRTC.prototype).toBe(FakeRTC.prototype);
+  });
+});
+
+describe("shim: instrumentacao RTC (o que TOCA — audio/video por RTC, nao pelo gateway)", () => {
+  it("getStats agregado: audio/video bytes, track esperada e enviando", async () => {
+    const app = rodarShim();
+    app.pc([
+      { type: "inbound-rtp", kind: "audio", bytesReceived: 1200 },
+      { type: "inbound-rtp", kind: "video", bytesReceived: 0 },
+      { type: "outbound-rtp", kind: "audio", bytesSent: 500 },
+    ]);
+    const r = await app.rtcResumo();
+    expect(r.pcs).toBe(1);
+    expect(r.audioBytes).toBe(1200);
+    expect(r.videoTrack).toBe(true); // track de video negociada (mesmo sem bytes)
+    expect(r.videoBytes).toBe(0);
+    expect(r.enviando).toBe(false);
+    expect(r.audioHa).toBeGreaterThanOrEqual(0);
+  });
+
+  it("video parado congela video_ha; video crescente zera (recuperacao observavel)", async () => {
+    vi.useRealTimers();
+    const app = rodarShim();
+    const pc = app.pc([
+      { type: "inbound-rtp", kind: "audio", bytesReceived: 1000 },
+      { type: "inbound-rtp", kind: "video", bytesReceived: 5000 },
+    ]);
+    await app.rtcResumo();
+    await new Promise(r => setTimeout(r, 130));
+    const r2 = await app.rtcResumo(); // nada cresceu
+    expect(r2.videoHa).toBeGreaterThanOrEqual(100);
+    pc.stats = [
+      { type: "inbound-rtp", kind: "audio", bytesReceived: 2000 },
+      { type: "inbound-rtp", kind: "video", bytesReceived: 9000 },
+    ];
+    const r3 = await app.rtcResumo(); // cresceu
+    expect(r3.videoHa).toBeLessThan(100);
+    expect(r3.audioHa).toBeLessThan(100);
+  });
+
+  it("__goliveMidiaFechar fecha os ws de midia com close 4000 (cura de voz)", () => {
+    const app = rodarShim();
+    const m1 = app.ws("wss://eu-central-1.c1.discord.media/?v=1");
+    const m2 = app.ws("wss://eu-central-1.c1.discord.media/?v=1");
+    m1.emitir("open");
+    m2.emitir("open");
+    expect(app.midiaFechar()).toBe(2);
+    expect(m1.closes[0].code).toBe(4000);
+    expect(m2.closes[0].code).toBe(4000);
+    expect(app.midiaFechar()).toBe(0); // ja fechados
+  });
+});
+
+describe("gatilho de video travado (audio vivo, video parado — o modo do som que toca)", () => {
+  const rtcBase: Partial<RtcResumo> = { pcs: 1, audioHa: 5_000, videoHa: -1, videoTrack: true, enviando: false };
+  const g = rodarGatilhoVideo();
+  const resumoMidia = { midiaAberta: true, midiaOpenHa: 60_000 } as Resumo;
+
+  it("audio vivo + track esperada + video nunca chegou (videoHa -1) = video-travado", () => {
+    expect(g(resumoMidia, { ...rtcBase })).toBe("video-travado");
+  });
+
+  it("video parado >= 120s tambem dispara; andando (<120s) nao", () => {
+    expect(g(resumoMidia, { ...rtcBase, videoHa: 150_000 })).toBe("video-travado");
+    expect(g(resumoMidia, { ...rtcBase, videoHa: 30_000 })).toBeNull();
+  });
+
+  it("audio morto: o problema e outro (RTC inteiro caiu — nao dispara)", () => {
+    expect(g(resumoMidia, { ...rtcBase, audioHa: 300_000 })).toBeNull();
+  });
+
+  it("call so de voz (sem track de video) nunca dispara", () => {
+    expect(g(resumoMidia, { ...rtcBase, videoTrack: false })).toBeNull();
+  });
+
+  it("quem transmite (enviando) nao dispara", () => {
+    expect(g(resumoMidia, { ...rtcBase, enviando: true })).toBeNull();
+  });
+
+  it("midia aberta ha pouco ainda tem prazo; sem midia ou sem PC nao dispara", () => {
+    expect(g({ ...resumoMidia, midiaOpenHa: 5_000 }, { ...rtcBase })).toBeNull();
+    expect(g({ ...resumoMidia, midiaAberta: false }, { ...rtcBase })).toBeNull();
+    expect(g(resumoMidia, { ...rtcBase, pcs: 0 })).toBeNull();
+    expect(g(resumoMidia, null)).toBeNull();
   });
 });
 
@@ -604,6 +728,13 @@ describe("pill de recuperacao + wiring no script", () => {
     // vigia diagnostica o silencio e reinjeta o shim quando o CDP falha (#154)
     expect(src).toContain("estado=sem-shim");
     expect(src).toContain("gw.shim | o shim do CDP nao anexou neste documento");
+    // beta 10: injecao a prova de corrida (preload) + instrumentacao RTC + cura de voz
+    expect(src).toContain("registerPreloadScript");
+    expect(src).toContain("golive-shim.js");
+    expect(src).toContain("function avaliarRtcVideo");
+    expect(src).toContain("window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0");
+    expect(src).toContain("rtc.probe |");
+    expect(src).toContain("golivebypass-video");
     // o detector de bytes da beta.3 foi removido de verdade
     expect(src).not.toContain("marcarSinalGateway");
     expect(src).not.toContain("gwUltimoSinalEm");

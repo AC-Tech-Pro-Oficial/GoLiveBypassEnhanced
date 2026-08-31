@@ -1484,6 +1484,13 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "      infladorOk: !!inflador };" +
     "  };" +
     "  window.__goliveMidiaAberta = function () { return midia.size > 0; };" +
+    "  window.__goliveMidiaFechar = function () {" +
+    "    var fechados = 0;" +
+    "    midia.forEach(function (w) {" +
+    "      try { if (w.readyState === 1) { w.close(4000, 'golive-revive-voz'); fechados++; } } catch (e) { }" +
+    "    });" +
+    "    return fechados;" +
+    "  };" +
     "  window.__goliveGwFechar = function () {" +
     "    var ws = gw.ws;" +
     "    if (!ws || ws.readyState !== 1) return false;" +
@@ -1595,6 +1602,57 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "      inflador.writer.write(bytes).then(null, function () { falhaInflador(); });" +
     "    } catch (e) { falhaInflador(); }" +
     "  }" +
+    // RTC (beta 10): envolver o RTCPeerConnection para enxergar o que TOCA — o
+    // audio de Go Live vem por RTC/UDP (nao pelo gateway), entao "escuto a stream
+    // mas o video nao sai" so e visivel aqui dentro. getStats() separa os bytes
+    // inbound por kind (audio vs video) e mostra se o usuario e quem transmite.
+    "  var pcs = new Set();" +
+    "  var rtc = { audioBytes: -1, videoBytes: -1, audioEm: 0, videoEm: 0, videoTrack: false, enviando: false };" +
+    "  window.__goliveRtcResumo = function () {" +
+    "    var lista = Array.from(pcs);" +
+    "    var promessas = lista.map(function (pc) {" +
+    "      return pc.getStats().then(function (stats) {" +
+    "        var r = { audio: 0, video: 0, videoTrack: false, enviando: false };" +
+    "        stats.forEach(function (s) {" +
+    "          var kind = s.kind || s.mediaType;" +
+    "          if (s.type === 'inbound-rtp' && kind === 'audio' && typeof s.bytesReceived === 'number') { r.audio += s.bytesReceived; }" +
+    "          else if (s.type === 'inbound-rtp' && kind === 'video') { r.videoTrack = true; if (typeof s.bytesReceived === 'number') r.video += s.bytesReceived; }" +
+    "          else if (s.type === 'outbound-rtp' && kind === 'video' && s.bytesSent > 0) { r.enviando = true; }" +
+    "        });" +
+    "        return r;" +
+    "      }).catch(function () { return null; });" +
+    "    });" +
+    "    return Promise.all(promessas).then(function (rs) {" +
+    "      var agora = Date.now();" +
+    "      var audio = 0, video = 0, videoTrack = false, enviando = false;" +
+    "      for (var i = 0; i < rs.length; i++) {" +
+    "        var r = rs[i];" +
+    "        if (!r) continue;" +
+    "        audio += r.audio;" +
+    "        if (r.videoTrack) { videoTrack = true; video += r.video; }" +
+    "        if (r.enviando) enviando = true;" +
+    "      }" +
+    "      if (audio > rtc.audioBytes) rtc.audioEm = agora;" +
+    "      if (video > rtc.videoBytes) rtc.videoEm = agora;" +
+    "      rtc.audioBytes = audio; rtc.videoBytes = video;" +
+    "      rtc.videoTrack = videoTrack; rtc.enviando = enviando;" +
+    "      return { pcs: lista.length, audioBytes: rtc.audioBytes, videoBytes: rtc.videoBytes," +
+    "        audioHa: rtc.audioEm ? agora - rtc.audioEm : -1," +
+    "        videoHa: rtc.videoEm ? agora - rtc.videoEm : -1," +
+    "        videoTrack: rtc.videoTrack, enviando: rtc.enviando };" +
+    "    });" +
+    "  };" +
+    "  var OriginalRTCPeerConnection = window.RTCPeerConnection;" +
+    "  function GoliveRTCPeerConnection(cfg, cert) {" +
+    "    var pc = new OriginalRTCPeerConnection(cfg, cert);" +
+    "    try {" +
+    "      pcs.add(pc);" +
+    "      pc.addEventListener('close', function () { pcs.delete(pc); });" +
+    "    } catch (e) { }" +
+    "    return pc;" +
+    "  }" +
+    "  GoliveRTCPeerConnection.prototype = OriginalRTCPeerConnection.prototype;" +
+    "  window.RTCPeerConnection = GoliveRTCPeerConnection;" +
     "  var OriginalWebSocket = window.WebSocket;" +
     "  function GoliveWebSocket(url, protocolos) {" +
     "    var ws = protocolos === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocolos);" +
@@ -1681,6 +1739,38 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "  window.WebSocket = GoliveWebSocket;" +
     "})();";
 
+// O MESMO shim, gravado em arquivo e registrado como PRELOAD de sessao: o preload
+// roda antes de qualquer script da pagina em TODA janela/frame — sem CDP e sem
+// corrida (issue #163: CDP falhou, o fallback do did-finish-load chegou depois do
+// gateway conectar, e a sessao inteira ficou cega por 17 minutos). Preload e o
+// vetor primario; CDP e o fallback do did-finish-load ficam como reforco — o shim
+// se auto-guarda (__goliveGwShim), entao injecao dupla e inofensiva.
+const SHIM_FILE = join(HERE, "golive-shim.js");
+
+function registrarPreloadShim() {
+    try {
+        fs.writeFileSync(SHIM_FILE, SHIM_GATEWAY_SRC);
+    } catch (error) {
+        log("nao consegui gravar o arquivo do shim: " + error.message);
+        return;
+    }
+    try {
+        const s = require("electron").session.defaultSession;
+        if (typeof s.registerPreloadScript === "function") {
+            s.registerPreloadScript({ type: "frame", id: "golive-shim", filePath: SHIM_FILE });
+            log("gw.shim | preload do shim registrado na sessao (registerPreloadScript)");
+        } else if (typeof s.setPreloads === "function") {
+            const atuais = typeof s.getPreloads === "function" ? s.getPreloads() : [];
+            if (atuais.indexOf(SHIM_FILE) === -1) s.setPreloads(atuais.concat([SHIM_FILE]));
+            log("gw.shim | preload do shim registrado na sessao (setPreloads)");
+        } else {
+            log("gw.shim | sessao sem API de preload; ficam CDP e did-finish-load");
+        }
+    } catch (error) {
+        log("nao consegui registrar o preload do shim: " + error.message);
+    }
+}
+
 // Pill de recuperacao: elemento permanente, discreto, com reload a um clique —
 // o usuario aperta no primeiro segundo de loading em vez de esperar o
 // reconnect chegar sozinho (7-25 min nos relatos). Some em fullscreen e com
@@ -1755,6 +1845,19 @@ const GW_STREAM_JANELA_MS = 90_000;
 // Guarda de SAIDA: um ws de midia que fechou ha pouco + op 4 = o usuario SAINDO
 // de voz/stream (ou a stream acabando) — nesses casos nenhuma midia nova abre.
 const GW_STREAM_LEAVE_MS = 15_000;
+// Video travado com audio vivo (beta 10, o modo "escuto a stream mas o video
+// carrega eternamente"): audio e video andam juntos no RTC — audio fluindo com
+// video nunca/pesado = o track de video nao esta chegando.
+const GW_VIDEO_PARADO_MS = 120_000;
+// O audio tem que estar VIVO: se o RTC inteiro morreu, o problema e outro.
+const GW_VIDEO_AUDIO_VIVO_MS = 60_000;
+// A midia tem que estar aberta ha um tempo minimo (prazo de conectar/negociar).
+const GW_VIDEO_MIDIA_MIN_MS = 20_000;
+// Escada propria da cura de voz (fechar o ws de midia, NUNCA reload com midia
+// aberta — §6): teto de tentativas na janela e cooldown.
+const GW_VIDEO_TENTATIVAS = 2;
+const GW_VIDEO_JANELA_MS = 30 * 60_000;
+const GW_VIDEO_COOLDOWN_MS = 3 * 60_000;
 // Teto de tentativas da escada na janela.
 const GW_ZUMBI_TENTATIVAS = 2;
 // Janela de contagem das tentativas.
@@ -1834,18 +1937,21 @@ const ZUMBI_BANNER_TEXT = "GoLiveBypass: a sessao do gateway esta sem resposta h
     "minutos — as telas podem ficar carregando para sempre. Clique em \"Reiniciar agora\" " +
     "abaixo (ou Ctrl+Alt+R) para recarregar a janela.";
 
-function showZumbiBanner() {
+// Banner flutuante generico (mesmo padrao visual, ids diferentes: os avisos
+// coexistem sem um apagar o outro, e nunca empilham — um elemento so por id,
+// sempre reaproveitado com o texto novo).
+function mostrarBannerFixo(id, texto, corBorda) {
     const win = clientWindow();
     if (win === null) return;
     const script = "(function(){\n" +
-        "  var el = document.getElementById('golivebypass-zumbi');\n" +
+        "  var el = document.getElementById('" + id + "');\n" +
         "  if (!el) {\n" +
         "    el = document.createElement('div');\n" +
-        "    el.id = 'golivebypass-zumbi';\n" +
+        "    el.id = '" + id + "';\n" +
         "    el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;" +
         "display:flex;align-items:flex-start;gap:10px;width:320px;" +
         "background:#2b2d31;color:#f2f3f5;padding:14px 16px;border-radius:10px;" +
-        "border-left:4px solid #f0b232;" +
+        "border-left:4px solid " + corBorda + ";" +
         "font:13px/1.45 \"gg sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;" +
         "box-shadow:0 8px 24px rgba(0,0,0,.45);" +
         "opacity:0;transform:translateY(8px);transition:opacity .2s ease,transform .2s ease;'; \n" +
@@ -1858,7 +1964,7 @@ function showZumbiBanner() {
         "    title.textContent = 'GoLiveBypass';\n" +
         "    title.style.cssText = 'font-weight:600;margin-bottom:3px;color:#fff;';\n" +
         "    var text = document.createElement('div');\n" +
-        "    text.id = 'golivebypass-zumbi-text';\n" +
+        "    text.id = '" + id + "-text';\n" +
         "    text.style.cssText = 'color:#d8dadf;';\n" +
         "    var restartBtn = document.createElement('button');\n" +
         "    restartBtn.type = 'button';\n" +
@@ -1882,9 +1988,65 @@ function showZumbiBanner() {
         "    document.body.appendChild(el);\n" +
         "    requestAnimationFrame(function(){ el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });\n" +
         "  }\n" +
-        "  document.getElementById('golivebypass-zumbi-text').textContent = " + JSON.stringify(ZUMBI_BANNER_TEXT) + ";\n" +
+        "  document.getElementById('" + id + "-text').textContent = " + JSON.stringify(texto) + ";\n" +
         "})();";
     win.webContents.executeJavaScript(script).catch(error => log("falhei ao mostrar aviso de sessao muda: " + error.message));
+}
+
+function showZumbiBanner() {
+    mostrarBannerFixo('golivebypass-zumbi', ZUMBI_BANNER_TEXT, '#f0b232');
+}
+
+// Escada propria do video travado (beta 10): a cura e reconstruir a VOZ — fechar
+// o ws de midia faz o cliente reconectar/resumir a voz e re-negociar o video —
+// NUNCA reload com midia aberta (§6). Nao passa pelo roteador (midia e DIRECT):
+// zero brigas com rajada/recorrencia/mid grace do gateway.
+let videoTentativaEm = [];
+let videoUltimaAcaoEm = 0;
+
+const VIDEO_BANNER_TEXT = "GoLiveBypass: a imagem da transmissao nao chega (o som funciona). " +
+    "Ja reconstruimos a conexao de voz automaticamente; se a imagem nao voltar, clique em " +
+    "\"Reiniciar agora\" abaixo (ou Ctrl+Alt+R).";
+
+function showVideoBanner() {
+    mostrarBannerFixo('golivebypass-video', VIDEO_BANNER_TEXT, '#f0b232');
+}
+
+// Funcao pura do gatilho de video (testavel): audio vivo + track de video
+// esperada + video parado = a imagem nao chega (o caso do som que toca — o
+// usuario nyxxy descreveu exatamente isto na beta 8).
+function avaliarRtcVideo(resumo, rtc) {
+    if (!rtc || rtc.pcs <= 0) return null;
+    if (!resumo || resumo.midiaAberta !== true) return null;
+    if (resumo.midiaOpenHa < 0 || resumo.midiaOpenHa < GW_VIDEO_MIDIA_MIN_MS) return null;
+    if (rtc.enviando) return null; // o usuario e quem transmite: fora do nosso alcance
+    if (!rtc.videoTrack) return null; // call so de voz: nao existe video esperado
+    if (rtc.audioHa < 0 || rtc.audioHa > GW_VIDEO_AUDIO_VIVO_MS) return null; // audio morto: outro problema
+    if (rtc.videoHa >= 0 && rtc.videoHa < GW_VIDEO_PARADO_MS) return null; // video andando
+    return 'video-travado';
+}
+
+function vigiarVideo(resumo, rtc, win) {
+    const agora = Date.now();
+    while (videoTentativaEm.length > 0 && videoTentativaEm[0] < agora - GW_VIDEO_JANELA_MS) videoTentativaEm.shift();
+    if (videoTentativaEm.length >= GW_VIDEO_TENTATIVAS) {
+        if (!zumbiBannerAtivo) {
+            zumbiBannerAtivo = true;
+            showVideoBanner();
+        }
+        return;
+    }
+    if (videoUltimaAcaoEm > 0 && agora - videoUltimaAcaoEm < GW_VIDEO_COOLDOWN_MS) return;
+    videoTentativaEm.push(agora);
+    videoUltimaAcaoEm = agora;
+    sessaoRevives++;
+    log("gw.revive | video: reconstruindo a conexao de voz (close 4000 no ws de midia)" +
+        " — audio vivo, video parado ha " + (rtc.videoHa < 0 ? "sempre" : Math.round(rtc.videoHa / 1000) + "s"));
+    win.webContents.executeJavaScript('window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0')
+        .then(n => {
+            if (!n) log("gw.revive | nao havia ws de midia aberto para fechar");
+        })
+        .catch(error => log("gw.revive | falhei ao fechar o ws de midia: " + error.message));
 }
 
 function idadeSeg(ha) {
@@ -2032,6 +2194,30 @@ function checarGatewaySilente() {
             zumbiTentativaEm.length = 0;
             zumbiUltimaAcaoEm = 0;
             zumbiUltimaAcao = null;
+        }
+        // Instrumentacao RTC (beta 10): o que TOCA (audio/video via RTC/UDP) —
+        // o gw.probe ve a sinalizacao, o rtc.probe ve a midia. O par conta a
+        // historia completa no log e vai no report de bug pela cauda dele.
+        if (winResumo !== null) {
+            winResumo.webContents.executeJavaScript('window.__goliveRtcResumo ? window.__goliveRtcResumo() : null', true)
+                .then(rtc => {
+                    if (!rtc) return;
+                    log("rtc.probe | pcs=" + rtc.pcs +
+                        " audio_ha=" + idadeSeg(rtc.audioHa) +
+                        " video_ha=" + idadeSeg(rtc.videoHa) +
+                        " track=" + (rtc.videoTrack ? "sim" : "nao") +
+                        " enviando=" + (rtc.enviando ? "sim" : "nao") +
+                        " audio_bytes=" + rtc.audioBytes +
+                        " video_bytes=" + rtc.videoBytes);
+                    // Recuperacao do video: bytes de video voltaram a crescer.
+                    if (videoTentativaEm.length > 0 && rtc.videoHa >= 0 && rtc.videoHa < 60_000) {
+                        log("gw.revive | video: imagem voltou apos " + videoTentativaEm.length + " tentativa(s)");
+                        videoTentativaEm.length = 0;
+                        videoUltimaAcaoEm = 0;
+                    }
+                    if (avaliarRtcVideo(resumo, rtc) === 'video-travado') vigiarVideo(resumo, rtc, winResumo);
+                })
+                .catch(() => { });
         }
     });
 }
@@ -3217,6 +3403,12 @@ const asarPath = join(resourcesDir, "_app.asar");
 
 async function start() {
     log("--- abrindo ---");
+
+    // O preload do shim tem que estar registrado ANTES de o Discord criar as
+    // janelas: o nosso whenReady corre antes do handler dele (o require do main
+    // original acontece depois do require do bypass), e o registro aqui no topo
+    // e sincrono — sem corrida (issue #163).
+    registrarPreloadShim();
 
     if (settings.enabled === false) {
         log("desligado em settings.json, nao vou mexer em nada");
