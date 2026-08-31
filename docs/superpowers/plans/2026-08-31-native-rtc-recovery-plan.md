@@ -2,6 +2,18 @@
 
 Especificação: `docs/superpowers/specs/2026-08-31-native-rtc-recovery-design.md`
 
+## Estado após o ensaio ao vivo
+
+- Instrumentação, formato real e detector: concluídos.
+- API confirmada: `getFilteredStats(2, callback)`, não `getStats()`.
+- Falha natural reproduzida e nível 1 validado: `destroy(stream)` provocou a
+  reconstrução tardia do próprio Discord e o vídeo voltou estável a ~60 fps.
+- Escada recalibrada para teardown em 60 s + graça de 45 s e aquecimento de 30 s
+  para geração nova; o nível 2 não chegou a executar no ensaio.
+- Testes do shim, detector, mundo isolado, gateway e GUI passaram; falta rodar o
+  runtime novo em uma próxima ocorrência natural e completar o cenário sem
+  espectador por dez minutos.
+
 ## 1. Instrumentação nativa isolada
 
 Arquivos:
@@ -33,8 +45,8 @@ Passos:
 1. Injetar a instrumentação passiva no renderer atual antes de iniciar uma nova
    Go Live.
 2. Registrar apenas nomes de campos e tipos das opções de conexão.
-3. Invocar `getStats()` e registrar somente nomes de campos, tipos e contadores
-   numéricos relevantes.
+3. Invocar a API realmente presente (`getFilteredStats(2, callback)`) e registrar
+   somente nomes de campos, tipos e contadores numéricos relevantes.
 4. Confirmar a regra inequívoca para `default` e `stream`.
 5. Confirmar quais contadores avançam com captura ativa e quais congelam no
    estado zumbi.
@@ -71,7 +83,7 @@ Passos:
 2. Cobrir todas as guardas da especificação com relógio controlado.
 3. Implementar nível 1: destruir somente a geração `stream` corrente e, apenas
    quando associável com confiança, seu WebSocket de mídia.
-4. Implementar nível 2: destruir `stream` e `default`, fechar mídia com código
+4. Implementar nível 2: destruir `stream` e `voice`, fechar mídia com código
    4000 e aguardar o controlador do Discord.
 5. Implementar cooldown, teto, aquecimento e crédito de sucesso sustentado.
 6. Remover o probe de `window.RTCPeerConnection` da tomada de decisão; mantê-lo

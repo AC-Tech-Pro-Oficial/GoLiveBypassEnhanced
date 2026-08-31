@@ -1407,6 +1407,423 @@ function agendarEstat() {
     }
 }
 
+// === voice shim: inicio ===
+// O Discord desktop atual nao usa window.RTCPeerConnection para a call/Go Live:
+// as conexoes reais nascem no addon discord_voice. A beta 10 envolvia a API do
+// Chromium e, por isso, reportava pcs=0 durante uma Live nativa saudavel. Este
+// shim entra antes do bundle, envolve o carregamento do addon sem mudar seus
+// argumentos/retornos e expoe somente forma + contadores sanitizados. A decisao
+// de recuperacao fica no main; formato desconhecido nunca vira acao.
+function instalarVoiceShim() {
+    if (window.__goliveVoiceShim) return;
+
+    var state = {
+        installed: false,
+        voiceHooked: false,
+        instanceId: Date.now(),
+        nextId: 1,
+        connections: [],
+        seen: new WeakMap(),
+        modules: new WeakSet(),
+        demandKnown: false,
+        demandActive: false,
+        demandAt: 0,
+        demandChangedAt: 0,
+        retry: 0,
+    };
+    window.__goliveVoiceShim = state;
+
+    function safeKey(key) {
+        key = String(key);
+        if (/^[0-9]{10,}$/.test(key)) return '<numeric>';
+        if (/^[A-Za-z_$][A-Za-z0-9_$-]{0,63}$/.test(key)) return key;
+        return '<dynamic>';
+    }
+
+    function shape(value, depth, seen) {
+        if (value === null) return 'null';
+        if (value === undefined) return 'undefined';
+        if (depth > 4) return typeof value;
+        if (Array.isArray(value)) return { type: 'array', length: value.length };
+        if (typeof value !== 'object') return typeof value;
+        if (seen.has(value)) return 'circular';
+        seen.add(value);
+        var out = {};
+        var keys;
+        try { keys = Object.keys(value).slice(0, 160); } catch (e) { return 'inacessivel'; }
+        for (var i = 0; i < keys.length; i++) {
+            var key = keys[i];
+            var cleanKey = safeKey(key);
+            var child;
+            try { child = value[key]; } catch (e) { out[cleanKey] = 'getter-error'; continue; }
+            out[cleanKey] = shape(child, depth + 1, seen);
+        }
+        return out;
+    }
+
+    function finite(value) {
+        return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    }
+
+    // O discord_voice 0.0.84 manteve getStats no wrapper JS, mas removeu o
+    // metodo correspondente do objeto nativo. A API viva e
+    // getFilteredStats(2, callback): o filtro 2 devolve outbound + screenshare.
+    // Normalizamos so campos confirmados; nenhuma string/SSRC sai do preload.
+    function normalizeStats(raw) {
+        var parsed = raw;
+        try {
+            if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+        } catch (e) {
+            return { ok: false, reason: 'json', shape: 'string' };
+        }
+        if (!parsed || typeof parsed !== 'object') {
+            return { ok: false, reason: 'formato', shape: shape(parsed, 0, new WeakSet()) };
+        }
+        var outbound = parsed.outbound;
+        var video = outbound && outbound.video;
+        if ((!video || typeof video !== 'object') && outbound && Array.isArray(outbound.videos)) {
+            for (var vi = 0; vi < outbound.videos.length; vi++) {
+                var candidate = outbound.videos[vi];
+                if (!candidate || typeof candidate !== 'object') continue;
+                if (!video || (finite(candidate.framesEncoded) || 0) > (finite(video.framesEncoded) || 0)) video = candidate;
+            }
+        }
+        var screenshare = parsed.screenshare;
+        var captureFrames = null;
+        if (screenshare && typeof screenshare === 'object') {
+            var captureTotal = 0;
+            var captureFound = false;
+            var captureKeys;
+            try { captureKeys = Object.keys(screenshare); } catch (e) { captureKeys = []; }
+            for (var ci = 0; ci < captureKeys.length; ci++) {
+                var captureKey = captureKeys[ci];
+                // pipewireFrames/x11Frames sao os campos atuais no Linux. O
+                // padrao tambem aceita os backends equivalentes de Win/macOS,
+                // mas exclui contadores de descarte/falha/saida.
+                if (!/frames$/i.test(captureKey) || /(drop|fail|encode|sent|receive)/i.test(captureKey)) continue;
+                var captureValue = finite(screenshare[captureKey]);
+                if (captureValue === null) continue;
+                captureTotal += captureValue;
+                captureFound = true;
+            }
+            if (captureFound) captureFrames = captureTotal;
+        }
+        if (!video || typeof video !== 'object') {
+            return { ok: false, reason: 'sem-video', shape: shape(parsed, 0, new WeakSet()) };
+        }
+        var inputFrameRate = finite(video.inputFrameRate);
+        var framesEncoded = finite(video.framesEncoded);
+        var encodeFrameRate = finite(video.encodeFrameRate);
+        if ((captureFrames === null && inputFrameRate === null) || framesEncoded === null || encodeFrameRate === null) {
+            return { ok: false, reason: 'campos', shape: shape(parsed, 0, new WeakSet()) };
+        }
+        return {
+            ok: true,
+            captureFrames: captureFrames,
+            inputFrameRate: inputFrameRate,
+            framesEncoded: framesEncoded,
+            encodeFrameRate: encodeFrameRate,
+            mediaBitrate: finite(video.mediaBitrate),
+            targetMediaBitrate: finite(video.targetMediaBitrate),
+            width: Array.isArray(video.substreams) && video.substreams[0] ? finite(video.substreams[0].width) : null,
+            height: Array.isArray(video.substreams) && video.substreams[0] ? finite(video.substreams[0].height) : null,
+            suspended: video.suspended === true,
+        };
+    }
+
+    function updateProgress(rec, stats) {
+        var now = Date.now();
+        if (!rec.progress) {
+            rec.progress = {
+                inputValue: stats.captureFrames,
+                outputValue: stats.framesEncoded,
+                inputAt: now,
+                outputAt: now,
+            };
+        } else {
+            if ((stats.captureFrames !== null && stats.captureFrames !== rec.progress.inputValue) ||
+                (stats.inputFrameRate !== null && stats.inputFrameRate > 0)) rec.progress.inputAt = now;
+            if (stats.framesEncoded !== rec.progress.outputValue ||
+                (stats.encodeFrameRate !== null && stats.encodeFrameRate > 0)) rec.progress.outputAt = now;
+            rec.progress.inputValue = stats.captureFrames;
+            rec.progress.outputValue = stats.framesEncoded;
+        }
+        return {
+            statsOk: true,
+            captureFrames: stats.captureFrames,
+            framesEncoded: stats.framesEncoded,
+            inputFrameRate: stats.inputFrameRate,
+            encodeFrameRate: stats.encodeFrameRate,
+            mediaBitrate: stats.mediaBitrate,
+            targetMediaBitrate: stats.targetMediaBitrate,
+            width: stats.width,
+            height: stats.height,
+            suspended: stats.suspended,
+            entradaHa: now - rec.progress.inputAt,
+            saidaHa: now - rec.progress.outputAt,
+            sampleHa: 0,
+        };
+    }
+
+    function registerConnection(kind, creator, options, conn) {
+        if (!conn || (typeof conn !== 'object' && typeof conn !== 'function')) return conn;
+        var existing = state.seen.get(conn);
+        if (existing) {
+            if (kind === 'stream') existing.kind = 'stream';
+            return conn;
+        }
+        var rec = {
+            id: state.nextId++,
+            kind: kind,
+            creator: creator,
+            createdAt: Date.now(),
+            destroyedAt: 0,
+            optionShape: shape(options, 0, new WeakSet()),
+            conn: conn,
+        };
+        state.seen.set(conn, rec);
+        state.connections.push(rec);
+        if (state.connections.length > 24) state.connections.shift();
+        try {
+            if (typeof conn.destroy === 'function') {
+                var originalDestroy = conn.destroy;
+                conn.destroy = function () {
+                    rec.destroyedAt = Date.now();
+                    return originalDestroy.apply(this, arguments);
+                };
+            }
+        } catch (e) { }
+        return conn;
+    }
+
+    function hookVoice(voice) {
+        if (!voice || (typeof voice !== 'object' && typeof voice !== 'function')) return voice;
+        if (state.modules.has(voice)) return voice;
+        state.modules.add(voice);
+        var creators = [
+            ['createVoiceConnectionWithOptions', 'voice'],
+            ['createOwnStreamConnectionWithOptions', 'stream'],
+        ];
+        for (var i = 0; i < creators.length; i++) {
+            (function (name, kind) {
+                var original;
+                try { original = voice[name]; } catch (e) { return; }
+                if (typeof original !== 'function') return;
+                voice[name] = function () {
+                    state.pendingKind = kind;
+                    var conn;
+                    try { conn = original.apply(this, arguments); }
+                    finally { state.pendingKind = null; }
+                    return registerConnection(kind, name, arguments[1], conn);
+                };
+            })(creators[i][0], creators[i][1]);
+        }
+        // Backup para clientes que guardaram a referencia do factory antes do
+        // nosso hook: o factory do index.js consulta VoiceEngine.VoiceConnection
+        // dinamicamente ao criar uma conexao nova. Quando a chamada veio por um
+        // factory ja envolvido, pendingKind evita registrar o objeto nativo e o
+        // wrapper publico duas vezes; o retorno publico e registrado logo acima.
+        try {
+            var OriginalVoiceConnection = voice.VoiceConnection;
+            if (typeof OriginalVoiceConnection === 'function') {
+                function GoliveVoiceConnection() {
+                    var args = Array.prototype.slice.call(arguments);
+                    var instance = Reflect.construct(OriginalVoiceConnection, args, OriginalVoiceConnection);
+                    if (!state.pendingKind) registerConnection('unknown', 'VoiceConnection', args[1], instance);
+                    return instance;
+                }
+                Object.setPrototypeOf(GoliveVoiceConnection, OriginalVoiceConnection);
+                GoliveVoiceConnection.prototype = OriginalVoiceConnection.prototype;
+                voice.VoiceConnection = GoliveVoiceConnection;
+            }
+        } catch (e) { }
+        state.voiceHooked = true;
+        return voice;
+    }
+
+    function installNativeHook() {
+        if (state.installed) return;
+        var nativeModules;
+        try { nativeModules = window.DiscordNative && window.DiscordNative.nativeModules; } catch (e) { }
+        if (!nativeModules || typeof nativeModules.requireModule !== 'function') {
+            if (state.retry++ < 200) setTimeout(installNativeHook, 25);
+            return;
+        }
+        try {
+            var originalRequire = nativeModules.requireModule;
+            nativeModules.requireModule = function () {
+                var loaded = originalRequire.apply(this, arguments);
+                if (arguments[0] === 'discord_voice') return hookVoice(loaded);
+                return loaded;
+            };
+            state.installed = true;
+            // O preload original do Discord pode ter exigido o addon antes dos
+            // preloads de sessao. Buscar o modulo aqui devolve a instancia em
+            // cache e permite envolve-la antes de a interface criar a call.
+            try { hookVoice(originalRequire.call(nativeModules, 'discord_voice')); } catch (e) { }
+        } catch (e) {
+            state.installed = false;
+        }
+    }
+
+    function noteDemand(args) {
+        try {
+            var joined = Array.prototype.map.call(args, function (value) {
+                return typeof value === 'string' ? value : '';
+            }).join(' ');
+            var marker = 'Remote media sink wants:';
+            var at = joined.indexOf(marker);
+            if (at < 0) return;
+            var payload = JSON.parse(joined.slice(at + marker.length).trim());
+            var positive = false;
+            function walk(value) {
+                if (positive || value === null || value === undefined) return;
+                if (typeof value === 'number') { if (value > 0) positive = true; return; }
+                if (typeof value === 'object') {
+                    var values = Object.values(value);
+                    for (var i = 0; i < values.length; i++) walk(values[i]);
+                }
+            }
+            walk(payload && payload.pixelCounts);
+            if (!positive && payload && typeof payload === 'object') {
+                var entries = Object.entries(payload);
+                for (var i = 0; i < entries.length; i++) {
+                    var key = entries[i][0], value = entries[i][1];
+                    if (key !== 'any' && key !== 'pixelCounts' && typeof value === 'number' && value > 0) positive = true;
+                }
+            }
+            var now = Date.now();
+            if (!state.demandKnown || state.demandActive !== positive) state.demandChangedAt = now;
+            state.demandKnown = true;
+            state.demandActive = positive;
+            if (positive) state.demandAt = now;
+        } catch (e) { }
+    }
+
+    ['log', 'info', 'debug'].forEach(function (method) {
+        try {
+            var original = console[method];
+            if (typeof original !== 'function') return;
+            console[method] = function () {
+                noteDemand(arguments);
+                return original.apply(this, arguments);
+            };
+        } catch (e) { }
+    });
+
+    function sample(rec) {
+        return new Promise(function (resolve) {
+            if (rec.destroyedAt > 0 || !rec.conn) return resolve({ statsOk: false, reason: 'destruida' });
+            if (rec.kind !== 'stream') return resolve({ statsOk: false, reason: 'tipo' });
+            var method = null;
+            var filtered = false;
+            if (typeof rec.conn.getFilteredStats === 'function') {
+                method = rec.conn.getFilteredStats;
+                filtered = true;
+            } else if (typeof rec.conn.getStats === 'function') {
+                // Compatibilidade com addons antigos. O atual sempre segue o
+                // ramo filtrado acima, evitando o metodo stale do index.js.
+                method = rec.conn.getStats;
+            }
+            if (!method) return resolve({ statsOk: false, reason: 'sem-metodo' });
+            var done = false;
+            var timer = null;
+            function finish(raw) {
+                if (done) return;
+                done = true;
+                if (timer !== null) clearTimeout(timer);
+                var normalized = normalizeStats(raw);
+                if (!normalized.ok) {
+                    resolve({ statsOk: false, reason: normalized.reason, statsShape: normalized.shape });
+                    return;
+                }
+                resolve(updateProgress(rec, normalized));
+            }
+            timer = setTimeout(function () { finish({}); }, 2500);
+            try {
+                var returned = filtered
+                    ? method.call(rec.conn, 2, function (raw) { finish(raw); })
+                    : method.call(rec.conn, function (raw) { finish(raw); });
+                if (returned && typeof returned.then === 'function') returned.then(finish, function () { finish({}); });
+            } catch (e) { finish({}); return; }
+        });
+    }
+
+    window.__goliveVoiceDemandaResumo = function () {
+        var now = Date.now();
+        return {
+            known: state.demandKnown,
+            active: state.demandActive,
+            demandHa: state.demandAt > 0 ? now - state.demandAt : -1,
+            changedHa: state.demandChangedAt > 0 ? now - state.demandChangedAt : -1,
+        };
+    };
+
+    window.__goliveVoiceResumo = function () {
+        var now = Date.now();
+        return Promise.all(state.connections.map(function (rec) {
+            return sample(rec).then(function (sampled) {
+                return {
+                    id: rec.id,
+                    kind: rec.kind,
+                    creator: rec.creator,
+                    createdHa: now - rec.createdAt,
+                    destroyed: rec.destroyedAt > 0,
+                    optionShape: rec.optionShape,
+                    stats: sampled,
+                };
+            });
+        })).then(function (connections) {
+            return {
+                installed: state.installed,
+                voiceHooked: state.voiceHooked,
+                instanceId: state.instanceId,
+                demandKnown: state.demandKnown,
+                demandActive: state.demandActive,
+                demandHa: state.demandAt > 0 ? Date.now() - state.demandAt : -1,
+                connections: connections,
+            };
+        });
+    };
+
+    // A decisao e feita no main. Aqui so executamos o nivel explicitamente
+    // pedido, sempre em conexoes classificadas pelo factory exato; unknown
+    // jamais entra na lista de destruicao.
+    window.__goliveVoiceRecuperar = function (level) {
+        if (level !== 1 && level !== 2) return { ok: false, level: 0, streams: 0, voices: 0 };
+        var active = state.connections.filter(function (rec) {
+            return !rec.destroyedAt && rec.conn && (rec.kind === 'stream' || rec.kind === 'voice');
+        });
+        var targets = [];
+        var latestStream = null;
+        for (var i = active.length - 1; i >= 0; i--) {
+            if (!latestStream && active[i].kind === 'stream') latestStream = active[i];
+        }
+        if (latestStream) targets.push(latestStream);
+        if (level === 2) {
+            for (var j = active.length - 1; j >= 0; j--) {
+                if (active[j].kind === 'voice') { targets.push(active[j]); break; }
+            }
+        }
+        var streams = 0, voices = 0;
+        for (var ti = 0; ti < targets.length; ti++) {
+            var target = targets[ti];
+            try {
+                if (typeof target.conn.destroy !== 'function') continue;
+                target.conn.destroy();
+                if (!target.destroyedAt) target.destroyedAt = Date.now();
+                if (target.kind === 'stream') streams++;
+                else if (target.kind === 'voice') voices++;
+            } catch (e) { }
+        }
+        return { ok: level === 1 ? streams > 0 : voices > 0, level: level, streams: streams, voices: voices };
+    };
+
+    installNativeHook();
+}
+const SHIM_VOICE_SRC = '(' + instalarVoiceShim.toString() + ')();';
+// === voice shim: fim ===
+
 // === gateway: probe no renderer + pill + REVIVE automatico (issues #145/#149/#153) ===
 // A beta.3 provou com logs (issues #149/#150) que o zumbi de aplicacao e
 // INVISIVEL para a rede: durante os vaos (416s e 713s) o tunel seguiu carregando
@@ -1746,10 +2163,11 @@ const SHIM_GATEWAY_SRC = "(function(){" +
 // vetor primario; CDP e o fallback do did-finish-load ficam como reforco — o shim
 // se auto-guarda (__goliveGwShim), entao injecao dupla e inofensiva.
 const SHIM_FILE = join(HERE, "golive-shim.js");
+const SHIM_ALL_SRC = SHIM_GATEWAY_SRC + "\n" + SHIM_VOICE_SRC;
 
 function registrarPreloadShim() {
     try {
-        fs.writeFileSync(SHIM_FILE, SHIM_GATEWAY_SRC);
+        fs.writeFileSync(SHIM_FILE, SHIM_ALL_SRC);
     } catch (error) {
         log("nao consegui gravar o arquivo do shim: " + error.message);
         return;
@@ -1845,19 +2263,29 @@ const GW_STREAM_JANELA_MS = 90_000;
 // Guarda de SAIDA: um ws de midia que fechou ha pouco + op 4 = o usuario SAINDO
 // de voz/stream (ou a stream acabando) — nesses casos nenhuma midia nova abre.
 const GW_STREAM_LEAVE_MS = 15_000;
-// Video travado com audio vivo (beta 10, o modo "escuto a stream mas o video
-// carrega eternamente"): audio e video andam juntos no RTC — audio fluindo com
-// video nunca/pesado = o track de video nao esta chegando.
-const GW_VIDEO_PARADO_MS = 120_000;
-// O audio tem que estar VIVO: se o RTC inteiro morreu, o problema e outro.
-const GW_VIDEO_AUDIO_VIVO_MS = 60_000;
-// A midia tem que estar aberta ha um tempo minimo (prazo de conectar/negociar).
-const GW_VIDEO_MIDIA_MIN_MS = 20_000;
-// Escada propria da cura de voz (fechar o ws de midia, NUNCA reload com midia
-// aberta — §6): teto de tentativas na janela e cooldown.
-const GW_VIDEO_TENTATIVAS = 2;
-const GW_VIDEO_JANELA_MS = 30 * 60_000;
-const GW_VIDEO_COOLDOWN_MS = 3 * 60_000;
+// RTC nativo do transmissor (issue #164): o preload do Discord vive no mundo
+// isolado 999. O main junta sua telemetria de discord_voice com a demanda e os
+// websockets observados no mundo principal; dado ausente nunca vira acao.
+const VOICE_ISOLATED_WORLD_ID = 999;
+const VOICE_PROBE_MS = 5_000;
+const VOICE_PROBE_LOG_MS = 30_000;
+const VOICE_STREAM_AQUECIMENTO_MS = 20_000;
+const VOICE_DEMANDA_GRACA_MS = 15_000;
+const VOICE_ENTRADA_VIVA_MS = 15_000;
+const VOICE_SAIDA_PARADA_MS = 20_000;
+const VOICE_SAMPLE_MAX_MS = 10_000;
+const VOICE_SAIDA_SUCESSO_MS = 8_000;
+const VOICE_SUCESSO_SUSTENTADO_MS = 10_000;
+// No ensaio ao vivo, destroy(stream) iniciou uma reconstrução tardia: a stream
+// sumiu na hora, voice/midia fecharam entre 25-50s e a nova stream codificou em
+// ~80s. Aos 60s distinguimos "voz ainda presa" de "teardown ja em curso".
+const VOICE_NIVEL1_ESPERA_MS = 60_000;
+const VOICE_RECONSTRUCAO_GRACA_MS = 45_000;
+const VOICE_NOVA_GERACAO_GRACA_MS = 30_000;
+const VOICE_NIVEL2_ESPERA_MS = 45_000;
+const VOICE_ACAO_COOLDOWN_MS = 30_000;
+const VOICE_TENTATIVAS = 2;
+const VOICE_JANELA_MS = 30 * 60_000;
 // Teto de tentativas da escada na janela.
 const GW_ZUMBI_TENTATIVAS = 2;
 // Janela de contagem das tentativas.
@@ -1997,56 +2425,330 @@ function showZumbiBanner() {
     mostrarBannerFixo('golivebypass-zumbi', ZUMBI_BANNER_TEXT, '#f0b232');
 }
 
-// Escada propria do video travado (beta 10): a cura e reconstruir a VOZ — fechar
-// o ws de midia faz o cliente reconectar/resumir a voz e re-negociar o video —
-// NUNCA reload com midia aberta (§6). Nao passa pelo roteador (midia e DIRECT):
-// zero brigas com rajada/recorrencia/mid grace do gateway.
-let videoTentativaEm = [];
-let videoUltimaAcaoEm = 0;
+// Recuperacao do VIDEO DE SAIDA do transmissor (issue #164). O probe da beta
+// 10 observava RTCPeerConnection no Chromium e era cego (pcs=0): o Discord
+// desktop usa discord_voice. Agora a primeira acao destroi somente a conexao
+// stream nativa; se ela nao renascer saudavel, o nivel 2 destroi tambem voice e
+// fecha os ws de midia. Nunca ha reload automatico.
+let videoNativoTentativas = [];
+let videoNativoUltimaAcaoEm = 0;
+let videoNativoPendente = null;
+let videoNativoBloqueadoGeracao = '';
+let videoNativoBloqueadoEm = 0;
+let videoBannerAtivo = false;
+let voiceProbeRodando = false;
+let voiceProbeUltimoLogEm = 0;
+let voiceProbeUltimaAssinatura = '';
+let voiceHookLogado = false;
+let voiceUltimaGeracaoLogada = '';
+let voiceIsolatedAvisado = false;
 
-const VIDEO_BANNER_TEXT = "GoLiveBypass: a imagem da transmissao nao chega (o som funciona). " +
-    "Ja reconstruimos a conexao de voz automaticamente; se a imagem nao voltar, clique em " +
-    "\"Reiniciar agora\" abaixo (ou Ctrl+Alt+R).";
+const VIDEO_BANNER_TEXT = "GoLiveBypass: confirmamos que a captura continua ativa, mas o " +
+    "Discord parou de enviar os quadros da transmissao. A recuperacao automatica sem reload " +
+    "foi esgotada; use \"Reiniciar agora\" somente se quiser reconstruir a call inteira.";
 
 function showVideoBanner() {
+    videoBannerAtivo = true;
     mostrarBannerFixo('golivebypass-video', VIDEO_BANNER_TEXT, '#f0b232');
 }
 
-// Funcao pura do gatilho de video (testavel): audio vivo + track de video
-// esperada + video parado = a imagem nao chega (o caso do som que toca — o
-// usuario nyxxy descreveu exatamente isto na beta 8).
-function avaliarRtcVideo(resumo, rtc) {
-    if (!rtc || rtc.pcs <= 0) return null;
-    if (!resumo || resumo.midiaAberta !== true) return null;
-    if (resumo.midiaOpenHa < 0 || resumo.midiaOpenHa < GW_VIDEO_MIDIA_MIN_MS) return null;
-    if (rtc.enviando) return null; // o usuario e quem transmite: fora do nosso alcance
-    if (!rtc.videoTrack) return null; // call so de voz: nao existe video esperado
-    if (rtc.audioHa < 0 || rtc.audioHa > GW_VIDEO_AUDIO_VIVO_MS) return null; // audio morto: outro problema
-    if (rtc.videoHa >= 0 && rtc.videoHa < GW_VIDEO_PARADO_MS) return null; // video andando
-    return 'video-travado';
+function hideVideoBanner(win) {
+    if (!videoBannerAtivo) return;
+    videoBannerAtivo = false;
+    try {
+        win.webContents.executeJavaScript("(function(){var e=document.getElementById('golivebypass-video');if(e)e.remove();})()")
+            .catch(() => { });
+    } catch { }
 }
 
-function vigiarVideo(resumo, rtc, win) {
+function streamNativaAtiva(voice) {
+    if (!voice || !Array.isArray(voice.connections)) return null;
+    let achada = null;
+    for (const conn of voice.connections) {
+        if (!conn || conn.destroyed === true || conn.kind !== 'stream') continue;
+        if (achada === null || conn.id > achada.id) achada = conn;
+    }
+    return achada;
+}
+
+function voiceNativaAtiva(voice) {
+    if (!voice || !Array.isArray(voice.connections)) return null;
+    let achada = null;
+    for (const conn of voice.connections) {
+        if (!conn || conn.destroyed === true || conn.kind !== 'voice') continue;
+        if (achada === null || conn.id > achada.id) achada = conn;
+    }
+    return achada;
+}
+
+function geracaoNativa(voice, stream) {
+    if (!voice || !stream) return '';
+    return String(voice.instanceId || 'legacy') + ':' + String(stream.id);
+}
+
+// Funcao pura e fail-closed. Todas as guardas precisam concordar: stream exata,
+// midia aberta, espectador positivo visto desde essa geracao, captura viva e
+// saida sem progredir por 20s. Uma renegociacao normal de 3s apenas envelhece
+// saidaHa por 3s e nunca chega perto do limiar.
+function avaliarRtcNativo(ctx) {
+    if (!ctx || !ctx.voice || ctx.voice.installed !== true || ctx.voice.voiceHooked !== true) return null;
+    if (!ctx.midia || ctx.midia.midiaAberta !== true) return null;
+    if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
+    const stream = streamNativaAtiva(ctx.voice);
+    if (!stream || stream.createdHa < VOICE_STREAM_AQUECIMENTO_MS) return null;
+    if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
+    const stats = stream.stats;
+    if (!stats || stats.statsOk !== true) return null;
+    if (stats.sampleHa < 0 || stats.sampleHa > VOICE_SAMPLE_MAX_MS) return null;
+    if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
+    if (!(typeof stats.captureFrames === 'number' || stats.inputFrameRate > 0)) return null;
+    if (typeof stats.framesEncoded !== 'number' || typeof stats.encodeFrameRate !== 'number') return null;
+    if (stats.saidaHa < VOICE_SAIDA_PARADA_MS) return null;
+    return 'video-nativo-travado';
+}
+
+function rtcNativoSaudavel(ctx, geracaoAnterior) {
+    const stream = streamNativaAtiva(ctx && ctx.voice);
+    if (!stream || geracaoNativa(ctx.voice, stream) === geracaoAnterior) return null;
+    const stats = stream.stats;
+    if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
+    if (!ctx.midia || ctx.midia.midiaAberta !== true) return null;
+    if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
+    if (!stats || stats.statsOk !== true || stats.sampleHa > VOICE_SAMPLE_MAX_MS) return null;
+    if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
+    if (stats.saidaHa < 0 || stats.saidaHa > VOICE_SAIDA_SUCESSO_MS) return null;
+    if (!(stats.encodeFrameRate > 0) || typeof stats.framesEncoded !== 'number') return null;
+    return stream;
+}
+
+function executarVoiceIsolado(win, code) {
+    const wc = win && win.webContents;
+    if (!wc || typeof wc.executeJavaScriptInIsolatedWorld !== 'function') {
+        return Promise.reject(new Error('executeJavaScriptInIsolatedWorld indisponivel'));
+    }
+    return wc.executeJavaScriptInIsolatedWorld(VOICE_ISOLATED_WORLD_ID, [{ code }], true);
+}
+
+function consultarRtcNativo(win) {
+    const voice = executarVoiceIsolado(win,
+        'window.__goliveVoiceResumo ? window.__goliveVoiceResumo() : null');
+    const pagina = win.webContents.executeJavaScript(
+        "({demanda:window.__goliveVoiceDemandaResumo?window.__goliveVoiceDemandaResumo():null," +
+        "midia:window.__goliveGwResumo?window.__goliveGwResumo():null})", true);
+    return Promise.all([voice, pagina]).then(([voiceResumo, paginaResumo]) => ({
+        win,
+        voice: voiceResumo,
+        demanda: paginaResumo && paginaResumo.demanda,
+        midia: paginaResumo && paginaResumo.midia,
+    }));
+}
+
+function falharRecuperacaoNativa(ctx, motivo) {
+    const stream = streamNativaAtiva(ctx && ctx.voice);
+    videoNativoBloqueadoGeracao = stream ? geracaoNativa(ctx.voice, stream) :
+        (videoNativoPendente ? videoNativoPendente.geracao : '');
+    videoNativoBloqueadoEm = Date.now();
+    videoNativoPendente = null;
+    log("gw.zumbi | video nativo confirmado mas acao manual (" + motivo + ")");
+    if (!videoBannerAtivo) showVideoBanner();
+}
+
+function iniciarRecuperacaoNativa(ctx, nivel, geracaoAnterior) {
     const agora = Date.now();
-    while (videoTentativaEm.length > 0 && videoTentativaEm[0] < agora - GW_VIDEO_JANELA_MS) videoTentativaEm.shift();
-    if (videoTentativaEm.length >= GW_VIDEO_TENTATIVAS) {
-        if (!zumbiBannerAtivo) {
-            zumbiBannerAtivo = true;
-            showVideoBanner();
-        }
+    while (videoNativoTentativas.length > 0 && videoNativoTentativas[0] < agora - VOICE_JANELA_MS) {
+        videoNativoTentativas.shift();
+    }
+    if (videoNativoTentativas.length >= VOICE_TENTATIVAS) {
+        falharRecuperacaoNativa(ctx, 'teto_tentativas');
         return;
     }
-    if (videoUltimaAcaoEm > 0 && agora - videoUltimaAcaoEm < GW_VIDEO_COOLDOWN_MS) return;
-    videoTentativaEm.push(agora);
-    videoUltimaAcaoEm = agora;
+    const stream = streamNativaAtiva(ctx.voice);
+    const geracao = stream ? geracaoNativa(ctx.voice, stream) : String(geracaoAnterior || '');
+    videoNativoTentativas.push(agora);
+    videoNativoUltimaAcaoEm = agora;
+    const tentativa = { nivel, geracao, inicioEm: agora, sucessoEm: 0, renasceuEm: 0, confirmada: false };
+    videoNativoPendente = tentativa;
     sessaoRevives++;
-    log("gw.revive | video: reconstruindo a conexao de voz (close 4000 no ws de midia)" +
-        " — audio vivo, video parado ha " + (rtc.videoHa < 0 ? "sempre" : Math.round(rtc.videoHa / 1000) + "s"));
-    win.webContents.executeJavaScript('window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0')
-        .then(n => {
-            if (!n) log("gw.revive | nao havia ws de midia aberto para fechar");
+    log("gw.revive | video nativo: nivel=" + nivel +
+        (nivel === 1 ? " destruindo somente a stream nativa" : " reconstruindo voice+stream sem reload") +
+        " entrada_ha=" + idadeSeg(stream && stream.stats ? stream.stats.entradaHa : -1) +
+        " saida_ha=" + idadeSeg(stream && stream.stats ? stream.stats.saidaHa : -1));
+    executarVoiceIsolado(ctx.win,
+        'window.__goliveVoiceRecuperar ? window.__goliveVoiceRecuperar(' + nivel + ') : null')
+        .then(resultado => {
+            if (videoNativoPendente !== tentativa) return;
+            if (!resultado || resultado.ok !== true) {
+                falharRecuperacaoNativa(ctx, 'acao_nativa_indisponivel');
+                return;
+            }
+            tentativa.confirmada = true;
+            log("gw.revive | video nativo: nivel=" + nivel + " executado" +
+                " streams=" + Number(resultado.streams || 0) + " voices=" + Number(resultado.voices || 0));
+            if (nivel !== 2) return;
+            // A associacao URL -> stream nao e inequivoca, portanto o nivel 1
+            // nao toca ws algum. No nivel 2, ja assumimos o corte breve de voz e
+            // fechamos todos os discord.media para o controlador reconstruir.
+            ctx.win.webContents.executeJavaScript('window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0')
+                .then(n => log("gw.revive | video nativo: nivel=2 fechou " + Number(n || 0) + " ws de midia"))
+                .catch(error => log("gw.revive | video nativo: falhei ao fechar midia: " + error.message));
         })
-        .catch(error => log("gw.revive | falhei ao fechar o ws de midia: " + error.message));
+        .catch(error => {
+            if (videoNativoPendente === tentativa) {
+                falharRecuperacaoNativa(ctx, 'mundo_isolado: ' + error.message);
+            }
+        });
+}
+
+function acompanharRecuperacaoNativa(ctx) {
+    const pendente = videoNativoPendente;
+    if (!pendente) return false;
+    const agora = Date.now();
+    const streamSaudavel = rtcNativoSaudavel(ctx, pendente.geracao);
+    if (streamSaudavel) {
+        if (pendente.sucessoEm === 0) pendente.sucessoEm = agora;
+        if (agora - pendente.sucessoEm >= VOICE_SUCESSO_SUSTENTADO_MS) {
+            log("gw.revive | video nativo: sucesso nivel=" + pendente.nivel +
+                " geracao_nova=" + streamSaudavel.id + " por=" +
+                Math.round((agora - pendente.sucessoEm) / 1000) + "s");
+            videoNativoPendente = null;
+            videoNativoBloqueadoGeracao = '';
+            videoNativoBloqueadoEm = 0;
+            hideVideoBanner(ctx.win);
+        }
+        return true;
+    }
+    pendente.sucessoEm = 0; // pulso isolado nunca credita a cura
+
+    // O novo addon pode nascer alguns segundos antes de o encoder/receiver
+    // assentar. Destrui-lo imediatamente repetiria a corrida que queremos
+    // curar; uma geracao realmente nova ganha seu proprio aquecimento.
+    const streamAtualAgora = streamNativaAtiva(ctx.voice);
+    if (streamAtualAgora && geracaoNativa(ctx.voice, streamAtualAgora) !== pendente.geracao) {
+        if (!pendente.renasceuEm) {
+            pendente.renasceuEm = agora;
+            log("gw.revive | video nativo: geracao nova nasceu; aguardando encoder aquecer");
+        }
+        if (agora - pendente.renasceuEm < VOICE_NOVA_GERACAO_GRACA_MS) return true;
+    }
+
+    // Se o espectador saiu durante a tentativa, nao ha mais problema a curar e
+    // sobretudo nao escalamos para destruir a call inteira.
+    if (ctx.demanda && ctx.demanda.known === true && ctx.demanda.active !== true &&
+        ctx.demanda.changedHa >= 15_000) {
+        log("gw.revive | video nativo: tentativa cancelada, demanda do espectador terminou");
+        videoNativoPendente = null;
+        return true;
+    }
+
+    const prazo = pendente.nivel === 1 ? VOICE_NIVEL1_ESPERA_MS : VOICE_NIVEL2_ESPERA_MS;
+    if (agora - pendente.inicioEm < prazo) return true;
+    if (pendente.nivel === 1) {
+        const streamAtual = streamNativaAtiva(ctx.voice);
+        const voiceAtual = voiceNativaAtiva(ctx.voice);
+        const teardownEmCurso = !streamAtual && (!voiceAtual || !ctx.midia || ctx.midia.midiaAberta !== true);
+        if (teardownEmCurso) {
+            if (!pendente.teardownEm) {
+                pendente.teardownEm = agora;
+                log("gw.revive | video nativo: nivel=1 iniciou teardown; aguardando o Discord reconstruir sozinho");
+            }
+            if (agora - pendente.teardownEm < VOICE_RECONSTRUCAO_GRACA_MS) return true;
+            falharRecuperacaoNativa(ctx, 'reconstrucao_nao_renasceu');
+            return true;
+        }
+        log("gw.revive | video nativo: nivel=1 nao curou em " + Math.round(prazo / 1000) + "s; subindo ao nivel=2");
+        const geracaoAnterior = pendente.geracao;
+        videoNativoPendente = null;
+        iniciarRecuperacaoNativa(ctx, 2, geracaoAnterior);
+        return true;
+    }
+    falharRecuperacaoNativa(ctx, 'nivel2_sem_cura');
+    return true;
+}
+
+function processarRtcNativo(ctx) {
+    const agora = Date.now();
+    while (videoNativoTentativas.length > 0 && videoNativoTentativas[0] < agora - VOICE_JANELA_MS) {
+        videoNativoTentativas.shift();
+    }
+    if (acompanharRecuperacaoNativa(ctx)) return;
+    const stream = streamNativaAtiva(ctx.voice);
+    if (videoNativoBloqueadoEm > 0 && (agora - videoNativoBloqueadoEm >= VOICE_JANELA_MS ||
+        (stream && geracaoNativa(ctx.voice, stream) !== videoNativoBloqueadoGeracao))) {
+        videoNativoBloqueadoGeracao = '';
+        videoNativoBloqueadoEm = 0;
+        hideVideoBanner(ctx.win);
+    }
+    if (avaliarRtcNativo(ctx) !== 'video-nativo-travado') return;
+    if (stream && geracaoNativa(ctx.voice, stream) === videoNativoBloqueadoGeracao) return;
+    if (!autoRevive) {
+        falharRecuperacaoNativa(ctx, 'autoRevive_desligado');
+        return;
+    }
+    if (videoNativoUltimaAcaoEm > 0 && agora - videoNativoUltimaAcaoEm < VOICE_ACAO_COOLDOWN_MS) return;
+    iniciarRecuperacaoNativa(ctx, 1);
+}
+
+function logRtcNativo(ctx) {
+    const agora = Date.now();
+    const stream = streamNativaAtiva(ctx.voice);
+    const stats = stream && stream.stats;
+    const assinatura = [
+        !!(ctx.voice && ctx.voice.voiceHooked), stream ? stream.id : 0,
+        !!(ctx.demanda && ctx.demanda.active), stats ? !!stats.statsOk : false,
+        videoNativoPendente ? videoNativoPendente.nivel : 0,
+    ].join(':');
+    if (assinatura === voiceProbeUltimaAssinatura && agora - voiceProbeUltimoLogEm < VOICE_PROBE_LOG_MS) return;
+    voiceProbeUltimaAssinatura = assinatura;
+    voiceProbeUltimoLogEm = agora;
+    log("voice.probe | hook=" + (ctx.voice && ctx.voice.voiceHooked ? "sim" : "nao") +
+        " stream=" + (stream ? stream.id : "nenhuma") +
+        " demanda=" + (ctx.demanda && ctx.demanda.known ? (ctx.demanda.active ? "sim" : "nao") : "?") +
+        " demanda_ha=" + idadeSeg(ctx.demanda ? ctx.demanda.demandHa : -1) +
+        " entrada_ha=" + idadeSeg(stats ? stats.entradaHa : -1) +
+        " saida_ha=" + idadeSeg(stats ? stats.saidaHa : -1) +
+        " fps_in=" + (stats && typeof stats.inputFrameRate === 'number' ? Math.round(stats.inputFrameRate) : "?") +
+        " fps_out=" + (stats && typeof stats.encodeFrameRate === 'number' ? Math.round(stats.encodeFrameRate) : "?") +
+        " frames=" + (stats && typeof stats.framesEncoded === 'number' ? Math.round(stats.framesEncoded) : "?") +
+        " stats=" + (stats && stats.statsOk ? "ok" : (stats && stats.reason ? stats.reason : "?")));
+}
+
+function checarRtcNativo() {
+    if (voiceProbeRodando) return;
+    const janelas = janelasCliente();
+    if (janelas.length === 0) return;
+    voiceProbeRodando = true;
+    Promise.all(janelas.map(win => consultarRtcNativo(win).catch(error => ({ win, error })))).then(resultados => {
+        let escolhido = null;
+        for (const resultado of resultados) {
+            if (!resultado || resultado.error || !resultado.voice) continue;
+            if (escolhido === null || (streamNativaAtiva(resultado.voice) && !streamNativaAtiva(escolhido.voice))) {
+                escolhido = resultado;
+            }
+        }
+        if (escolhido === null) {
+            if (!voiceIsolatedAvisado) {
+                voiceIsolatedAvisado = true;
+                const erro = resultados.find(r => r && r.error);
+                log("voice.probe | mundo isolado indisponivel" + (erro ? ": " + erro.error.message : ""));
+            }
+            return;
+        }
+        voiceIsolatedAvisado = false;
+        if (!voiceHookLogado && escolhido.voice.voiceHooked === true) {
+            voiceHookLogado = true;
+            log("voice.hook | discord_voice interceptado no preload isolado");
+        }
+        const stream = streamNativaAtiva(escolhido.voice);
+        const geracao = stream ? geracaoNativa(escolhido.voice, stream) : '';
+        if (stream && geracao !== voiceUltimaGeracaoLogada) {
+            voiceUltimaGeracaoLogada = geracao;
+            log("voice.conn | tipo=stream geracao=" + stream.id + " estado=ativa");
+        }
+        logRtcNativo(escolhido);
+        processarRtcNativo(escolhido);
+    }).catch(error => {
+        log("voice.probe | falha no vigia nativo: " + error.message);
+    }).finally(() => { voiceProbeRodando = false; });
 }
 
 function idadeSeg(ha) {
@@ -2195,30 +2897,9 @@ function checarGatewaySilente() {
             zumbiUltimaAcaoEm = 0;
             zumbiUltimaAcao = null;
         }
-        // Instrumentacao RTC (beta 10): o que TOCA (audio/video via RTC/UDP) —
-        // o gw.probe ve a sinalizacao, o rtc.probe ve a midia. O par conta a
-        // historia completa no log e vai no report de bug pela cauda dele.
-        if (winResumo !== null) {
-            winResumo.webContents.executeJavaScript('window.__goliveRtcResumo ? window.__goliveRtcResumo() : null', true)
-                .then(rtc => {
-                    if (!rtc) return;
-                    log("rtc.probe | pcs=" + rtc.pcs +
-                        " audio_ha=" + idadeSeg(rtc.audioHa) +
-                        " video_ha=" + idadeSeg(rtc.videoHa) +
-                        " track=" + (rtc.videoTrack ? "sim" : "nao") +
-                        " enviando=" + (rtc.enviando ? "sim" : "nao") +
-                        " audio_bytes=" + rtc.audioBytes +
-                        " video_bytes=" + rtc.videoBytes);
-                    // Recuperacao do video: bytes de video voltaram a crescer.
-                    if (videoTentativaEm.length > 0 && rtc.videoHa >= 0 && rtc.videoHa < 60_000) {
-                        log("gw.revive | video: imagem voltou apos " + videoTentativaEm.length + " tentativa(s)");
-                        videoTentativaEm.length = 0;
-                        videoUltimaAcaoEm = 0;
-                    }
-                    if (avaliarRtcVideo(resumo, rtc) === 'video-travado') vigiarVideo(resumo, rtc, winResumo);
-                })
-                .catch(() => { });
-        }
+        // A midia nativa e observada por checarRtcNativo() em um intervalo
+        // proprio de 5s. O antigo RTCPeerConnection do Chromium continua no
+        // shim apenas como diagnostico legado, mas nao participa de decisoes.
     });
 }
 
@@ -2231,7 +2912,7 @@ function injetarInstrumentacao(wc) {
     try {
         wc.debugger.attach('1.3');
         wc.debugger.sendCommand('Page.enable').catch(() => { });
-        wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: SHIM_GATEWAY_SRC }).catch(() => { });
+        wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: SHIM_ALL_SRC }).catch(() => { });
     } catch (error) {
         log("nao consegui prender o shim do gateway: " + error.message);
     }
@@ -2246,11 +2927,15 @@ function injetarInstrumentacao(wc) {
             // quando ele ja vive; quando nao vive, entra em linha e cobre as
             // reconexoes seguintes (a conexao corrente, se existir, so e coberta
             // no proximo reconnect do cliente).
-            wc.executeJavaScript('!!window.__goliveGwShim')
-                .then(temShim => {
-                    if (temShim === true) return;
-                    log("gw.shim | o shim do CDP nao anexou neste documento, reinjetando no did-finish-load");
-                    return wc.executeJavaScript(SHIM_GATEWAY_SRC);
+            wc.executeJavaScript('({ gateway: !!window.__goliveGwShim, voice: !!window.__goliveVoiceShim })')
+                .then(shims => {
+                    let fonte = '';
+                    if (!shims || shims.gateway !== true) fonte += SHIM_GATEWAY_SRC + '\n';
+                    if (!shims || shims.voice !== true) fonte += SHIM_VOICE_SRC;
+                    if (fonte === '') return;
+                    log("gw.shim | shim ausente neste documento, reinjetando no did-finish-load" +
+                        " (gateway=" + !!(shims && shims.gateway) + " voice=" + !!(shims && shims.voice) + ")");
+                    return wc.executeJavaScript(fonte);
                 })
                 .then(() => { wc.executeJavaScript(REVIVE_SRC).catch(() => { }); })
                 .catch(() => { });
@@ -3566,6 +4251,8 @@ async function start() {
     log("batimento ligado: reconfiro as saidas a cada " + Math.round(HEARTBEAT_MS / 1000) + "s");
     setInterval(() => { checarGatewaySilente(); }, GW_PROBE_CHECAGEM_MS);
     log("vigia de gateway mudo ligado: polla o probe do renderer a cada " + Math.round(GW_PROBE_CHECAGEM_MS / 1000) + "s");
+    setInterval(() => { checarRtcNativo(); }, VOICE_PROBE_MS);
+    log("vigia de video nativo ligado: polla discord_voice a cada " + Math.round(VOICE_PROBE_MS / 1000) + "s");
 }
 
 try {

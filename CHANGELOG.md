@@ -7,6 +7,40 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Recuperação nativa do vídeo de saída do Go Live** (próxima beta,
+  [#164](https://github.com/bezumiya/GoLiveBypass/issues/164)): o teste ao vivo
+  no Linux mostrou por que o gatilho RTC da beta 10 era cego: o Discord desktop
+  não cria a Live em `window.RTCPeerConnection`; ela vive no addon
+  `discord_voice`. No travamento reproduzido, a demanda do espectador continuou
+  positiva e a captura avançou de 2.760 para 3.667 quadros em 15s (~60 fps), mas
+  `framesEncoded`, bitrate e resolução ficaram exatamente em zero. O novo preload:
+  - envolve de forma transparente e idempotente
+    `createVoiceConnectionWithOptions`/`createOwnStreamConnectionWithOptions`,
+    classifica `voice` vs `stream` pelo factory exato e nunca age sobre
+    `unknown`;
+  - usa a API realmente implementada nesta versão do addon,
+    `getFilteredStats(2, callback)` (o `getStats` do wrapper JS está stale), e
+    reduz o JSON a captura, FPS, quadros codificados, bitrate, resolução e idades
+    de progressão — sem IDs, endpoints, tokens ou stats brutos no log;
+  - combina as conexões do mundo isolado do preload (world 999) com
+    `Remote media sink wants` e os ws `discord.media` do mundo principal;
+  - só confirma o zumbi com stream aquecida + mídia aberta + demanda positiva +
+    captura viva há <15s + saída congelada por ≥20s. A renegociação normal de
+    ~3s observada ao vivo não chega ao limiar, e dado incompleto falha fechado.
+  - nível 1 chama `destroy()` **somente na stream nativa**. No ensaio, isso
+    iniciou uma reconstrução tardia do próprio Discord: voice e mídia fecharam
+    depois, um documento/preload novo nasceu, a call e a Live foram refeitas e a
+    geração nova estabilizou em ~60 fps, 1920×1088, com dois receptores — sem
+    Ctrl+R manual e sem o nível 2 conseguir/precisar agir. A escada agora espera
+    60s pelo teardown, mais 45s quando ele já começou, e dá 30s de aquecimento a
+    uma geração nova; sucesso exige 10s de progressão contínua, nunca um pulso.
+    Só se voice/mídia continuarem presas após o prazo o nível 2 destrói voice +
+    stream e fecha `discord.media`; não existe reload automático nosso.
+  - telemetria nova: `voice.hook`, `voice.conn`, `voice.probe` e
+    `gw.revive | video nativo ...`. O standalone é a fonte e a GUI recebe o
+    mesmo código via `sync-bypass`; testes novos cobrem transparência, privacidade,
+    filtro nativo, mundo isolado, detector, níveis e colisão de geração após o
+    reload interno.
 - **Injeção à prova de corrida: o shim vira preload de sessão** (beta 10,
   [#163](https://github.com/bezumiya/GoLiveBypass/issues/163)): a #163 pegou uma
   sessão inteira **cega** — o CDP não anexou, o fallback do `did-finish-load`
@@ -416,7 +450,11 @@ recuperação + probe** do beta 4 (#149) e o **revive automático** do beta 6
 plugin eles sairiam mais precisos (o renderer enxerga o socket do gateway, o
 timestamp da última mensagem e o decompress sem CDP) — o pill e o close do ws
 são quase diretos lá — mas o porte não entrou neste ciclo; o plugin segue sem
-nenhum deles até o próximo.
+nenhum deles até o próximo. A recuperação nativa de vídeo da #164 também fica
+fora do plugin nesta rodada: ela depende do preload de sessão no processo
+principal, do world isolado 999 e do ciclo de vida de `discord_voice`; o plugin
+tem IPC/patches próprios e precisa de um porte manual com as mesmas guardas,
+nunca de uma cópia literal do standalone.
 
 **Pendência da regra de sincronização (seção 4 do AGENTS.md):** o aviso de
 proxy manual quebrada da issue #134 (ver acima, nesta mesma versão) só foi

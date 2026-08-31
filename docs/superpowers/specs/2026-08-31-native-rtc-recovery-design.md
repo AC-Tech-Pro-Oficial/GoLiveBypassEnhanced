@@ -17,7 +17,8 @@ O travamento foi reproduzido e delimitado:
 - o log nativo continuou recebendo `Remote media sink wants` com demanda
   positiva, mas `Received receiver count` caiu para zero;
 - a captura permaneceu em aproximadamente 60 FPS, enquanto quadros codificados,
-  bitrate e bytes enviados pararam de crescer e o encoder ficou suspenso;
+  bitrate e bytes enviados pararam de crescer; o próprio stats ainda dizia
+  `suspended=false`, portanto essa flag não serve como gatilho;
 - fechar duas vezes os WebSockets de mídia com código 4000 não curou;
 - parar e recriar somente a Go Live, inclusive com SSRC novo, não curou;
 - parar de assistir e abrir novamente no espectador não curou;
@@ -30,9 +31,10 @@ real e a recuperação por WebSocket não reinicializa o estado nativo preso.
 
 ## Objetivo
 
-Detectar o estado zumbi pelo `discord_voice` e recuperá-lo sem recarregar a
-janela. É aceitável um corte breve de áudio, desde que o usuário permaneça no
-canal e o Discord reconstrua a call sozinho.
+Detectar o estado zumbi pelo `discord_voice` e recuperá-lo sem o bypass chamar
+reload. É aceitável um corte breve de áudio e uma reconstrução interna iniciada
+pelo próprio Discord, desde que o estado lógico da call/Live seja restaurado
+sozinho.
 
 Não são objetivos:
 
@@ -65,12 +67,15 @@ token não entram no resumo nem no log.
 
 ### 2. Stats reais e sinal de demanda
 
-O preload amostra `connection.getStats(callback)` sem substituir callbacks do
-Discord. Um adaptador tolerante a versão reduz o resultado aos campos úteis:
+O protótipo ao vivo revelou uma incompatibilidade no wrapper distribuído pelo
+Discord: ele ainda expõe `getStats`, mas o objeto nativo atual não implementa
+esse método. A API funcional é `connection.getFilteredStats(2, callback)`; o
+filtro `2` devolve `outbound` + `screenshare` como JSON. O preload a amostra sem
+substituir callbacks do Discord e reduz o resultado aos campos úteis:
 
 - quadros de entrada/captura;
 - quadros codificados ou enviados;
-- bytes e bitrate de saída;
+- FPS e bitrate de saída;
 - presença de trilha de vídeo;
 - estado da conexão e idade da última progressão.
 
@@ -79,9 +84,15 @@ objeto devolvido. Formato desconhecido degrada para telemetria indisponível e
 nunca dispara recuperação.
 
 O preload também observa, preservando integralmente o console original, as
-mensagens `Remote media sink wants`. Somente valores positivos recentes de
-`pixelCounts` ou do SSRC contam como demanda. Esse sinal diferencia o zumbi de
-uma transmissão saudável sem espectadores.
+mensagens `Remote media sink wants`. Um payload positivo ativa a demanda e um
+payload inequivocamente zerado a desativa; a última mudança fica datada. Esse
+estado diferencia o zumbi de uma transmissão saudável sem espectadores e evita
+depender de uma expiração arbitrária, pois a mensagem é orientada a mudança.
+
+As duas metades vivem em mundos diferentes: o addon e as conexões estão no
+preload isolado do Electron (world 999), enquanto os logs de demanda e os
+WebSockets estão no mundo principal. O processo principal consulta ambos e os
+combina; nenhuma ponte transporta objetos nativos entre mundos.
 
 O renderer expõe ao processo principal apenas:
 
@@ -97,7 +108,7 @@ abaixo são obrigatórias:
 - `autoRevive` ligado;
 - conexão `stream` classificada com confiança e criada há pelo menos 20 s;
 - WebSocket de mídia aberto;
-- demanda positiva de espectador nos últimos 60 s;
+- demanda positiva conhecida, observada desde a geração atual da stream;
 - captura/entrada de vídeo progrediu nos últimos 15 s;
 - quadros/bytes codificados não progrediram por pelo menos 20 s;
 - usuário continua transmitindo;
@@ -113,10 +124,11 @@ Nível 1 — stream nativa:
 
 1. marcar a tentativa e suspender novas decisões;
 2. chamar `destroy()` somente na conexão nativa `stream` atual;
-3. fechar somente o WebSocket de mídia associado à stream, quando a associação
-   for inequívoca;
-4. aguardar até 30 s pela criação de uma geração nova e pela progressão estável
-   de quadros/bytes por pelo menos 10 s.
+3. não fechar WebSocket no nível 1, pois a associação URL → stream não é
+   inequívoca no cliente atual;
+4. aguardar 60 s pelo teardown tardio. Se voice/mídia já estiverem fechando,
+   conceder mais 45 s ao controlador; toda geração nova recebe 30 s próprios de
+   aquecimento. A cura só vale com progressão estável por pelo menos 10 s.
 
 Nível 2 — RTC completo, sem reload:
 
@@ -132,6 +144,26 @@ Não há nível de reload automático. O teto é de duas tentativas em 30 minuto
 Sucesso só é creditado quando demanda continua positiva e quadros ou bytes de
 vídeo progridem durante o aquecimento. Um único quadro-chave ou `viewer=1`
 transitório, como os pulsos de 49–156 ms observados no teste, não conta.
+
+## Resultado do ensaio ao vivo
+
+A segunda ocorrência natural da falha forneceu a fixture real do detector:
+
+- durante 15 s, `pipewireFrames` avançou de 2.760 para 3.667 e
+  `inputFrameRate` ficou em 60–61 fps;
+- demanda positiva chegou repetidamente e o WebSocket de mídia permaneceu
+  aberto;
+- `framesEncoded=0`, `encodeFrameRate=0`, bitrate 0 e resolução 0×0 em todas as
+  amostras; o log nativo confirmou receiver count 0.
+
+O `destroy()` apenas da stream encerrou imediatamente a geração antiga. Ela não
+renasceu nos primeiros 30 s, mas iniciou uma reconstrução tardia sem ação útil
+do nível 2: voice/mídia fecharam, o Discord criou documento/preload novos,
+reentrou na call e recriou a Live. A nova geração chegou a dois receptores e
+estabilizou em aproximadamente 60 fps, 1920×1088; em uma janela adicional de
+25 s, `framesEncoded` cresceu continuamente de 3.209 para 4.711. Portanto, o
+nível 1 é uma cura válida, porém assíncrona, e a escada precisa reconhecer o
+teardown/reload interno em vez de atropelá-lo.
 
 ## Falha segura e compatibilidade
 
