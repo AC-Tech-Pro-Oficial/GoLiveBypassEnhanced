@@ -7,6 +7,31 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Gatilho de stream travada: sniff do op 4 + fluxo de mídia** (beta 9,
+  retorno da beta 8 nas issues [#159](https://github.com/bezumiya/GoLiveBypass/issues/159),
+  [#160](https://github.com/bezumiya/GoLiveBypass/issues/160) e
+  [#161](https://github.com/bezumiya/GoLiveBypass/issues/161)): a beta 8
+  instrumentou o caso real e os logs contaram a história inteira — o shim
+  anexou (o fallback da #154 disparou), o burst de atividade funcionou, e o
+  `resp_bytes` revelou que **o gateway segue entregando MUITOS dados** (2,6 mil
+  a 77 mil bytes por janela) mesmo com a stream travada no carregamento. O
+  zumbi da nova geração não é o servidor calado: é o servidor que **empurra
+  dados ambiente mas não PROCESSA pedidos novos** — o op 4 (VOICE_STATE_UPDATE,
+  o "quero assistir") sai e o dispatch que abriria a conexão de voz
+  (`*.discord.media`) nunca vem; a view gira eternamente e só o Ctrl+R cura.
+  O gatilho novo é de precisão cirúrgica e independe de decodificar o payload:
+  - **Sniff do op no frame binário (etf)**: `131` + tupla + inteiro na cabeça do
+    termo — o op 4 é extraído em ~10 linhas defensivas (formato estranho devolve
+    -1 e nunca vira falso op 4). No mundo JSON o op 4 já era lido.
+  - **Assinatura**: op 4 enviado há 20-90s + **nenhum ws de mídia abriu desde o
+    pedido** + sem mídia aberta agora = o fluxo de voz nunca começou → a escada
+    dispara (close 4000 → o cliente renasce com RESUME e a stream abre sem
+    Ctrl+R; persistindo, reload).
+  - **Guarda de SAÍDA**: ws de mídia fechado há menos de 15s + op 4 = usuário
+    SAINDO de voz/stream — nesses casos nenhuma mídia nova abre, então não
+    dispara. E com mídia aberta (em call), a regra §6 segue bloqueando tudo.
+  - `gw.probe` novo: `op4_ha`, `midia_open_ha`, `midia_close_ha` — o próximo
+    relato prova sozinho se o sniff pegou o op no binário.
 - **Shim v3: reviver do zumbi que funciona de verdade no Discord atual** (beta 8,
   retorno da beta 6 nas issues [#154](https://github.com/bezumiya/GoLiveBypass/issues/154),
   [#156](https://github.com/bezumiya/GoLiveBypass/issues/156) e

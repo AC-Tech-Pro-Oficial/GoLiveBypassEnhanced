@@ -120,6 +120,7 @@ function resumoZumbi(extras) {
   return Object.assign({
     estado: "aberta", srvHa: 1000, cliHa: 5000, subs: 0, srvFrames: 600,
     dispatches: 0, dispatchHa: -1, intentHa: 45000, activityHa: 45000,
+    op4Ha: -1, midiaOpenHa: -1, midiaCloseHa: -1,
     abertoHa: 300000, geracao: 1, opCounts: { "1": 8 }, midiaAberta: false,
     infladorOk: true, srvBytes: 600, srvBytesDesdeAtividade: 100,
   }, extras || {});
@@ -128,9 +129,31 @@ function resumoZumbi(extras) {
 const RESUMO_SAUDAVEL = {
   estado: "aberta", srvHa: 1000, cliHa: 5000, subs: 2, srvFrames: 800,
   dispatches: 50, dispatchHa: 3000, intentHa: 45000, activityHa: 45000,
+  op4Ha: -1, midiaOpenHa: -1, midiaCloseHa: -1,
   abertoHa: 300000, geracao: 1, opCounts: { "1": 8, "14": 2 }, midiaAberta: false,
   infladorOk: true, srvBytes: 9000, srvBytesDesdeAtividade: 4000,
 };
+
+// --- 1b: caminho 3 (op 4 sem midia) tambem dispara a escada ---
+async function testCaminho3Op4SemMidia() {
+  const app = carregarSandbox();
+  resetarEstadoZumbi(app);
+  // O quadro REAL da beta 8 (issues #159/#160/#161): servidor empurrando dados
+  // ambiente (resp_bytes alto), inflate morto, sem ops decodificaveis — so o
+  // op 4 sem fluxo de midia abre o veredito.
+  app.setResumo({
+    estado: "aberta", srvHa: 1000, cliHa: 5000, subs: 0, srvFrames: 600,
+    dispatches: 0, dispatchHa: -1, intentHa: -1, activityHa: -1, op4Ha: 40000,
+    abertoHa: 300000, geracao: 1, opCounts: {}, midiaAberta: false,
+    midiaOpenHa: -1, midiaCloseHa: -1, infladorOk: false,
+    srvBytes: 80000, srvBytesDesdeAtividade: 26931,
+  });
+  await poll(app);
+  if (app.contadores.fechar === 1) ok("caminho 3: op 4 sem midia aberta dispara a escada (close 4000)");
+  else return bad("caminho 3 (op4 sem midia) nao disparou", "fechar=" + app.contadores.fechar);
+  if (app.contadores.reload === 0 && !temBannerZumbi(app)) ok("caminho 3 segue a escada normal (nivel 1, sem reload)");
+  else bad("caminho 3 pulou a escada", "reload=" + app.contadores.reload);
+}
 
 function resetarEstadoZumbi(app) {
   app.vmSet(`
@@ -351,6 +374,8 @@ function testGuardaRajadaNoFonte() {
   try {
     console.log("== nivel 1: zumbi sem midia -> close 4000 no ws do gateway ==");
     await testNivel1FechaWs();
+    console.log("\n== caminho 3: op 4 sem midia aberta ==");
+    await testCaminho3Op4SemMidia();
     console.log("\n== a reconexao do revive nao vira recorrencia ==");
     await testReconexaoDoReviveNaoViraRecorrencia();
     console.log("\n== nivel 2: zumbi persistente apos o close -> reload ==");

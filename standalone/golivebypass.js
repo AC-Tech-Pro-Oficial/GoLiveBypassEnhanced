@@ -1455,12 +1455,13 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "  var opCounts = {};" +
     "  var gw = { estado: 'nenhum', srvEm: 0, cliEm: 0, op1Em: 0, subs: 0, srvFrames: 0," +
     "    dispatches: 0, dispatchEm: 0, intentEm: 0, abertoEm: 0, ws: null," +
-    "    activityEm: 0, srvBytes: 0, srvBytesDesdeAtividade: 0 };" +
+    "    activityEm: 0, srvBytes: 0, srvBytesDesdeAtividade: 0, op4Em: 0 };" +
     "  var inflador = null;" +
     "  var infladorToken = 0;" +
     "  var infladorResyncs = 0;" +
     "  var cliEnvios = [];" +
     "  var textoPendente = '';" +
+    "  var midiaAbertaEm = 0, midiaFechouEm = 0;" +
     "  window.__goliveGwResumo = function () {" +
     "    var agora = Date.now();" +
     "    return { estado: gw.estado," +
@@ -1471,6 +1472,9 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "      dispatchHa: gw.dispatchEm ? agora - gw.dispatchEm : -1," +
     "      intentHa: gw.intentEm ? agora - gw.intentEm : -1," +
     "      activityHa: gw.activityEm ? agora - gw.activityEm : -1," +
+    "      op4Ha: gw.op4Em ? agora - gw.op4Em : -1," +
+    "      midiaOpenHa: midiaAbertaEm ? agora - midiaAbertaEm : -1," +
+    "      midiaCloseHa: midiaFechouEm ? agora - midiaFechouEm : -1," +
     "      abertoHa: gw.abertoEm ? agora - gw.abertoEm : -1," +
     "      geracao: geracao," +
     "      opCounts: opCounts," +
@@ -1494,6 +1498,29 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "      gw.activityEm = agora;" +
     "      gw.srvBytesDesdeAtividade = 0;" +
     "    }" +
+    "  }" +
+    // SNIFF do op em frames BINARIOS (issues #159/#160/#161, beta 8): o cliente
+    // manda etf — 131 + tupla, com o op como PRIMEIRO elemento (inteiro pequeno
+    // 97+1byte ou inteiro 98+4bytes BE). Interessa o op 4 (VOICE_STATE_UPDATE):
+    // e o pedido de entrar em voz/stream. Parse defensivo — formato estranho
+    // devolve -1 e nao registra nada (nunca falso op4).
+    "  function opDeBinario(dados) {" +
+    "    try {" +
+    "      var u;" +
+    "      if (dados instanceof ArrayBuffer) { u = new Uint8Array(dados); }" +
+    "      else if (typeof dados.byteLength === 'number') { u = new Uint8Array(dados.buffer, dados.byteOffset || 0, dados.byteLength); }" +
+    "      else { return -1; }" +
+    "      if (u.length < 8 || u[0] !== 131) return -1;" +
+    "      var p;" +
+    "      if (u[1] === 104) { p = 3; }" +
+    "      else if (u[1] === 105) { p = 6; }" +
+    "      else { return -1; }" +
+    "      var op = -1;" +
+    "      if (u[p] === 97) { op = u[p + 1]; }" +
+    "      else if (u[p] === 98) { op = (u[p + 1] * 16777216) + (u[p + 2] * 65536) + (u[p + 3] * 256) + u[p + 4]; }" +
+    "      if (op < 0 || op > 20) return -1;" +
+    "      return op;" +
+    "    } catch (e) { return -1; }" +
     "  }" +
     // Conta dispatch (op 0) em payload decodificavel (texto direto ou inflado do
     // zlib-stream). Fatia payloads completos com contador de chaves respeitando
@@ -1578,7 +1605,8 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "      try { ehGw = /(^|\\.)gateway(-[a-z0-9-]+)?\\.discord\\.gg$/.test(new URL(alvo).hostname); } catch (e) { }" +
     "      if (ehMidia) {" +
     "        midia.add(ws);" +
-    "        ws.addEventListener('close', function () { midia.delete(ws); });" +
+    "        ws.addEventListener('open', function () { midiaAbertaEm = Date.now(); });" +
+    "        ws.addEventListener('close', function () { midia.delete(ws); midiaFechouEm = Date.now(); });" +
     "      }" +
     "      if (ehGw) {" +
     // Contadores por GERACAO (o cliente recria o ws a cada reconexao): intencao,
@@ -1587,7 +1615,7 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "        gw.estado = 'conectando';" +
     "        gw.srvEm = 0; gw.cliEm = 0; gw.op1Em = 0; gw.subs = 0; gw.srvFrames = 0;" +
     "        gw.dispatches = 0; gw.dispatchEm = 0; gw.intentEm = 0; gw.abertoEm = 0;" +
-    "        gw.activityEm = 0; gw.srvBytes = 0; gw.srvBytesDesdeAtividade = 0;" +
+    "        gw.activityEm = 0; gw.srvBytes = 0; gw.srvBytesDesdeAtividade = 0; gw.op4Em = 0;" +
     "        gw.ws = ws;" +
     "        opCounts = {};" +
     "        cliEnvios = [];" +
@@ -1617,7 +1645,7 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "          gw.srvBytesDesdeAtividade += tam;" +
     "        });" +
     // Conta ops quando o payload e JSON texto (encodings antigos); no binario o
-    // histograma fica vazio MESMO — e o sinal de atividade por gap que cobre.
+    // histograma fica vazio MESMO — o sniff de op (etf) e o gap de envios que cobrem.
     "        var enviar = ws.send.bind(ws);" +
     "        ws.send = function (dados) {" +
     "          var agora = Date.now();" +
@@ -1630,9 +1658,16 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "              if (op === 1) { gw.op1Em = agora; }" +
     "              else {" +
     "                gw.intentEm = agora;" +
+    "                if (op === 4) { gw.op4Em = agora; }" +
     "                if (op === 14 || op === 37) gw.subs++;" +
     "              }" +
     "            } catch (e) { }" +
+    "          } else if (dados && (dados instanceof ArrayBuffer || typeof dados.byteLength === 'number')) {" +
+    "            if (opDeBinario(dados) === 4) { gw.op4Em = agora; }" +
+    "          } else if (dados && typeof dados.arrayBuffer === 'function') {" +
+    "            dados.arrayBuffer().then(function (ab) {" +
+    "              if (opDeBinario(ab) === 4) { gw.op4Em = Date.now(); }" +
+    "            }, function () { });" +
     "          }" +
     "          return enviar(dados);" +
     "        };" +
@@ -1710,6 +1745,16 @@ const GW_ZUMBI_ATIVIDADE_JANELA_MS = 90_000;
 // atividade): dispatches somam centenas de bytes inflados; o zumbi devolve so o
 // baseline de heartbeat (~bytes). Agnostico de encoding — vale para JSON ou etf.
 const GW_ZUMBI_RESPOSTA_BYTES = 256;
+// Fluxo de voz/stream (issues #159/#160/#161, beta 8): o cliente manda op 4
+// (VOICE_STATE_UPDATE — entrar em voz/stream) e o gateway saudavel responde em
+// segundos com o dispatch que faz o ws de midia (*.discord.media) abrir. Prazo
+// de espera antes de declarar o fluxo travado.
+const GW_STREAM_ESPERA_MS = 20_000;
+// O op 4 tem que ser RECENTE (foi o clique do usuario que pediu a stream).
+const GW_STREAM_JANELA_MS = 90_000;
+// Guarda de SAIDA: um ws de midia que fechou ha pouco + op 4 = o usuario SAINDO
+// de voz/stream (ou a stream acabando) — nesses casos nenhuma midia nova abre.
+const GW_STREAM_LEAVE_MS = 15_000;
 // Teto de tentativas da escada na janela.
 const GW_ZUMBI_TENTATIVAS = 2;
 // Janela de contagem das tentativas.
@@ -1744,9 +1789,21 @@ function minIdade(a, b) {
 function avaliarSinalGw(resumo, agora) {
     if (!resumo || resumo.estado !== 'aberta') return null;
     if (resumo.srvHa >= GW_SERVIDOR_SILENCIOSO_MS) return 'silente';
-    if (resumo.infladorOk !== true) return null;
     if (resumo.abertoHa < 0 || resumo.abertoHa < GW_ZUMBI_AQUECIMENTO_MS) return null;
     if (resumo.cliHa < 0 || resumo.cliHa >= GW_ZUMBI_CLIENTE_VIVO_MS) return null;
+    // CAMINHO 3 (o que pega o caso REAL da beta 8 — #159/#160/#161): o usuario
+    // PEDIU entrada em voz/stream (op 4, sniffado do binario etf ou lido do JSON)
+    // ha pouco, NENHUM ws de midia abriu desde o pedido e nao ha midia aberta —
+    // o fluxo de voz nunca comecou e a view fica em "carregando" para sempre.
+    // Nao depende de decode de dispatch nem de inflate: funciona com o servidor
+    // empurrando dados ambiente (resp_bytes alto) como nos logs da beta 8.
+    if (resumo.op4Ha >= 0 && resumo.op4Ha >= GW_STREAM_ESPERA_MS && resumo.op4Ha <= GW_STREAM_JANELA_MS &&
+        resumo.midiaAberta !== true &&
+        (resumo.midiaOpenHa < 0 || resumo.midiaOpenHa > resumo.op4Ha) &&
+        (resumo.midiaCloseHa < 0 || resumo.midiaCloseHa > GW_STREAM_LEAVE_MS)) {
+        return 'zumbi';
+    }
+    if (resumo.infladorOk !== true) return null;
     // O usuario pediu algo: op explicita (JSON) OU burst de envios (binario).
     const pediuHa = minIdade(resumo.intentHa, resumo.activityHa);
     if (pediuHa < 0 || pediuHa < GW_ZUMBI_ESPERA_MS || pediuHa > GW_ZUMBI_ATIVIDADE_JANELA_MS) return null;
@@ -1926,6 +1983,9 @@ function checarGatewaySilente() {
             " dispatches=" + resumo.dispatches +
             " intent_ha=" + idadeSeg(resumo.intentHa) +
             " activity_ha=" + idadeSeg(resumo.activityHa) +
+            " op4_ha=" + idadeSeg(resumo.op4Ha) +
+            " midia_open_ha=" + idadeSeg(resumo.midiaOpenHa) +
+            " midia_close_ha=" + idadeSeg(resumo.midiaCloseHa) +
             " aberto_ha=" + idadeSeg(resumo.abertoHa) +
             " geracao=" + resumo.geracao +
             " ops=" + JSON.stringify(resumo.opCounts || {}) +

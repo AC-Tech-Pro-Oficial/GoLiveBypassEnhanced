@@ -56,6 +56,9 @@ interface Resumo {
   dispatchHa: number;
   intentHa: number;
   activityHa: number;
+  op4Ha: number;
+  midiaOpenHa: number;
+  midiaCloseHa: number;
   abertoHa: number;
   geracao: number;
   opCounts: Record<string, number>;
@@ -107,6 +110,9 @@ function resumoBase(parcial: Partial<Resumo>): Resumo {
     dispatchHa: -1,
     intentHa: 45_000,
     activityHa: -1,
+    op4Ha: -1,
+    midiaOpenHa: -1,
+    midiaCloseHa: -1,
     abertoHa: 300_000,
     geracao: 1,
     opCounts: { "1": 8 },
@@ -126,6 +132,9 @@ function rodarAlarme(): (resumo: Resumo | null, agora: number) => string | null 
     "const GW_ZUMBI_ESPERA_MS = (" + extrairConst("GW_ZUMBI_ESPERA_MS") + ");\n" +
     "const GW_ZUMBI_ATIVIDADE_JANELA_MS = (" + extrairConst("GW_ZUMBI_ATIVIDADE_JANELA_MS") + ");\n" +
     "const GW_ZUMBI_RESPOSTA_BYTES = (" + extrairConst("GW_ZUMBI_RESPOSTA_BYTES") + ");\n" +
+    "const GW_STREAM_ESPERA_MS = (" + extrairConst("GW_STREAM_ESPERA_MS") + ");\n" +
+    "const GW_STREAM_JANELA_MS = (" + extrairConst("GW_STREAM_JANELA_MS") + ");\n" +
+    "const GW_STREAM_LEAVE_MS = (" + extrairConst("GW_STREAM_LEAVE_MS") + ");\n" +
     extrairFuncao("minIdade") + "\n" +
     extrairFuncao("avaliarSinalGw") + "\nreturn avaliarSinalGw;";
   return new Function(codigo)() as (resumo: Resumo | null, agora: number) => string | null;
@@ -229,6 +238,41 @@ describe("shim do gateway (codigo real do renderer)", () => {
     ws.emitir("message", { data: new Blob([new Uint8Array(300)]) });
     expect(app.resumo().srvBytesDesdeAtividade).toBe(300);
     expect(app.resumo().srvBytes).toBeGreaterThanOrEqual(300);
+  });
+
+  it("SNIFF de op 4 em frame BINARIO (etf): o pedido de assistir fica visivel", () => {
+    const app = rodarShim();
+    const ws = app.ws("wss://gateway.discord.gg/?v=10&encoding=etf");
+    ws.emitir("open");
+    // formato estranho (nao-etf) NUNCA vira falso op4
+    ws.send(new Uint8Array([0x83, 1, 2, 3, 4, 5, 6, 7, 8]));
+    expect(app.resumo().op4Ha).toBe(-1);
+    // etf: 131 + SMALL_TUPLE_EXT(104) + aridade + SMALL_INT(97) + op
+    ws.send(new Uint8Array([131, 104, 3, 97, 4, 109, 0, 0, 0, 5, 1, 2, 3, 4, 5]));
+    expect(app.resumo().op4Ha).toBeGreaterThanOrEqual(0);
+    // heartbeat binario (op 1) nao marca op4
+    ws.send(new Uint8Array([131, 104, 2, 97, 1]));
+    expect(app.resumo().op4Ha).toBeGreaterThanOrEqual(0); // segue do op4 anterior
+  });
+
+  it("op 4 em JSON texto tambem marca o pedido de assistir", () => {
+    const app = rodarShim();
+    const ws = app.ws("wss://gateway.discord.gg/?v=10&encoding=json");
+    ws.emitir("open");
+    ws.send('{"op":4,"d":{}}');
+    expect(app.resumo().op4Ha).toBeGreaterThanOrEqual(0);
+  });
+
+  it("timestamps de midia: open e close ficam visiveis no resumo (guardas do caminho 3)", () => {
+    const app = rodarShim();
+    const gw = app.ws("wss://gateway.discord.gg/?v=10");
+    gw.emitir("open");
+    const midia = app.ws("wss://eu-central-1.c1.discord.media/?v=1");
+    midia.emitir("open");
+    expect(app.resumo().midiaOpenHa).toBeGreaterThanOrEqual(0);
+    midia.emitir("close");
+    expect(app.resumo().midiaCloseHa).toBeGreaterThanOrEqual(0);
+    expect(app.resumo().midiaAberta).toBe(false);
   });
 
   it("contadores por geracao: o ws renascido pelo cliente reseta intencao/dispatch", () => {
@@ -450,6 +494,40 @@ describe("alarme (silente + zumbi) — campos *Ha sao IDADES, comparadas direto"
     const alarme = rodarAlarme();
     const agora = Date.now();
     expect(alarme(resumoBase({ intentHa: 45_000, activityHa: 45_000, dispatchHa: 10_000, dispatches: 3, srvBytesDesdeAtividade: 10 }), agora)).toBeNull();
+  });
+
+  it("CAMINHO 3 (o caso real da beta 8): op 4 enviado, midia nunca abriu = zumbi", () => {
+    const alarme = rodarAlarme();
+    const agora = Date.now();
+    // Servidor empurrando dados ambiente (resp_bytes alto) e inflate morto —
+    // os caminhos 1/2 nao disparam, mas o pedido de voz ficou sem fluxo de midia
+    expect(alarme(resumoBase({
+      intentHa: -1, activityHa: 45_000, op4Ha: 40_000, infladorOk: false,
+      dispatchHa: -1, srvBytesDesdeAtividade: 26931, midiaAberta: false,
+      midiaOpenHa: -1, midiaCloseHa: -1,
+    }), agora)).toBe("zumbi");
+  });
+
+  it("caminho 3 saudavel: midia abriu DEPOIS do op 4 = o fluxo funcionou", () => {
+    const alarme = rodarAlarme();
+    const agora = Date.now();
+    // op4 ha 40s, midia aberta ha 35s (5s depois do op4): saudavel
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: -1, op4Ha: 40_000, midiaAberta: true, midiaOpenHa: 35_000, midiaCloseHa: -1 }), agora)).toBeNull();
+    // midia ja fechou depois de abrir, mas abriu depois do pedido
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: -1, op4Ha: 40_000, midiaAberta: false, midiaOpenHa: 35_000, midiaCloseHa: 2_000 }), agora)).toBeNull();
+  });
+
+  it("guardas do caminho 3: saida recente (leave), op4 antigo, op4 no prazo e midia aberta", () => {
+    const alarme = rodarAlarme();
+    const agora = Date.now();
+    // midia fechou ha 5s + op4 ha 40s = usuario SAINDO (nao entrando): nao dispara
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: -1, op4Ha: 40_000, midiaAberta: false, midiaOpenHa: 90_000, midiaCloseHa: 5_000, srvBytesDesdeAtividade: 0 }), agora)).toBeNull();
+    // op4 velho (>90s): nao e mais o clique corrente
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: -1, op4Ha: 120_000, midiaAberta: false, midiaOpenHa: -1, midiaCloseHa: -1, srvBytesDesdeAtividade: 0 }), agora)).toBeNull();
+    // op4 muito recente (<20s): o fluxo de voz ainda tem prazo
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: -1, op4Ha: 5_000, midiaAberta: false, midiaOpenHa: -1, midiaCloseHa: -1, srvBytesDesdeAtividade: 0 }), agora)).toBeNull();
+    // midia aberta agora (em call): §6 — nunca automatico
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: -1, op4Ha: 40_000, midiaAberta: true, midiaOpenHa: 90_000, midiaCloseHa: -1, srvBytesDesdeAtividade: 0 }), agora)).toBeNull();
   });
 });
 
