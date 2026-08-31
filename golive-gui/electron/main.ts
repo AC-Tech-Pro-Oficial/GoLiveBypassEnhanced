@@ -607,7 +607,7 @@ if (!gotLock) {
     app.on("activate", showWindow);
     // Checa por atualizacao na release do GitHub (Windows portable: baixa e substitui;
     // Mac/Linux: autoUpdater nativo). Roda sozinho e em silencio se nao houver nada.
-    setupUpdater(() => mainWindow, () => readAutoUpdate());
+    setupUpdater(() => mainWindow, () => readAutoUpdate(), () => readUpdateChannel());
   });
 }
 
@@ -2352,6 +2352,25 @@ export function saveAutoRevive(enabled: boolean) {
   updateSharedSettings({ autoRevive: enabled });
 }
 
+// Canal de atualizacao: "stable" (padrao) ou "beta" (opt-in dos testadores —
+// recebe as prereleases publicadas; o canal estavel nunca as ve). Consumido pelo
+// updater: Windows le VIVO a cada checagem, Linux le no boot (electron-updater
+// checa uma vez por sessao).
+export function saveUpdateChannel(canal: string) {
+  updateSharedSettings({ updateChannel: canal === "beta" ? "beta" : "stable" });
+}
+
+export function readUpdateChannel(): "stable" | "beta" {
+  try {
+    const file = path.join(settingsDir(), "settings.json");
+    if (!fs.existsSync(file)) return "stable";
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return data.updateChannel === "beta" ? "beta" : "stable";
+  } catch {
+    return "stable";
+  }
+}
+
 export function readAutoRevive(): boolean {
   try {
     const file = path.join(settingsDir(), "settings.json");
@@ -2379,6 +2398,13 @@ ipcMain.handle("get-auto-revive", () => readAutoRevive());
 ipcMain.handle("set-auto-revive", (_event, enabled: unknown) => {
   saveAutoRevive(enabled !== false);
   updateInjectedAutoRevive(enabled !== false);
+});
+
+// IPC do canal de atualizacao (stable | beta). Nao vai para o asar injetado: e
+// preferencia do updater da GUI, o bypass injetado nao lê isso.
+ipcMain.handle("get-update-channel", () => readUpdateChannel());
+ipcMain.handle("set-update-channel", (_event, canal: unknown) => {
+  saveUpdateChannel(typeof canal === "string" ? canal : "stable");
 });
 
 // IPC do modo de rede + Tor embutido.

@@ -7,6 +7,36 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Canal beta: opt-in de testes na GUI + auto-update que distingue stable/beta**
+  (beta 7): betas agora podem ser publicadas no GitHub como **prerelease** — e a
+  garantia da regra §9 fica **estrutural**: `/releases/latest` nunca devolve
+  prerelease, então o usuário do canal estável nem fica sabendo que a beta existe
+  (o acidente da beta.3, que virou "latest" e disparou update em massa, ficou
+  impossível de repetir). Quem quiser testar liga **"Participar dos testes (canal
+  beta)"** nas configurações (settings `updateChannel`, default `stable`):
+  - **Windows** (updater próprio): a checagem de 4h passa a varrer
+    `/releases?per_page=20` e escolher a candidata de **maior versão** com exe
+    anexado (estáveis + prereleases) via `updater-channel.ts` — semver de verdade
+    com regra de prerelease, leitura VIVA do canal a cada checagem (toggle vale
+    sem reiniciar), e o diálogo marca "(beta)". A comparação antiga por string
+    (`latest !== current`) morreu junto: ela ofereceria **downgrade** de
+    `1.1.12-beta.7` para `1.1.12` a quem ficasse no canal estável.
+  - **Linux** (AppImage/electron-updater): canal beta nativo —
+    `autoUpdater.allowPrerelease` lê o `beta.yml` que o electron-builder publica
+    sozinho para versão com prerelease. Lido no boot (o electron-updater checa
+    uma vez por sessão; o toggle vale no próximo reinício).
+  - **macOS**: fora (updater desabilitado por falta de assinatura; o toggle nem
+    aparece lá).
+  - **Publicação:** tag (ex.: `v1.1.12-beta.7`) + `workflow_dispatch` do
+    `build-gui.yml` com `canal=beta` — jobs de windows/linux publicam com
+    `-c.publish.releaseType=prerelease` (linux gera o `beta.yml` sozinho), mac e
+    assets do plugin/CLI pulam (um `goLiveBypass-vencord.zip` beta numa
+    prerelease poderia ser pego pelo updater do plugin), e o job `beta-marcar`
+    reforça `gh release edit --prerelease` e escreve a linha "**Canal: beta**" na
+    nota. Desligar o toggle devolve ao estável na próxima release, sem downgrade
+    (`1.1.12` stable > `1.1.12-beta.7` pelo semver). Testes:
+    `tests/updater-channel.test.ts` (semver, escolha por canal, sem downgrade e
+    wiring do updater/workflow).
 - **Revive automático do gateway zumbi: detecção de dispatch starve + close 4000**
   ([#153](https://github.com/bezumiya/GoLiveBypass/issues/153), beta 6): o log da
   #153 trouxe o ground truth que faltava — durante o loading infinito o probe da

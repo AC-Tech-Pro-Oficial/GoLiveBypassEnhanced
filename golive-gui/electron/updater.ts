@@ -1,11 +1,16 @@
 // Atualizacao automatica via GitHub Releases — sem servidor proprio.
 //
 // Windows: o target e portable, e o electron-updater nao suporta portable (so NSIS).
-// Entao o update do Windows e proprio: consulta a release mais recente na API do
-// GitHub, baixa o exe novo, substitui o atual (via PORTABLE_EXECUTABLE_FILE, a
-// variavel que o electron-builder portable define) e reabre a versao nova.
+// Entao o update do Windows e proprio: consulta as releases na API do GitHub (canal
+// estavel so ve releases "de verdade"; o canal beta dos testadores inclui as
+// prereleases — regra de escolha no updater-channel.ts), baixa o exe novo,
+// substitui o atual (via PORTABLE_EXECUTABLE_FILE, a variavel que o electron-builder
+// portable define) e reabre a versao nova.
 //
 // Mac e Linux: o autoUpdater do electron-updater cuida (dmg/zip assinado e AppImage).
+// O canal beta do Linux e nativo do electron-updater: allowPrerelease faz ele ler o
+// canal beta.yml — que o electron-builder publica sozinho para versao com sufixo
+// de prerelease — em vez do latest.yml.
 
 import { app, dialog, BrowserWindow } from "electron";
 import { createWriteStream, readFileSync } from "fs";
@@ -17,6 +22,7 @@ import { spawn } from "child_process";
 import { autoUpdater } from "electron-updater";
 import { request } from "https";
 import { attemptReplace, cleanupOldExe, OLD_SUFFIX, spawnWindowsUpdateHelper } from "./updater-replace";
+import { escolherRelease, type Canal, type ReleaseCandidata } from "./updater-channel";
 
 const REPO = "bezumiya/GoLiveBypass";
 // O artifactName leva a versao (GoLiveBypass-1.1.5.exe): o AppImageLauncher e
@@ -32,46 +38,59 @@ let updateReady = false;
 
 // ------------------------------------------------------------------ GitHub API
 
-function githubLatestRelease(): Promise<{ tag: string; url: string; digest: string | null } | null> {
+// Lista as releases recentes (20 dao e sobram: a escolha e por VERSAO, nao por
+// ordem). A API publica nao devolve drafts; devolve prereleases — que o canal
+// estavel filtra e o canal beta consome (regras no updater-channel.ts).
+function githubReleases(): Promise<ReleaseCandidata[]> {
   return new Promise((resolve) => {
     const req = request(
       {
         host: "api.github.com",
-        path: `/repos/${REPO}/releases/latest`,
+        path: `/repos/${REPO}/releases?per_page=20`,
         method: "GET",
         headers: { "User-Agent": "GoLiveBypass", Accept: "application/vnd.github+json" },
       },
       (res) => {
         if (res.statusCode !== 200) {
           res.resume();
-          return resolve(null);
+          return resolve([]);
         }
         let body = "";
         res.setEncoding("utf8");
         res.on("data", (c) => {
           body += c;
-          if (body.length > 1_000_000) req.destroy();
+          if (body.length > 2_000_000) req.destroy();
         });
         res.on("end", () => {
           try {
-            const data = JSON.parse(body);
-            const asset = (data.assets || []).find(
-              (a: { name: string }) =>
-                a.name.startsWith(EXE_PREFIX) && a.name.endsWith(".exe"),
-            );
-            if (!asset || !asset.browser_download_url) return resolve(null);
-            resolve({
-              tag: String(data.tag_name),
-              url: asset.browser_download_url,
-              digest: typeof asset.digest === "string" ? asset.digest : null,
-            });
+            const data = JSON.parse(body) as Array<Record<string, unknown>>;
+            const releases: ReleaseCandidata[] = [];
+            for (const item of data) {
+              if (item.draft === true) continue;
+              const assets = (item.assets || []) as Array<{
+                name: string;
+                browser_download_url?: string;
+                digest?: string;
+              }>;
+              const asset = assets.find(
+                (a) => a.name.startsWith(EXE_PREFIX) && a.name.endsWith(".exe"),
+              );
+              if (!asset || !asset.browser_download_url) continue;
+              releases.push({
+                tag: String(item.tag_name),
+                url: asset.browser_download_url,
+                digest: typeof asset.digest === "string" ? asset.digest : null,
+                prerelease: item.prerelease === true,
+              });
+            }
+            resolve(releases);
           } catch {
-            resolve(null);
+            resolve([]);
           }
         });
       },
     );
-    req.on("error", () => resolve(null));
+    req.on("error", () => resolve([]));
     req.setTimeout(15_000, () => req.destroy());
     req.end();
   });
@@ -229,6 +248,7 @@ export function isQuittingForUpdate() {
 export function setupUpdater(
   getMainWindow: () => BrowserWindow | null,
   isAutoUpdateEnabled: () => boolean = () => true,
+  canalAtual: () => Canal = () => "stable",
 ) {
   // Dev (npm run dev): o app roda fora do pacote, sem o app-update.yml embutido.
   // O electron-updater usa o dev-app-update.yml na raiz do projeto + esta flag.
@@ -256,6 +276,14 @@ export function setupUpdater(
   if (process.platform !== "win32") {
     autoUpdater.autoDownload = true;
     autoUpdater.logger = console;
+
+    // Canal beta (Linux): allowPrerelease faz o electron-updater ler o canal
+    // beta.yml — que o electron-builder publica sozinho para versao com sufixo
+    // de prerelease — em vez do latest.yml. Lido no boot: o electron-updater
+    // checa uma vez por sessao, entao o toggle vale no proximo reinicio do app.
+    // Desligar nao faz downgrade: a stable mais nova substitui a beta pelo
+    // semver do proprio electron-updater (1.1.12 > 1.1.12-beta.7).
+    autoUpdater.allowPrerelease = canalAtual() === "beta";
 
     // O download corre sozinho em background; ao terminar, avisa o usuario e
     // so instala com o OK dele — atualizar sem avisar derruba o app na hora.
@@ -296,13 +324,16 @@ export function setupUpdater(
   // hora de apagar (no momento da troca ele ainda estava em execucao).
   const atual = portableExePath();
   if (atual !== null) cleanupOldExe(atual);
-  setInterval(() => void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled), CHECK_INTERVAL_MS);
-  void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled);
+  // O canal vai como GETTER: a checagem de 4h le o valor VIVO — ligar o canal beta
+  // vale na proxima checagem, sem reiniciar o app.
+  setInterval(() => void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled, canalAtual), CHECK_INTERVAL_MS);
+  void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled, canalAtual);
 }
 
 export async function checkWindowsUpdate(
   getMainWindow: () => BrowserWindow | null,
   isAutoUpdateEnabled: () => boolean = () => true,
+  canalAtual: () => Canal = () => "stable",
 ) {
   if (checking || updateReady) return;
   if (!isAutoUpdateEnabled()) return;
@@ -311,21 +342,21 @@ export async function checkWindowsUpdate(
   lastCheckAt = Date.now();
 
   try {
-    const release = await githubLatestRelease();
-    if (release === null) return;
+    const releases = await githubReleases();
+    const escolhida = escolherRelease(releases, app.getVersion(), canalAtual());
+    if (escolhida === null) return;
 
-    const current = app.getVersion();
-    const latest = release.tag.replace(/^v/, "");
-    const isNewer = latest !== current;
-    if (!isNewer) return;
-
+    const latest = escolhida.tag.replace(/^v/, "");
+    const ehBeta = escolhida.prerelease;
     const win = getMainWindow();
     const choice = win
       ? dialog.showMessageBoxSync(win, {
           type: "info",
           title: "Atualização disponível",
-          message: `GoLiveBypass ${latest} está disponível.`,
-          detail: "Baixar e instalar agora? O app reabre sozinho ao terminar.",
+          message: `GoLiveBypass ${latest}${ehBeta ? " (beta)" : ""} está disponível.`,
+          detail: ehBeta
+            ? "Versão de teste do canal beta. Baixar e instalar agora? O app reabre sozinho ao terminar."
+            : "Baixar e instalar agora? O app reabre sozinho ao terminar.",
           buttons: ["Atualizar agora", "Depois"],
           defaultId: 0,
           cancelId: 1,
@@ -334,7 +365,7 @@ export async function checkWindowsUpdate(
 
     if (choice !== 0) return;
 
-    const ok = await updateWindowsPortable(release.url, release.digest);
+    const ok = await updateWindowsPortable(escolhida.url, escolhida.digest);
     if (ok) {
       updateReady = true;
       app.quit();

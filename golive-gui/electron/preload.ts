@@ -15,6 +15,8 @@ import { ipcRenderer } from 'electron';
   setAutoUpdate: (enabled: boolean) => ipcRenderer.invoke('set-auto-update', enabled),
   getAutoRevive: () => ipcRenderer.invoke('get-auto-revive'),
   setAutoRevive: (enabled: boolean) => ipcRenderer.invoke('set-auto-revive', enabled),
+  getUpdateChannel: () => ipcRenderer.invoke('get-update-channel'),
+  setUpdateChannel: (canal: string) => ipcRenderer.invoke('set-update-channel', canal),
   getNetMode: () => ipcRenderer.invoke('get-net-mode'),
   setNetMode: (mode: string) => ipcRenderer.invoke('set-net-mode', mode),
   getTorStatus: () => ipcRenderer.invoke('get-tor-status'),
