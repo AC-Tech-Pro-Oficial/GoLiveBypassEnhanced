@@ -119,15 +119,17 @@ function carregarSandbox(settingsExtras) {
 function resumoZumbi(extras) {
   return Object.assign({
     estado: "aberta", srvHa: 1000, cliHa: 5000, subs: 0, srvFrames: 600,
-    dispatches: 0, dispatchHa: -1, intentHa: 45000, abertoHa: 300000,
-    geracao: 1, opCounts: { "1": 8 }, midiaAberta: false, infladorOk: true,
+    dispatches: 0, dispatchHa: -1, intentHa: 45000, activityHa: 45000,
+    abertoHa: 300000, geracao: 1, opCounts: { "1": 8 }, midiaAberta: false,
+    infladorOk: true, srvBytes: 600, srvBytesDesdeAtividade: 100,
   }, extras || {});
 }
 
 const RESUMO_SAUDAVEL = {
   estado: "aberta", srvHa: 1000, cliHa: 5000, subs: 2, srvFrames: 800,
-  dispatches: 50, dispatchHa: 3000, intentHa: 45000, abertoHa: 300000,
-  geracao: 1, opCounts: { "1": 8, "14": 2 }, midiaAberta: false, infladorOk: true,
+  dispatches: 50, dispatchHa: 3000, intentHa: 45000, activityHa: 45000,
+  abertoHa: 300000, geracao: 1, opCounts: { "1": 8, "14": 2 }, midiaAberta: false,
+  infladorOk: true, srvBytes: 9000, srvBytesDesdeAtividade: 4000,
 };
 
 function resetarEstadoZumbi(app) {
@@ -272,8 +274,9 @@ async function testWsNaoRenasceuAutoCura() {
   `);
   app.setResumo({
     estado: "fechada", srvHa: -1, cliHa: -1, subs: 0, srvFrames: 0,
-    dispatches: 0, dispatchHa: -1, intentHa: -1, abertoHa: -1,
+    dispatches: 0, dispatchHa: -1, intentHa: -1, activityHa: -1, abertoHa: -1,
     geracao: 1, opCounts: {}, midiaAberta: false, infladorOk: false,
+    srvBytes: 0, srvBytesDesdeAtividade: 0,
   });
   await poll(app);
   if (app.contadores.reload === 1) ok("ws nao renasceu apos o close (20s): auto-cura sobe direto pro reload");

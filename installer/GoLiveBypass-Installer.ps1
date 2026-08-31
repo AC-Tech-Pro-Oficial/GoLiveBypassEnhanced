@@ -85,6 +85,20 @@ function Write-Ok($text) { Write-Host "  [OK] $text" -ForegroundColor Green }
 function Write-Warn($text) { Write-Host "  [!] $text" -ForegroundColor Yellow }
 function Write-Err($text) { Write-Host "  [X] $text" -ForegroundColor Red }
 
+# Apaga arquivo/pasta SEM passar pelo provider do PowerShell: Remove-Item
+# -LiteralPath explode com PSArgumentException ("Nao existe um objeto no caminho
+# especificado C:\Users\JOO~1...") em caminhos com nome curto 8.3 — o provider
+# normaliza o caminho mesmo com -LiteralPath, e -ErrorAction SilentlyContinue nao
+# segura essa (issue #155). O .NET apaga direto.
+function Remove-CaminhoSilencioso($caminho) {
+    if (-not $caminho) { return }
+    try {
+        $cheio = [System.IO.Path]::GetFullPath($caminho)
+        if ([System.IO.File]::Exists($cheio)) { [System.IO.File]::Delete($cheio); return }
+        if ([System.IO.Directory]::Exists($cheio)) { [System.IO.Directory]::Delete($cheio, $true) }
+    } catch { }
+}
+
 function Show-Banner {
     Write-Host ''
     Write-Host '  GoLiveBypass' -ForegroundColor Cyan
@@ -1423,7 +1437,7 @@ function Install-Tor {
         Write-Step 'Conferindo SHA-256'
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
         if ($hash -ne $asset.Sha256.ToLower()) {
-            Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+            Remove-CaminhoSilencioso $archive
             Write-Warn 'O download do Tor veio corrompido (SHA-256 diferente). Abortando.'
             return $false
         }
@@ -1436,7 +1450,7 @@ function Install-Tor {
             Write-Warn 'Falha ao extrair o bundle do Tor.'
             return $false
         }
-        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+        Remove-CaminhoSilencioso $archive
     }
 
     if (-not (Test-Path -LiteralPath $exe)) {
@@ -1920,7 +1934,7 @@ function Invoke-UpdateFromZip($root, $zipUrl, $expectedVersion) {
     try {
         Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing -TimeoutSec 60
     } catch {
-        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-CaminhoSilencioso $tempDir
         throw "Download do zip falhou: $($_.Exception.Message)"
     }
 
@@ -1931,12 +1945,12 @@ function Invoke-UpdateFromZip($root, $zipUrl, $expectedVersion) {
         $shaContent = (Invoke-WebRequest -Uri $shaUrl -UseBasicParsing -TimeoutSec 15).Content.Trim()
         $shaExpected = ($shaContent -split '\s+')[0].ToLower()
     } catch {
-        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-CaminhoSilencioso $tempDir
         throw "Release sem arquivo .sha256 (asset companion). Sem hash, sem update."
     }
     $shaActual = (Get-FileHash -LiteralPath $zipFile -Algorithm SHA256).Hash.ToLower()
     if ($shaActual -ne $shaExpected) {
-        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-CaminhoSilencioso $tempDir
         throw "SHA-256 nao confere: esperado $shaExpected, obtido $shaActual."
     }
     Write-Ok 'SHA-256 confere'
@@ -1947,7 +1961,7 @@ function Invoke-UpdateFromZip($root, $zipUrl, $expectedVersion) {
     try {
         Expand-Archive -LiteralPath $zipFile -DestinationPath $extractDir -Force
     } catch {
-        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-CaminhoSilencioso $tempDir
         throw "Extracao falhou: $($_.Exception.Message)"
     }
 
@@ -1958,14 +1972,14 @@ function Invoke-UpdateFromZip($root, $zipUrl, $expectedVersion) {
     # O zip tem a pasta raiz goLiveBypass/; copia o conteudo
     $extracted = Get-ChildItem -LiteralPath $extractDir -Directory | Select-Object -First 1
     if (-not $extracted) {
-        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-CaminhoSilencioso $tempDir
         throw 'Zip nao tem a pasta esperada (goLiveBypass/).'
     }
     Get-ChildItem -LiteralPath $extracted.FullName -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $target -Recurse -Force
     }
 
-    Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-CaminhoSilencioso $tempDir
     Write-Ok 'Plugin extraido'
 }
 

@@ -55,9 +55,12 @@ interface Resumo {
   dispatches: number;
   dispatchHa: number;
   intentHa: number;
+  activityHa: number;
   abertoHa: number;
   geracao: number;
   opCounts: Record<string, number>;
+  srvBytes: number;
+  srvBytesDesdeAtividade: number;
   midiaAberta: boolean;
   infladorOk: boolean;
 }
@@ -103,9 +106,12 @@ function resumoBase(parcial: Partial<Resumo>): Resumo {
     dispatches: 0,
     dispatchHa: -1,
     intentHa: 45_000,
+    activityHa: -1,
     abertoHa: 300_000,
     geracao: 1,
     opCounts: { "1": 8 },
+    srvBytes: 5000,
+    srvBytesDesdeAtividade: 100,
     midiaAberta: false,
     infladorOk: true,
     ...parcial,
@@ -118,6 +124,9 @@ function rodarAlarme(): (resumo: Resumo | null, agora: number) => string | null 
     "const GW_ZUMBI_AQUECIMENTO_MS = (" + extrairConst("GW_ZUMBI_AQUECIMENTO_MS") + ");\n" +
     "const GW_ZUMBI_CLIENTE_VIVO_MS = (" + extrairConst("GW_ZUMBI_CLIENTE_VIVO_MS") + ");\n" +
     "const GW_ZUMBI_ESPERA_MS = (" + extrairConst("GW_ZUMBI_ESPERA_MS") + ");\n" +
+    "const GW_ZUMBI_ATIVIDADE_JANELA_MS = (" + extrairConst("GW_ZUMBI_ATIVIDADE_JANELA_MS") + ");\n" +
+    "const GW_ZUMBI_RESPOSTA_BYTES = (" + extrairConst("GW_ZUMBI_RESPOSTA_BYTES") + ");\n" +
+    extrairFuncao("minIdade") + "\n" +
     extrairFuncao("avaliarSinalGw") + "\nreturn avaliarSinalGw;";
   return new Function(codigo)() as (resumo: Resumo | null, agora: number) => string | null;
 }
@@ -172,6 +181,54 @@ describe("shim do gateway (codigo real do renderer)", () => {
     const r = app.resumo();
     expect(r.opCounts).toEqual({ "1": 2, "14": 1, "37": 1 });
     expect(r.subs).toBe(2);
+  });
+
+  it("atividade por BURST: 3 envios BINARIOS em 30s marcam atividade (agnostico de protocolo)", () => {
+    const app = rodarShim();
+    const ws = app.ws("wss://gateway.discord.gg/?v=10&encoding=etf");
+    ws.emitir("open");
+    ws.send(new Blob([new Uint8Array([1])]));
+    ws.send(new Blob([new Uint8Array([2])]));
+    ws.send(new Blob([new Uint8Array([3])]));
+    const r = app.resumo();
+    expect(r.activityHa).toBeGreaterThanOrEqual(0); // burst binario = atividade
+    expect(r.opCounts).toEqual({});                 // etf: sem decode de ops (a #156 provou)
+    expect(r.srvBytesDesdeAtividade).toBe(0);       // relogio do volume zerou
+  });
+
+  it("heartbeat sozinho NAO e atividade (2 envios a 41s e cadencia, nao burst)", () => {
+    const app = rodarShim();
+    const ws = app.ws("wss://gateway.discord.gg/?v=10");
+    ws.emitir("open");
+    ws.send('{"op":1,"d":1}');
+    vi.advanceTimersByTime(41_000);
+    ws.send('{"op":1,"d":2}');
+    expect(app.resumo().activityHa).toBe(-1);
+  });
+
+  it("frames de TEXTO (encoding=json) contam dispatch sem inflate", () => {
+    const app = rodarShim();
+    const ws = app.ws("wss://gateway.discord.gg/?v=10&encoding=json");
+    ws.emitir("open");
+    ws.emitir("message", { data: JSON.stringify({ t: null, s: 1, op: 10, d: {} }) });
+    ws.emitir("message", { data: JSON.stringify({ t: "MESSAGE_CREATE", s: 2, op: 0, d: { id: "x" } }) });
+    const r = app.resumo();
+    expect(r.dispatches).toBe(1);
+    expect(r.dispatchHa).toBeGreaterThanOrEqual(0);
+    expect(r.srvFrames).toBe(2);
+    expect(r.srvBytes).toBeGreaterThan(0);
+  });
+
+  it("volume de resposta: bytes do servidor acumulam desde a ultima atividade", () => {
+    const app = rodarShim();
+    const ws = app.ws("wss://gateway.discord.gg/?v=10");
+    ws.emitir("open");
+    ws.send(new Blob([new Uint8Array([1])]));
+    ws.send(new Blob([new Uint8Array([2])]));
+    ws.send(new Blob([new Uint8Array([3])]));
+    ws.emitir("message", { data: new Blob([new Uint8Array(300)]) });
+    expect(app.resumo().srvBytesDesdeAtividade).toBe(300);
+    expect(app.resumo().srvBytes).toBeGreaterThanOrEqual(300);
   });
 
   it("contadores por geracao: o ws renascido pelo cliente reseta intencao/dispatch", () => {
@@ -284,17 +341,26 @@ describe("shim: decompress do servidor (o dispatch e o dado que o zumbi nao entr
     expect(r.dispatchHa).toBeGreaterThanOrEqual(0);
   });
 
-  it("inflador quebrado (lixo no lugar de zlib) degrada para frames crus: infladorOk false", async () => {
+  it("inflador RESINCRONIZA apos lixo (a #156 morria para sempre)", async () => {
     vi.useRealTimers();
     const app = rodarShim();
     const ws = app.ws("wss://gateway.discord.gg/?v=10&encoding=zlib-stream");
     ws.emitir("open");
-    ws.emitir("message", { data: new Blob([new TextEncoder().encode("isto nao e um fluxo zlib")]) });
+    const chunks1 = await comprimirPayloads([JSON.stringify({ t: "READY", s: 1, op: 0, d: {} })]);
+    for (const c of chunks1) ws.emitir("message", { data: new Blob([c]) });
+    await new Promise(r => setTimeout(r, 20));
+    expect(app.resumo().dispatches).toBe(1);
+    // lixo que quebra o fluxo zlib
+    ws.emitir("message", { data: new Blob([new TextEncoder().encode("lixo que quebra o fluxo")]) });
+    await new Promise(r => setTimeout(r, 20));
+    // payload novo num stream proprio: o resync segura e o dispatch conta de novo
+    const chunks2 = await comprimirPayloads([JSON.stringify({ t: "MESSAGE_CREATE", s: 2, op: 0, d: {} })]);
+    for (const c of chunks2) ws.emitir("message", { data: new Blob([c]) });
     await new Promise(r => setTimeout(r, 20));
     const r = app.resumo();
-    expect(r.infladorOk).toBe(false);
-    expect(r.dispatches).toBe(0);
-    expect(r.srvFrames).toBe(1); // o frame cru continuou contado
+    expect(r.infladorOk).toBe(true);
+    expect(r.dispatches).toBe(2);
+    expect(r.srvFrames).toBeGreaterThanOrEqual(3); // 2 payloads + o lixo, cada chunk e um frame
   });
 
   it("sem DecompressionStream no renderer: infladorOk false e o resto segue contando", () => {
@@ -358,6 +424,32 @@ describe("alarme (silente + zumbi) — campos *Ha sao IDADES, comparadas direto"
     expect(alarme(resumoBase({ intentHa: 10_000 }), agora)).toBeNull();       // pedido muito recente
     expect(alarme(resumoBase({ intentHa: -1 }), agora)).toBeNull();           // cliente nao pediu nada
     expect(alarme(resumoBase({ infladorOk: false }), agora)).toBeNull();      // sem decompress: indistinguivel
+  });
+
+  it("zumbi pelo VOLUME (mundo binario/etf): burst do usuario sem resposta = zumbi", () => {
+    const alarme = rodarAlarme();
+    const agora = Date.now();
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: 45_000, srvBytesDesdeAtividade: 100 }), agora)).toBe("zumbi");
+  });
+
+  it("volume saudavel (o servidor respondeu de verdade ao pedido) nao e zumbi", () => {
+    const alarme = rodarAlarme();
+    const agora = Date.now();
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: 45_000, srvBytesDesdeAtividade: 4096 }), agora)).toBeNull();
+  });
+
+  it("guardas do volume: sem burst, burst velho (>90s) ou ainda no prazo (<30s)", () => {
+    const alarme = rodarAlarme();
+    const agora = Date.now();
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: -1 }), agora)).toBeNull();
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: 120_000, srvBytesDesdeAtividade: 0 }), agora)).toBeNull();
+    expect(alarme(resumoBase({ intentHa: -1, activityHa: 5_000 }), agora)).toBeNull();
+  });
+
+  it("mundo JSON com dispatch depois do pedido: saudavel mesmo com bytes baixos", () => {
+    const alarme = rodarAlarme();
+    const agora = Date.now();
+    expect(alarme(resumoBase({ intentHa: 45_000, activityHa: 45_000, dispatchHa: 10_000, dispatches: 3, srvBytesDesdeAtividade: 10 }), agora)).toBeNull();
   });
 });
 
@@ -428,6 +520,12 @@ describe("pill de recuperacao + wiring no script", () => {
     expect(src).toContain("function decidirRevive");
     expect(src).toContain("revivePendenteEm");
     expect(src).toContain("autoRevive");
+    // shim v3: agnostico de protocolo (issues #154/#156/#158)
+    expect(src).toContain("registrarEnvio");
+    expect(src).toContain("srvBytesDesdeAtividade");
+    // vigia diagnostica o silencio e reinjeta o shim quando o CDP falha (#154)
+    expect(src).toContain("estado=sem-shim");
+    expect(src).toContain("gw.shim | o shim do CDP nao anexou neste documento");
     // o detector de bytes da beta.3 foi removido de verdade
     expect(src).not.toContain("marcarSinalGateway");
     expect(src).not.toContain("gwUltimoSinalEm");

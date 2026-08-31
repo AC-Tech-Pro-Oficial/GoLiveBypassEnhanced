@@ -7,6 +7,40 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [1.1.12] - Unreleased
 
 ### Adicionado
+- **Shim v3: reviver do zumbi que funciona de verdade no Discord atual** (beta 8,
+  retorno da beta 6 nas issues [#154](https://github.com/bezumiya/GoLiveBypass/issues/154),
+  [#156](https://github.com/bezumiya/GoLiveBypass/issues/156) e
+  [#158](https://github.com/bezumiya/GoLiveBypass/issues/158)): a beta 6 provou
+  com logs que a cura automática do carregamento infinito era **no-op na
+  produção** — `revives=0` para sempre. O cliente atual do Discord manda frames
+  **binários** (etf): `JSON.parse` falhava em todo send (histograma vazio,
+  `ops={}` com `cli_ha=1s`), o intent nunca era registrado, e o inflador zlib
+  morria na primeira adversidade (`"sem decompress"` em toda a sessão da #156) —
+  sem decode de cliente E de servidor, nenhuma assinatura de zumbi disparava. O
+  shim v3 não depende mais de decodificar o payload:
+  - **Atividade por burst** (agnóstico de encoding): 3+ envios em 30s = usuário
+    pedindo algo — heartbeat vem a cada ~41s, então 2 heartbeats + presença solta
+    nunca fecham o burst; funciona com JSON ou binário.
+  - **Inflador que resincroniza** em vez de morrer: até 3 resyncs por geração
+    (cobre dessincronia de fluxo contínuo E payload por stream), texto direto
+    (`encoding=json`) é processado sem inflate, e lixo não acumula eterno.
+  - **Detecção por volume**: servidor saudável responde ao pedido com centenas de
+    bytes; o zumbi devolve só o baseline de heartbeat — sinal que independe de
+    saber o encoding (`dispatch starve` continua valendo no mundo JSON).
+- **Probe que nunca mais silencia** (beta 8, [#154](https://github.com/bezumiya/GoLiveBypass/issues/154)):
+  a sessão inteira da #154 passou sem NENHUMA linha de probe — o shim do CDP não
+  anexou numa das janelas e o resumo ausente era engolido. Agora: o vigia polla
+  TODAS as janelas do cliente (escolhe a que tem gateway), loga
+  `estado=sem-shim` quando ninguém responde, e o `did-finish-load` reinjeta o
+  shim (self-guardado) quando o CDP não anexou.
+- **Instalador standalone sobrevive a caminhos 8.3** (beta 8,
+  [#155](https://github.com/bezumiya/GoLiveBypass/issues/155)):
+  `Remove-Item -LiteralPath` explode com `PSArgumentException` ("Não existe um
+  objeto no caminho especificado C:\Users\JOO~1...") em usuário com nome curto
+  8.3 no perfil — o provider normaliza o caminho mesmo com `-LiteralPath`, e
+  `-ErrorAction SilentlyContinue` não segura essa. As limpezas de arquivo/temp
+  (download do Tor, zips de update) agora vão por `Remove-CaminhoSilencioso`
+  (.NET direto, sem provider).
 - **Canal beta: opt-in de testes na GUI + auto-update que distingue stable/beta**
   (beta 7): betas agora podem ser publicadas no GitHub como **prerelease** — e a
   garantia da regra §9 fica **estrutural**: `/releases/latest` nunca devolve

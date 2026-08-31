@@ -1197,12 +1197,23 @@ function settleExit(proxy) {
 // ------------------------------------------------------------------ recarga pos-gateway-direto
 
 function clientWindow() {
+    const janelas = janelasCliente();
+    return janelas.length > 0 ? janelas[0] : null;
+}
+
+// TODAS as janelas do cliente (a #154 passou 3 minutos sem probe: o poll pode
+// cair numa janela sem o shim enquanto a janela viva tem outro webContents).
+function janelasCliente() {
+    const achadas = [];
     for (const win of require("electron").BrowserWindow.getAllWindows()) {
         if (win.isDestroyed()) continue;
-        const url = win.webContents.getURL();
-        if (CLIENT_URL_RE.test(url)) return win;
+        try {
+            if (CLIENT_URL_RE.test(win.webContents.getURL())) achadas.push(win);
+        } catch {
+            // janela morrendo
+        }
     }
-    return null;
+    return achadas;
 }
 
 // Reservas vivas no pool (excluindo a ativa). A recarga depende disto: renascer o gateway
@@ -1419,9 +1430,23 @@ function agendarEstat() {
 
 // Shim do renderer: roda ANTES do bundle do Discord (CDP
 // addScriptToEvaluateOnNewDocument, unico ponto sem corrida), no main world.
-// Envolve o WebSocket para: (a) contar frames do gateway — cliente em JSON
-// texto, servidor comprimido em contagem/cadencia; (b) rastrear websockets de
-// midia abertos (o pill usa para se esconder em call/transmissao).
+// Envolve o WebSocket para: (a) contar frames/bytes dos dois lados; (b) detectar
+// ATIVIDADE do cliente e dispatch do servidor; (c) rastrear websockets de midia
+// abertos (o pill usa para se esconder em call/transmissao).
+//
+// AGNOSTICO DE PROTOCOLO (issues #154/#156/#158, beta 6): o cliente atual do
+// Discord manda frames BINARIOS (etf) — JSON.parse falha em todo send, o
+// histograma de ops fica vazio (ops={} com cli_ha=1s no log da #156) e o
+// inflador zlib quebrava para sempre ("sem decompress" em toda sessao), o que
+// deixava a cura automatica como no-op (revives=0 no carregamento infinito).
+// Entao o shim v3 nao depende mais de decodificar o payload:
+// - atividade = BURST de envios (3+ em 30s) — heartbeat vem a cada ~41s, entao
+//   burst so acontece com o usuario pedindo algo; funciona em JSON ou binario;
+// - inflador RESINCRONIZA ate 3x por geracao em vez de morrer, e texto direto
+//   (encoding=json) e processado sem inflate;
+// - VOLUME de resposta: servidor saudavel responde ao pedido com centenas de
+//   bytes; o zumbi devolve so o baseline de heartbeat (bytes) — sinal que nao
+//   depende de saber o encoding do payload.
 const SHIM_GATEWAY_SRC = "(function(){" +
     "  if (window.__goliveGwShim) return;" +
     "  window.__goliveGwShim = true;" +
@@ -1429,8 +1454,13 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "  var geracao = 0;" +
     "  var opCounts = {};" +
     "  var gw = { estado: 'nenhum', srvEm: 0, cliEm: 0, op1Em: 0, subs: 0, srvFrames: 0," +
-    "    dispatches: 0, dispatchEm: 0, intentEm: 0, abertoEm: 0, ws: null };" +
+    "    dispatches: 0, dispatchEm: 0, intentEm: 0, abertoEm: 0, ws: null," +
+    "    activityEm: 0, srvBytes: 0, srvBytesDesdeAtividade: 0 };" +
     "  var inflador = null;" +
+    "  var infladorToken = 0;" +
+    "  var infladorResyncs = 0;" +
+    "  var cliEnvios = [];" +
+    "  var textoPendente = '';" +
     "  window.__goliveGwResumo = function () {" +
     "    var agora = Date.now();" +
     "    return { estado: gw.estado," +
@@ -1440,11 +1470,14 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "      dispatches: gw.dispatches," +
     "      dispatchHa: gw.dispatchEm ? agora - gw.dispatchEm : -1," +
     "      intentHa: gw.intentEm ? agora - gw.intentEm : -1," +
+    "      activityHa: gw.activityEm ? agora - gw.activityEm : -1," +
     "      abertoHa: gw.abertoEm ? agora - gw.abertoEm : -1," +
     "      geracao: geracao," +
     "      opCounts: opCounts," +
+    "      srvBytes: gw.srvBytes," +
+    "      srvBytesDesdeAtividade: gw.srvBytesDesdeAtividade," +
     "      midiaAberta: midia.size > 0," +
-    "      infladorOk: !!inflador && !inflador.quebrado };" +
+    "      infladorOk: !!inflador };" +
     "  };" +
     "  window.__goliveMidiaAberta = function () { return midia.size > 0; };" +
     "  window.__goliveGwFechar = function () {" +
@@ -1452,13 +1485,23 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "    if (!ws || ws.readyState !== 1) return false;" +
     "    try { ws.close(4000, 'golive-revive'); return true; } catch (e) { return false; }" +
     "  };" +
-    // O servidor chega como UM fluxo zlib continuo (encoding=zlib-stream): um
-    // DecompressionStream por geracao de ws, cada mensagem e um bloco escrito no
-    // stream. O texto decodificado e fatiado em payloads (contador de chaves
-    // respeitando strings); op 0 (dispatch) e o UNICO dado de aplicacao — a verdade
-    // que distingue protocolo vivo de zumbi (issues #145/#149/#153).
-    "  function consumirTexto() {" +
-    "    var s = inflador.texto;" +
+    // ATIVIDADE POR GAP: 3+ envios em 30s = usuario pedindo algo. Heartbeats sao
+    // ~41s apart, entao 2 heartbeats + uma presenca solta nao fecha 3 em 30s.
+    "  function registrarEnvio(agora) {" +
+    "    cliEnvios.push(agora);" +
+    "    while (cliEnvios.length > 0 && cliEnvios[0] < agora - 30_000) cliEnvios.shift();" +
+    "    if (cliEnvios.length >= 3) {" +
+    "      gw.activityEm = agora;" +
+    "      gw.srvBytesDesdeAtividade = 0;" +
+    "    }" +
+    "  }" +
+    // Conta dispatch (op 0) em payload decodificavel (texto direto ou inflado do
+    // zlib-stream). Fatia payloads completos com contador de chaves respeitando
+    // strings; o resto parcial fica para o proximo pedaco. Lixo nao-JSON so
+    // acumula ate o teto e e descartado (nunca cresce eterno).
+    "  function processarTextoPendente() {" +
+    "    var s = textoPendente;" +
+    "    if (s.length > 2_000_000) { textoPendente = ''; return; }" +
     "    var inicio = 0, prof = 0, emStr = false, esc = false;" +
     "    for (var i = 0; i < s.length; i++) {" +
     "      var c = s[i];" +
@@ -1481,24 +1524,49 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "        } else if (prof < 0) { prof = 0; inicio = i + 1; }" +
     "      }" +
     "    }" +
-    "    if (inicio > 0) inflador.texto = s.slice(inicio);" +
+    "    textoPendente = inicio > 0 ? s.slice(inicio) : s;" +
     "  }" +
+    // Fluxo zlib continuo (zlib-stream): um DecompressionStream por tentativa. Em
+    // erro NAO morre mais para sempre (a #156 passou a sessao inteira com "sem
+    // decompress"): resincroniza com stream novo ate 3x por geracao — cobre
+    // dessincronia de fluxo continuo E servidores que mandam cada payload como
+    // stream proprio. Exaustou, degrada para os contadores crus.
     "  function iniciarInflador() {" +
     "    if (typeof DecompressionStream === 'undefined') { inflador = null; return; }" +
     "    try {" +
     "      var ds = new DecompressionStream('deflate');" +
     "      var decod = new TextDecoder();" +
-    "      inflador = { quebrado: false, texto: '', writer: ds.writable.getWriter() };" +
+    "      var token = ++infladorToken;" +
+    "      inflador = { writer: ds.writable.getWriter() };" +
     "      var reader = ds.readable.getReader();" +
     "      (function passo() {" +
     "        reader.read().then(function (r) {" +
-    "          if (r.done) return;" +
-    "          inflador.texto += decod.decode(r.value, { stream: true });" +
-    "          try { consumirTexto(); } catch (e) { }" +
+    "          if (r.done || token !== infladorToken) return;" +
+    "          textoPendente += decod.decode(r.value, { stream: true });" +
+    "          try { processarTextoPendente(); } catch (e) { }" +
     "          passo();" +
-    "        }, function () { if (inflador) inflador.quebrado = true; });" +
+    "        }, function () { if (token === infladorToken) falhaInflador(); });" +
     "      })();" +
     "    } catch (e) { inflador = null; }" +
+    "  }" +
+    "  function falhaInflador() {" +
+    "    infladorToken++;" +
+    "    if (infladorResyncs < 3) { infladorResyncs++; iniciarInflador(); }" +
+    "    else { inflador = null; }" +
+    "  }" +
+    "  function inflarBinario(pedaco) {" +
+    "    if (!inflador) return;" +
+    "    if (typeof pedaco.arrayBuffer === 'function') {" +
+    "      pedaco.arrayBuffer().then(function (buf) { escreverInflador(buf); }, function () { falhaInflador(); });" +
+    "    } else {" +
+    "      escreverInflador(pedaco);" +
+    "    }" +
+    "  }" +
+    "  function escreverInflador(bytes) {" +
+    "    if (!inflador) return;" +
+    "    try {" +
+    "      inflador.writer.write(bytes).then(null, function () { falhaInflador(); });" +
+    "    } catch (e) { falhaInflador(); }" +
     "  }" +
     "  var OriginalWebSocket = window.WebSocket;" +
     "  function GoliveWebSocket(url, protocolos) {" +
@@ -1513,52 +1581,59 @@ const SHIM_GATEWAY_SRC = "(function(){" +
     "        ws.addEventListener('close', function () { midia.delete(ws); });" +
     "      }" +
     "      if (ehGw) {" +
-    // Contadores por GERACAO (o cliente recria o ws a cada reconexao): intencao e
-    // dispatch so significam dentro da mesma conexao.
+    // Contadores por GERACAO (o cliente recria o ws a cada reconexao): intencao,
+    // atividade e volume so significam dentro da mesma conexao.
     "        geracao++;" +
     "        gw.estado = 'conectando';" +
     "        gw.srvEm = 0; gw.cliEm = 0; gw.op1Em = 0; gw.subs = 0; gw.srvFrames = 0;" +
     "        gw.dispatches = 0; gw.dispatchEm = 0; gw.intentEm = 0; gw.abertoEm = 0;" +
+    "        gw.activityEm = 0; gw.srvBytes = 0; gw.srvBytesDesdeAtividade = 0;" +
     "        gw.ws = ws;" +
     "        opCounts = {};" +
+    "        cliEnvios = [];" +
+    "        textoPendente = '';" +
+    "        infladorResyncs = 0;" +
+    "        infladorToken++;" +
     "        iniciarInflador();" +
     "        ws.addEventListener('open', function () { gw.estado = 'aberta'; gw.abertoEm = Date.now(); });" +
     "        ws.addEventListener('close', function () { gw.estado = 'fechada'; gw.ws = null; });" +
     "        ws.addEventListener('message', function (ev) {" +
-    "          gw.srvEm = Date.now(); gw.srvFrames++;" +
-    "          if (inflador && !inflador.quebrado && ev.data && inflador.writer) {" +
-    "            var pedaco = ev.data;" +
-    "            if (typeof pedaco.arrayBuffer === 'function') {" +
-    "              pedaco.arrayBuffer().then(function (ab) {" +
-    "                if (inflador && !inflador.quebrado && inflador.writer) {" +
-    "                  inflador.writer.write(ab).catch(function () { inflador.quebrado = true; });" +
-    "                }" +
-    "              }, function () { if (inflador) inflador.quebrado = true; });" +
-    "            } else {" +
-    "              try { inflador.writer.write(pedaco).catch(function () { inflador.quebrado = true; }); }" +
-    "              catch (e) { inflador.quebrado = true; }" +
-    "            }" +
+    "          var agora = Date.now();" +
+    "          gw.srvEm = agora; gw.srvFrames++;" +
+    "          var pedaco = ev.data;" +
+    "          var tam = 0;" +
+    "          if (typeof pedaco === 'string') {" +
+    "            tam = pedaco.length;" +
+    "            textoPendente += pedaco;" +
+    "            try { processarTextoPendente(); } catch (e) { }" +
+    "          } else if (pedaco && typeof pedaco.size === 'number') {" +
+    "            tam = pedaco.size;" +
+    "            inflarBinario(pedaco);" +
+    "          } else if (pedaco && pedaco.byteLength) {" +
+    "            tam = pedaco.byteLength;" +
+    "            inflarBinario(pedaco);" +
     "          }" +
-    "          try {" +
-    "            if (typeof ev.data === 'string' && JSON.parse(ev.data).op === 11) gw.ackEm = Date.now();" +
-    "          } catch (e) { }" +
+    "          gw.srvBytes += tam;" +
+    "          gw.srvBytesDesdeAtividade += tam;" +
     "        });" +
-    // O cliente vai em JSON texto: op 1 = heartbeat (manutencao); QUALQUER outra op
-    // e o usuario/cliente PEDINDO algo — a assinatura do zumbi e "pediu e nada
-    // voltou". Histograma de ops (14/37 = subscribe; o cliente pode ter migrado de
-    // opcode — contar TODOS settle isso no log sem apostar em chute).
+    // Conta ops quando o payload e JSON texto (encodings antigos); no binario o
+    // histograma fica vazio MESMO — e o sinal de atividade por gap que cobre.
     "        var enviar = ws.send.bind(ws);" +
     "        ws.send = function (dados) {" +
-    "          gw.cliEm = Date.now();" +
-    "          try {" +
-    "            var op = JSON.parse(dados).op;" +
-    "            opCounts[op] = (opCounts[op] || 0) + 1;" +
-    "            if (op === 1) { gw.op1Em = gw.cliEm; }" +
-    "            else {" +
-    "              gw.intentEm = gw.cliEm;" +
-    "              if (op === 14 || op === 37) gw.subs++;" +
-    "            }" +
-    "          } catch (e) { }" +
+    "          var agora = Date.now();" +
+    "          gw.cliEm = agora;" +
+    "          registrarEnvio(agora);" +
+    "          if (typeof dados === 'string') {" +
+    "            try {" +
+    "              var op = JSON.parse(dados).op;" +
+    "              opCounts[op] = (opCounts[op] || 0) + 1;" +
+    "              if (op === 1) { gw.op1Em = agora; }" +
+    "              else {" +
+    "                gw.intentEm = agora;" +
+    "                if (op === 14 || op === 37) gw.subs++;" +
+    "              }" +
+    "            } catch (e) { }" +
+    "          }" +
     "          return enviar(dados);" +
     "        };" +
     "      }" +
@@ -1628,6 +1703,13 @@ const GW_ZUMBI_AQUECIMENTO_MS = 2 * 60_000;
 const GW_ZUMBI_CLIENTE_VIVO_MS = 90_000;
 // Espera pos-intencao antes de declarar zumbi.
 const GW_ZUMBI_ESPERA_MS = 30_000;
+// Janela da atividade: o burst do usuario tem que ser RECENTE (foi ele que pediu
+// a tela) mas ja com prazo vencido de resposta.
+const GW_ZUMBI_ATIVIDADE_JANELA_MS = 90_000;
+// Volume minimo de resposta do servidor saudavel a um pedido (bytes desde a
+// atividade): dispatches somam centenas de bytes inflados; o zumbi devolve so o
+// baseline de heartbeat (~bytes). Agnostico de encoding — vale para JSON ou etf.
+const GW_ZUMBI_RESPOSTA_BYTES = 256;
 // Teto de tentativas da escada na janela.
 const GW_ZUMBI_TENTATIVAS = 2;
 // Janela de contagem das tentativas.
@@ -1641,19 +1723,39 @@ const GW_REVIVE_MIDIA_GRACA_MS = 3 * 60_000;
 // Prazo do cliente renascer o ws apos o close 4000.
 const GW_REVIVE_RENASCE_MS = 15_000;
 
+// Duas idades em ms (-1 = nunca); devolve a menor delas ignorando as ausentes.
+function minIdade(a, b) {
+    if (a < 0) return b;
+    if (b < 0) return a;
+    return Math.min(a, b);
+}
+
 // Funcao pura — os campos *Ha sao IDADES em ms desde o ultimo evento (o shim mede no
 // momento do poll), comparadas DIRETO contra os prazos. A beta.4 fazia `agora - srvHa`
 // (idade tratada como timestamp): o gate nunca filtrava e o banner disparava em falso.
+//
+// Zumbi tem DOIS caminhos, porque o cliente do Discord migrou para frames binarios
+// (issues #154/#156/#158: ops={} e "sem decompress" em toda sessao, revives=0):
+// 1. Payload decodificavel (JSON): dispatch starve — nada despachado desde o pedido.
+// 2. Qualquer encoding (o caminho que salva o beta 8): o usuario deu um BURST de
+//    envios (atividade) e o servidor devolveu MENOS que o baseline de heartbeat
+//    (GW_ZUMBI_RESPOSTA_BYTES) desde entao. Saude = resposta de verdade ao pedido;
+//    zumbi = sessao protocolarmente viva que ignora o que foi pedido.
 function avaliarSinalGw(resumo, agora) {
     if (!resumo || resumo.estado !== 'aberta') return null;
     if (resumo.srvHa >= GW_SERVIDOR_SILENCIOSO_MS) return 'silente';
     if (resumo.infladorOk !== true) return null;
     if (resumo.abertoHa < 0 || resumo.abertoHa < GW_ZUMBI_AQUECIMENTO_MS) return null;
     if (resumo.cliHa < 0 || resumo.cliHa >= GW_ZUMBI_CLIENTE_VIVO_MS) return null;
-    if (resumo.intentHa < 0 || resumo.intentHa < GW_ZUMBI_ESPERA_MS) return null;
-    // Dispatch DEPOIS da intencao = dado chegando (saudavel). Antes (ou nunca) = pedido
-    // ignorado: o servidor aceita heartbeat mas nao entrega dado — zumbi.
-    if (resumo.dispatchHa >= 0 && resumo.dispatchHa < resumo.intentHa) return null;
+    // O usuario pediu algo: op explicita (JSON) OU burst de envios (binario).
+    const pediuHa = minIdade(resumo.intentHa, resumo.activityHa);
+    if (pediuHa < 0 || pediuHa < GW_ZUMBI_ESPERA_MS || pediuHa > GW_ZUMBI_ATIVIDADE_JANELA_MS) return null;
+    // Dispatch DEPOIS do pedido = dado chegando (saudavel) — caminho 1.
+    if (resumo.dispatchHa >= 0 && resumo.dispatchHa < pediuHa) return null;
+    // Caminho 2 (mundo binario, dispatchHa == -1 para sempre): o pedido ficou sem
+    // resposta de volume. Com dispatches visiveis este checagem nao roda — o caminho
+    // 1 mandou o veredito acima.
+    if (resumo.dispatchHa < 0 && resumo.srvBytesDesdeAtividade >= GW_ZUMBI_RESPOSTA_BYTES) return null;
     return 'zumbi';
 }
 
@@ -1789,68 +1891,89 @@ function vigiarZumbi(resumo, win) {
 }
 
 function checarGatewaySilente() {
-    const win = clientWindow();
-    if (win === null) return;
-    win.webContents.executeJavaScript('window.__goliveGwResumo ? window.__goliveGwResumo() : null', true)
-        .then(resumo => {
-            if (!resumo) return;
-            const agora = Date.now();
-            log("gw.probe | estado=" + resumo.estado +
-                " srv_ha=" + idadeSeg(resumo.srvHa) +
-                " cli_ha=" + idadeSeg(resumo.cliHa) +
-                " subs=" + resumo.subs +
-                " srv_frames=" + resumo.srvFrames +
-                " dispatch_ha=" + idadeSeg(resumo.dispatchHa) +
-                " dispatches=" + resumo.dispatches +
-                " intent_ha=" + idadeSeg(resumo.intentHa) +
-                " aberto_ha=" + idadeSeg(resumo.abertoHa) +
-                " geracao=" + resumo.geracao +
-                " ops=" + JSON.stringify(resumo.opCounts || {}) +
-                (resumo.infladorOk === false ? " (sem decompress)" : ""));
-            // Auto-cura do nivel 1: fechamos o ws e o cliente NAO renasceu a conexao —
-            // o close nao surtiu; sobe direto pro reload (a cura que sempre funciona).
-            if (reviveFecharEm > 0) {
-                if (resumo.geracao !== reviveFecharGeracao || resumo.estado === 'aberta') {
-                    reviveFecharEm = 0; // renasceu: a escada segue do ponto certo
-                } else if ((resumo.estado === 'fechada' || resumo.estado === 'nenhum') &&
-                    agora - reviveFecharEm > GW_REVIVE_RENASCE_MS) {
-                    log("gw.revive | o ws nao renasceu apos o close, subindo direto pro reload");
-                    reviveFecharEm = 0;
-                    zumbiTentativaEm.push(agora);
-                    zumbiUltimaAcaoEm = agora;
-                    zumbiUltimaAcao = 'reload';
-                    sessaoRevives++;
-                    reloadPorRevive("ws nao renasceu apos o close");
-                    return;
-                }
+    const janelas = janelasCliente();
+    if (janelas.length === 0) return;
+    const polls = janelas.map(win =>
+        win.webContents.executeJavaScript('window.__goliveGwResumo ? window.__goliveGwResumo() : null', true)
+            .then(resumo => ({ win, resumo }))
+            .catch(() => ({ win, resumo: null })),
+    );
+    Promise.all(polls).then(resultados => {
+        const agora = Date.now();
+        // Escolhe o resumo mais util: janela com gateway de preferencia (a #154
+        // provou que pode haver mais de uma janela de cliente, nem toda com shim).
+        let resumo = null;
+        let winResumo = null;
+        for (const r of resultados) {
+            if (!r.resumo) continue;
+            if (resumo === null || (r.resumo.estado !== 'nenhum' && resumo.estado === 'nenhum')) {
+                resumo = r.resumo;
+                winResumo = r.win;
             }
-            const sinal = avaliarSinalGw(resumo, agora);
-            if (sinal === 'zumbi') {
-                vigiarZumbi(resumo, win);
+        }
+        if (resumo === null) {
+            // Silencio diagnosticavel: a #154 passou 3 minutos sem NENHUMA linha de
+            // probe porque o resumo ausente era engolido aqui.
+            log("gw.probe | estado=sem-shim: nenhuma janela do cliente respondeu ao probe");
+            return;
+        }
+        log("gw.probe | estado=" + resumo.estado +
+            " srv_ha=" + idadeSeg(resumo.srvHa) +
+            " cli_ha=" + idadeSeg(resumo.cliHa) +
+            " subs=" + resumo.subs +
+            " srv_frames=" + resumo.srvFrames +
+            " dispatch_ha=" + idadeSeg(resumo.dispatchHa) +
+            " dispatches=" + resumo.dispatches +
+            " intent_ha=" + idadeSeg(resumo.intentHa) +
+            " activity_ha=" + idadeSeg(resumo.activityHa) +
+            " aberto_ha=" + idadeSeg(resumo.abertoHa) +
+            " geracao=" + resumo.geracao +
+            " ops=" + JSON.stringify(resumo.opCounts || {}) +
+            " resp_bytes=" + resumo.srvBytesDesdeAtividade +
+            (resumo.infladorOk === false ? " (sem decompress)" : ""));
+        // Auto-cura do nivel 1: fechamos o ws e o cliente NAO renasceu a conexao —
+        // o close nao surtiu; sobe direto pro reload (a cura que sempre funciona).
+        if (reviveFecharEm > 0) {
+            if (resumo.geracao !== reviveFecharGeracao || resumo.estado === 'aberta') {
+                reviveFecharEm = 0; // renasceu: a escada segue do ponto certo
+            } else if ((resumo.estado === 'fechada' || resumo.estado === 'nenhum') &&
+                agora - reviveFecharEm > GW_REVIVE_RENASCE_MS) {
+                log("gw.revive | o ws nao renasceu apos o close, subindo direto pro reload");
+                reviveFecharEm = 0;
+                zumbiTentativaEm.push(agora);
+                zumbiUltimaAcaoEm = agora;
+                zumbiUltimaAcao = 'reload';
+                sessaoRevives++;
+                reloadPorRevive("ws nao renasceu apos o close");
                 return;
             }
-            if (sinal === 'silente') {
-                if (!zumbiBannerAtivo) { zumbiBannerAtivo = true; showZumbiBanner(); }
-                return;
-            }
-            // Recuperacao: remover o banner e creditar a escada. O credito so vale com a
-            // conexao SOBREVIVENDO ao aquecimento com dado fluindo — senao o READY da
-            // conexao nova (que sempre chega) creditaria sucesso a um revive que nao curou.
-            const servidorFalando = resumo.estado === 'aberta' && resumo.srvHa >= 0 && resumo.srvHa < GW_SERVIDOR_SILENCIOSO_MS;
-            const dadoFluindo = resumo.dispatchHa >= 0 && resumo.dispatchHa < 60_000;
-            if (zumbiBannerAtivo && servidorFalando && (dadoFluindo || resumo.infladorOk !== true)) {
-                zumbiBannerAtivo = false;
-                log("gateway voltou a responder: banner de sessao muda removido");
-            }
-            if (zumbiTentativaEm.length > 0 && servidorFalando && dadoFluindo &&
-                resumo.abertoHa >= GW_ZUMBI_AQUECIMENTO_MS) {
-                log("gw.revive | sucesso: dispatches voltaram apos " + zumbiTentativaEm.length + " tentativa(s)");
-                zumbiTentativaEm.length = 0;
-                zumbiUltimaAcaoEm = 0;
-                zumbiUltimaAcao = null;
-            }
-        })
-        .catch(() => { });
+        }
+        const sinal = avaliarSinalGw(resumo, agora);
+        if (sinal === 'zumbi') {
+            vigiarZumbi(resumo, winResumo);
+            return;
+        }
+        if (sinal === 'silente') {
+            if (!zumbiBannerAtivo) { zumbiBannerAtivo = true; showZumbiBanner(); }
+            return;
+        }
+        // Recuperacao: remover o banner e creditar a escada. O credito so vale com a
+        // conexao SOBREVIVENDO ao aquecimento com dado fluindo — senao o READY da
+        // conexao nova (que sempre chega) creditaria sucesso a um revive que nao curou.
+        const servidorFalando = resumo.estado === 'aberta' && resumo.srvHa >= 0 && resumo.srvHa < GW_SERVIDOR_SILENCIOSO_MS;
+        const dadoFluindo = resumo.dispatchHa >= 0 && resumo.dispatchHa < 60_000;
+        if (zumbiBannerAtivo && servidorFalando && (dadoFluindo || resumo.infladorOk !== true)) {
+            zumbiBannerAtivo = false;
+            log("gateway voltou a responder: banner de sessao muda removido");
+        }
+        if (zumbiTentativaEm.length > 0 && servidorFalando && dadoFluindo &&
+            resumo.abertoHa >= GW_ZUMBI_AQUECIMENTO_MS) {
+            log("gw.revive | sucesso: dispatches voltaram apos " + zumbiTentativaEm.length + " tentativa(s)");
+            zumbiTentativaEm.length = 0;
+            zumbiUltimaAcaoEm = 0;
+            zumbiUltimaAcao = null;
+        }
+    });
 }
 
 // Shim + pill: prender em TODO webContents novo (o Discord recria janelas e
@@ -1871,7 +1994,20 @@ function injetarInstrumentacao(wc) {
             let url = '';
             try { url = wc.getURL(); } catch { return; }
             if (!CLIENT_URL_RE.test(url)) return;
-            wc.executeJavaScript(REVIVE_SRC).catch(() => { });
+            // Fallback do shim (issue #154: sessao inteira sem probe — o
+            // addScriptToEvaluateOnNewDocument pode nao anexar em alguma janela). O
+            // shim se auto-guarda (__goliveGwShim), entao reinjetar aqui e no-op
+            // quando ele ja vive; quando nao vive, entra em linha e cobre as
+            // reconexoes seguintes (a conexao corrente, se existir, so e coberta
+            // no proximo reconnect do cliente).
+            wc.executeJavaScript('!!window.__goliveGwShim')
+                .then(temShim => {
+                    if (temShim === true) return;
+                    log("gw.shim | o shim do CDP nao anexou neste documento, reinjetando no did-finish-load");
+                    return wc.executeJavaScript(SHIM_GATEWAY_SRC);
+                })
+                .then(() => { wc.executeJavaScript(REVIVE_SRC).catch(() => { }); })
+                .catch(() => { });
         } catch { }
     });
 }
