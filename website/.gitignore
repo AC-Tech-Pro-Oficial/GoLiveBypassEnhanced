@@ -1,0 +1,6 @@
+node_modules/
+.nuxt/
+.output/
+.tmp-*
+.DS_Store
+dist
