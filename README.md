@@ -1,10 +1,27 @@
 # GoLiveBypass — Bypass do Go Live no Discord (Brasil)
 
-Feito por um desenvolvedor brasileiro, **devolve o Go Live e a câmera para usuários brasileiros** no Discord para computador. Você não precisa entender de tecnologia para usar: o jeito mais fácil é o [aplicativo de um clique](#-novo-interface-gráfica-plug-and-play-windows-e-macos) logo abaixo.
+<p align="center">
+  <a href="https://golivebypass.dev/"><img src="https://img.shields.io/badge/🌐_Site_oficial-golivebypass.dev-5865F2?style=for-the-badge" alt="Site oficial"></a>
+  <a href="https://discord.gg/7cWbtr82rG"><img src="https://img.shields.io/badge/💬_Discord-Entrar_na_comunidade-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Entrar no Discord"></a>
+</p>
+
+Feito por um desenvolvedor brasileiro, o GoLiveBypass **devolve o Go Live e a câmera para usuários brasileiros** no Discord para computador. Escolha a forma de instalação que combina com você — a GUI é o caminho mais simples.
 
 Por dentro, só o WebSocket de gateway do Discord passa por uma proxy fora do Brasil — todo o resto sai direto, na sua velocidade normal. Os detalhes técnicos ficam [mais abaixo](#como-funciona).
 
 > **English summary below / Resumo em inglês no final.**
+
+## Escolha sua variante
+
+Você não precisa usar todas as opções. Escolha uma delas:
+
+| Variante | É para você se... | O que fazer |
+|---|---|---|
+| **[GUI](#-novo-interface-gráfica-plug-and-play-windows-e-macos)** | quer ativar e desativar com poucos cliques, sem terminal | baixe o aplicativo para Windows, macOS ou Linux |
+| **[Standalone](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord)** | usa o Discord puro e não quer instalar Equicord/Vencord | rode o script diretamente no Discord |
+| **[Plugin](#instalação-do-plugin-recomendado-para-equicord-vencord-e-vesktop)** | já usa Equicord, Vencord ou Vesktop | instale o plugin dentro do seu mod |
+
+> **Regra rápida:** GUI para simplicidade, standalone para Discord sem mods, plugin para quem já usa um mod.
 
 ## 🌟 NOVO: Interface Gráfica Plug and Play (Windows e macOS)
 
@@ -80,11 +97,13 @@ chmod +x GoLiveBypass-*.AppImage
 ## Índice
 
 **Quero instalar agora**
-- [**Interface Gráfica (Windows e macOS)**](#-novo-interface-gráfica-plug-and-play-windows-e-macos) — 1 clique para ativar/desativar, sem terminal
-- [**Interface Gráfica (Linux, AppImage)**](#-interface-gráfica-para-linux-appimage) — 1 clique, portátil, em qualquer distro
+- [**GUI (Windows, macOS e Linux)**](#escolha-sua-variante) — 1 clique para ativar/desativar, sem terminal
+- [**Standalone**](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — Discord puro, sem Equicord/Vencord
+- [**Plugin**](#instalação-do-plugin-recomendado-para-equicord-vencord-e-vesktop) — para Equicord, Vencord e Vesktop
+- [Interface Gráfica (Windows e macOS)](#-novo-interface-gráfica-plug-and-play-windows-e-macos) — detalhes da GUI
+- [Interface Gráfica (Linux, AppImage)](#-interface-gráfica-para-linux-appimage) — detalhes da GUI no Linux
 - [**Um comando só**](#um-comando-só) — uma linha no PowerShell ou no terminal, sem baixar nada
-- [Instalação automática](#instalação-automática-recomendado) — o instalador completo, com menu, para usar via plugin Equicord/Vencord
-- [Modo Standalone (Scripts)](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) — direto no Discord, sem mod e sem compilar nada
+- [Instalação automática do plugin](#instalação-do-plugin-recomendado-para-equicord-vencord-e-vesktop) — instalador completo, com menu
 - [**Linux: Arch, Debian, Ubuntu, Fedora**](#linux-arch-debian-ubuntu-fedora) — onde o Discord fica em cada distro, e a pedra do Node no Debian
 
 **Já instalei**
@@ -107,7 +126,7 @@ chmod +x GoLiveBypass-*.AppImage
 
 ---
 
-## Instalação automática (recomendado)
+## Instalação do plugin (recomendado para Equicord, Vencord e Vesktop)
 
 <p align="center">
   <img src="assets/instalacao.gif" alt="O instalador acha o Equicord, instala o plugin, compila e o Go Live volta a funcionar" width="720">
@@ -649,7 +668,7 @@ O Tor é só uma opção para quem quer mais estabilidade: ele é mais rápido e
 
 ## Instalação: passo a passo completo
 
-> Este é o caminho manual. O [instalador automático](#instalação-automática-recomendado) faz tudo isto sozinho; siga daqui só se preferir fazer na mão.
+> Este é o caminho manual. O [instalador automático do plugin](#instalação-do-plugin-recomendado-para-equicord-vencord-e-vesktop) faz tudo isto sozinho; siga daqui só se preferir fazer na mão.
 
 Escolha **Equicord** ou **Vencord** — os dois funcionam, o processo é idêntico. Os exemplos usam Equicord; para Vencord, troque o link do clone por `https://github.com/Vendicated/Vencord` e a pasta para `Vencord`.
 

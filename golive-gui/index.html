@@ -317,10 +317,20 @@
         <div id="settingsDialog" class="settings-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
           <div class="settings-dialog__backdrop" id="settingsBackdrop"></div>
           <div class="settings-dialog__panel" role="document">
-            <h2 id="settingsTitle" class="settings-dialog__title">Configurações</h2>
+            <div class="settings-dialog__header">
+              <div>
+                <span class="settings-dialog__eyebrow">Preferências</span>
+                <h2 id="settingsTitle" class="settings-dialog__title">Configurações</h2>
+              </div>
+              <button id="settingsClose" class="settings-dialog__close" type="button" aria-label="Fechar configurações">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
 
-            <div class="settings-group">
-              <span class="settings-group__label" id="themeGroupLabel">Tema</span>
+            <div class="settings-section">
+              <span class="settings-group__label" id="themeGroupLabel">Aparência</span>
               <div class="theme-opts" role="radiogroup" aria-labelledby="themeGroupLabel">
                 <button type="button" class="theme-opt" data-theme-opt="light" role="radio" aria-checked="false">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -345,48 +355,49 @@
               </div>
             </div>
 
-            <label class="switch-row" id="autoUpdateRow">
-              <input type="checkbox" id="autoUpdateToggle" checked />
-              <span class="switch-track" aria-hidden="true">
-                <span class="switch-thumb"></span>
-              </span>
-              <span id="autoUpdateLabel">Avisar sobre atualizações</span>
-            </label>
-            <p class="settings-dialog__hint">
-              Avisa quando sai uma versão nova do GoLiveBypass. Pode ser mudado de
-              novo a qualquer momento aqui.
-            </p>
+            <div class="settings-section settings-section--behavior">
+              <span class="settings-group__label">Comportamento</span>
 
-            <label class="switch-row" id="autoReviveRow">
-              <input type="checkbox" id="autoReviveToggle" checked />
-              <span class="switch-track" aria-hidden="true">
-                <span class="switch-thumb"></span>
-              </span>
-              <span id="autoReviveLabel">Reviver gateway travado automaticamente</span>
-            </label>
-            <p class="settings-dialog__hint">
-              Quando o gateway do Discord fica vivo mas sem dados (telas carregando
-              para sempre), reconecta sozinho sem recarregar a janela — e recarrega
-              só se o reconnect não resolver. Nunca age durante chamadas ou
-              transmissões.
-            </p>
+              <label class="settings-switch" id="autoUpdateRow">
+                <span class="settings-switch__icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+                    <path d="M10 21h4" />
+                  </svg>
+                </span>
+                <span class="settings-switch__copy">
+                  <span id="autoUpdateLabel" class="settings-switch__title">Avisar sobre atualizações</span>
+                  <span class="settings-switch__hint">Receba novas versões</span>
+                </span>
+                <input type="checkbox" id="autoUpdateToggle" checked />
+                <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+              </label>
 
-            <label class="switch-row" id="updateChannelRow">
-              <input type="checkbox" id="updateChannelToggle" />
-              <span class="switch-track" aria-hidden="true">
-                <span class="switch-thumb"></span>
-              </span>
-              <span id="updateChannelLabel">Participar dos testes (canal beta)</span>
-            </label>
-            <p class="settings-dialog__hint">
-              Recebe as versões de teste pelo próprio app, antes de virarem release
-              estável — no Windows vale na próxima checagem, no Linux no próximo
-              reinício do app. Betas podem ser instáveis; desligue para voltar ao
-              canal estável (a estável mais nova substitui a beta sozinha).
-            </p>
+              <label class="settings-switch" id="autoReviveRow">
+                <span class="settings-switch__icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 11a8 8 0 0 0-14.7-4L3 10" />
+                    <path d="M3 5v5h5M4 13a8 8 0 0 0 14.7 4L21 14" />
+                    <path d="M21 19v-5h-5" />
+                  </svg>
+                </span>
+                <span class="settings-switch__copy">
+                  <span id="autoReviveLabel" class="settings-switch__title">Recuperar gateway travado</span>
+                  <span class="settings-switch__hint">Tenta corrigir sem recarregar</span>
+                </span>
+                <input type="checkbox" id="autoReviveToggle" checked />
+                <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+              </label>
 
-            <div class="settings-dialog__actions">
-              <button id="settingsClose" type="button" class="bug-btn bug-btn--primary">Fechar</button>
+              <label class="settings-switch" id="updateChannelRow">
+                <span class="settings-switch__icon settings-switch__icon--beta" aria-hidden="true">β</span>
+                <span class="settings-switch__copy">
+                  <span id="updateChannelLabel" class="settings-switch__title">Canal beta</span>
+                  <span class="settings-switch__hint">Receba versões de teste</span>
+                </span>
+                <input type="checkbox" id="updateChannelToggle" />
+                <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+              </label>
             </div>
           </div>
         </div>

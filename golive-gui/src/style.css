@@ -1400,9 +1400,7 @@ kbd {
 @keyframes bug-spin { to { transform: rotate(360deg); } }
 
 /* ------------------------------------------------------------
-   Dialog de configurações — tema claro/escuro + notificações de
-   atualização. Mesma gramática visual do dialog de bug: painel
-   flutuante com backdrop borrado.
+   Dialog de configurações — painel compacto, inspirado nos cards do site.
    ------------------------------------------------------------ */
 .settings-dialog {
   position: fixed;
@@ -1422,53 +1420,105 @@ kbd {
 .settings-dialog__panel {
   position: relative;
   width: 100%;
-  max-width: 380px;
+  max-width: 344px;
   max-height: 92vh;
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--line-strong);
-  border-radius: var(--r-md);
-  box-shadow: 0 16px 40px rgba(0,0,0,0.22);
-  padding: 18px 16px 14px;
+  border-radius: 16px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.28);
+  padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 18px;
   animation: pop-in 200ms var(--ease);
 }
-.settings-dialog__title {
-  font-size: 15px;
+.settings-dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.settings-dialog__eyebrow {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0.14em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.settings-dialog__title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
   color: var(--ink-strong);
 }
-.settings-group {
+.settings-dialog__close {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin: -3px -3px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.settings-dialog__close:hover {
+  background: var(--surface-muted);
+  border-color: var(--line-strong);
+  color: var(--ink-strong);
+}
+.settings-dialog__close:active { transform: scale(0.94); }
+.settings-dialog__close:focus-visible {
+  outline: 2px solid var(--ink-strong);
+  outline-offset: 2px;
+}
+.settings-dialog__close svg { width: 16px; height: 16px; }
+.settings-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
 }
 .settings-group__label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--muted);
+  padding-left: 2px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 .theme-opts {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--canvas);
 }
 .theme-opt {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 40px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--line-strong);
-  background: var(--canvas);
-  color: var(--ink);
+  min-height: 36px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: background 150ms var(--ease), border-color 150ms var(--ease),
@@ -1480,27 +1530,117 @@ kbd {
 }
 .theme-opt:hover {
   background: var(--surface-muted);
-  border-color: var(--ink-strong);
+  color: var(--ink);
 }
 .theme-opt:focus-visible {
   outline: 2px solid var(--ink-strong);
   outline-offset: 2px;
 }
 .theme-opt--active {
-  border-color: var(--ink-strong);
-  background: color-mix(in srgb, var(--ink-strong) 10%, var(--canvas));
+  border-color: var(--line-strong);
+  background: var(--surface);
   color: var(--ink-strong);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
 }
-.settings-dialog__hint {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--muted);
-  margin-top: -8px;
+.settings-section--behavior {
+  gap: 7px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }
-.settings-dialog__actions {
+.settings-switch {
   display: flex;
-  justify-content: flex-end;
-  margin-top: 2px;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.settings-switch:hover {
+  background: var(--surface-muted);
+  border-color: var(--line);
+}
+.settings-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.settings-switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--ink-strong);
+  outline-offset: 2px;
+}
+.settings-switch input:checked + .switch-track {
+  background: var(--ink-strong);
+  border-color: var(--ink-strong);
+}
+.settings-switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(15px);
+}
+html[data-theme='dark'] .settings-switch input:checked + .switch-track .switch-thumb {
+  background: var(--canvas);
+}
+.settings-switch__icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--muted);
+  font-family: Georgia, serif;
+  font-size: 17px;
+  font-weight: 700;
+}
+.settings-switch__icon svg {
+  width: 15px;
+  height: 15px;
+}
+.settings-switch__icon--beta {
+  color: var(--warn-ink);
+  border-color: var(--warn-line);
+  background: var(--warn-bg);
+}
+.settings-switch__copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+.settings-switch__title {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-switch__hint {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-switch .switch-track {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 360px) {
+  .settings-dialog { padding: 12px; }
+  .settings-dialog__panel { padding: 16px; }
+}
+
+.settings-dialog__actions {
+  display: none;
 }
 
 .bug-success {
