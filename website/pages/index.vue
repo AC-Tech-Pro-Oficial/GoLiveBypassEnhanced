@@ -46,7 +46,7 @@ useSeoMeta({
       </div>
 
       <div class="hero__visual reveal reveal--second">
-        <StatusPanel />
+        <GuiViewer />
         <div class="hero__note">
           <span class="status-dot" aria-hidden="true"></span>
           <span>Release estável <strong>v{{ release.version }}</strong></span>
