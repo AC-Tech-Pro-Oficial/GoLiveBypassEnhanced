@@ -44,10 +44,37 @@ unset -f _local_probe 2>/dev/null || true
 
 
 PATCHER_NAME="golivebypass.js"
-# Quando o script roda via sudo (elevacao para mexer em /usr/lib), $HOME vira /root e o patcher
-# iria para uma pasta que o Discord do usuario nao le. SUDO_USER devolve o usuario real.
-_USER_HOME="${SUDO_USER:-${HOME}}"
-if [ -n "${SUDO_USER:-}" ]; then _USER_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || printf '/home/%s' "$SUDO_USER")"; fi
+# ---------------------------------------------------------------------------
+# Home do usuario real
+#
+# A home vem do ambiente, e so dele: adivinhar /home/<usuario> quebra onde a home
+# mora em outro lugar (Fedora Silverblue: /var/home), e dentro de contêiner o
+# passwd pode divergir da home configurada na criacao (distrobox --home). Por isso
+# o script nao roda sob root: lancado com sudo, re-executa como o usuario real
+# levando a home por parametro (--real-home); fases elevadas via pkexec/sudo
+# repassam o mesmo parametro em vez de consultar o passwd.
+_REAL_HOME=""
+_prev=""
+for _arg in "$@"; do
+    [ "$_prev" = "--real-home" ] && _REAL_HOME="$_arg"
+    _prev="$_arg"
+done
+_USER_HOME="${_REAL_HOME:-${HOME}}"
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    # Sudo comum preserva o HOME do chamador: ja e a home certa. Com sudo -i/-s o
+    # sudo trocou o HOME para /root antes de o script comecar, e o -H devolve a do
+    # passwd (fonte do sistema, nunca um chute do script).
+    if [ "$_USER_HOME" = "/root" ]; then
+        exec sudo -H -u "$SUDO_USER" -- "$SCRIPT_PATH" "$@"
+    fi
+    exec sudo -u "$SUDO_USER" -- "$SCRIPT_PATH" --real-home "$_USER_HOME" "$@"
+fi
+# Root de verdade (login como root), sem home guardada: instalar em /root era o bug.
+if [ "$(id -u)" -eq 0 ] && [ -z "$_REAL_HOME" ]; then
+    printf '%s\n' "Rode como seu usuario, sem sudo: o instalador precisa da sua home." >&2
+    printf '%s\n' "A elevacao, quando necessaria, e pedida pelo proprio script (pkexec/sudo)." >&2
+    exit 1
+fi
 INSTALL_DIR="${XDG_DATA_HOME:-$_USER_HOME/.local/share}/GoLiveBypass"
 STUB_PACKAGE='{"name":"discord","main":"index.js","version":"1.0.0"}'
 # Clientes do Discord por flatpak: os oficiais e os paralelos publicados no Flathub —
@@ -518,6 +545,9 @@ while [ $# -gt 0 ]; do
         --tor-addr) TOR_ADDR_CLI="${2:-}"; shift ;;
         # Acucar retrocompativel: o modo tor do proprio script, na porta dedicada.
         --tor) TOR_MODE=1; NET_MODE="tor" ;;
+        # Parametro interno: home guardada quando o script re-executa a si mesmo
+        # como usuario (ou em fase elevada via pkexec/sudo), para nunca adivinhar.
+        --real-home) _REAL_HOME="${2:-}"; shift ;;
         --uninstall) MODE="uninstall" ;;
         --restore) MODE="restore" ;;
         --status) MODE="status" ;;
