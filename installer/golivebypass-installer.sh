@@ -980,8 +980,17 @@ discord_resources() {
 # paralelos, NAO injetaveis pelo instalador de mod). Usado pelo show_status
 # so para informacao.
 parallel_installs() {
+    # O corpo do while precisa terminar em status 0: os callers fazem
+    # `parallels="$(parallel_installs)"` e, com `set -e`, um
+    # `is_parallel_install && printf` curto-circuitado no ULTIMO recurso fazia o
+    # while sair com 1, o assignment falhar e o shell inteiro morrer sem
+    # mensagem nenhuma (menu nunca aparecia quando o ultimo install achado era
+    # um Discord puro, o caso mais comum). Com `if`, sem branch executado o
+    # status e 0 e a funcao sempre termina bem.
     discord_resources | while IFS= read -r resources; do
-        is_parallel_install "$resources" && printf '%s\n' "$resources"
+        if is_parallel_install "$resources"; then
+            printf '%s\n' "$resources"
+        fi
     done
 }
 
