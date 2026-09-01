@@ -634,6 +634,26 @@ function Stop-Discord {
     throw 'O Discord nao fechou. Feche na mao e rode de novo.'
 }
 
+function Rename-DiscordAsarWithRetry([string]$path, [string]$newName) {
+    # Mesmo depois de o processo sair, o Windows pode levar alguns segundos para
+    # liberar o handle do app.asar (updater, antivírus ou encerramento do Electron).
+    # Uma tentativa única transformava uma corrida transitória em IOException.
+    $lastError = $null
+    for ($i = 0; $i -lt 40; $i++) {
+        try {
+            Rename-Item -LiteralPath $path -NewName $newName -Force -ErrorAction Stop
+            return
+        } catch {
+            $lastError = $_
+            if ($i -eq 0) {
+                Write-Warn 'O Windows ainda esta liberando o Discord; aguardando para trocar o app.asar.'
+            }
+            if ($i -lt 39) { Start-Sleep -Milliseconds 250 }
+        }
+    }
+    throw $lastError.Exception
+}
+
 function Install-Patcher {
     $source = if ($PSScriptRoot) { Join-Path $PSScriptRoot $PatcherName } else { Join-Path (Get-Location).Path $PatcherName }
     $code = $null
@@ -849,7 +869,7 @@ function Install-Injection($resources) {
     # de estado e este ponto.
     if (Test-Path -LiteralPath $original) { Remove-Injection $resources | Out-Null }
 
-    Rename-Item -LiteralPath $asar -NewName '_app.asar' -Force
+    Rename-DiscordAsarWithRetry $asar '_app.asar'
     try {
         New-Item -ItemType Directory -Path $asar -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $asar 'package.json'), $StubPackage, (New-Object Text.UTF8Encoding $false))
@@ -858,7 +878,7 @@ function Install-Injection($resources) {
         # Sem o desfazer, uma falha aqui deixaria o Discord sem app.asar nenhum: ele nao abriria
         # mais, e o usuario nao teria como saber o porque.
         if (Test-Path -LiteralPath $asar) { Remove-Item -LiteralPath $asar -Recurse -Force -ErrorAction SilentlyContinue }
-        Rename-Item -LiteralPath $original -NewName 'app.asar' -Force
+        try { Rename-DiscordAsarWithRetry $original 'app.asar' } catch { }
         throw
     }
 }
@@ -871,7 +891,7 @@ function Remove-Injection($resources) {
     if (-not (Test-Path -LiteralPath $original)) { return $false }
 
     if (Test-Path -LiteralPath $asar) { Remove-Item -LiteralPath $asar -Recurse -Force }
-    Rename-Item -LiteralPath $original -NewName 'app.asar' -Force
+    Rename-DiscordAsarWithRetry $original 'app.asar'
     return $true
 }
 
