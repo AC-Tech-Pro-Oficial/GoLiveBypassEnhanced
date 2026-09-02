@@ -290,6 +290,15 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   failed".
 
 ### Corrigido
+- **Instalador Linux morria em silêncio antes do menu** (sem issue): com o último
+  install varrido sendo um Discord puro (o caso mais comum), o filtro
+  `is_parallel_install "$r" && printf` de `parallel_installs()` fazia o `while`
+  sair com status 1, o assignment `parallels="$(parallel_installs)"` falhava e o
+  `set -e` encerrava o script inteiro sem mensagem nenhuma — o usuário via
+  "Detectado: ... Fonte nao encontrado" e nada mais acontecia. O filtro agora é
+  um `if`, que termina em status 0 quando a condição é falsa, e a detecção de
+  clientes paralelos (Vesktop/Equibop/Legcord) continua idêntica. Regressão no
+  `tests/test-posix.sh` (seção 9), rodando em sh/ash/bash/dash.
 - **Banner de zumbi da beta 4 disparava em falso — e ficava preso** (achado no
   ciclo da #153): `avaliarSinalGw()` comparava a IDADE do último frame (`srvHa`,
   em ms desde o evento) como se fosse timestamp (`agora - srvHa`); o gate de

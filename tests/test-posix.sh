@@ -19,8 +19,12 @@ REPO="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 PASS=0
 FAIL=0
 
-# Escolhe podman ou docker
-if command -v podman >/dev/null 2>&1; then
+# Escolhe podman ou docker. O env pode forcar um runtime (ex.: um wrapper que chama
+# "podman --security-opt label=disable" para rodar em maquina com SELinux enforcing;
+# mesmo padrao do test-parallel-client-mismatch.sh).
+if [ -n "${RUNTIME:-}" ]; then
+    :
+elif command -v podman >/dev/null 2>&1; then
     RUNTIME=podman
 elif command -v docker >/dev/null 2>&1; then
     RUNTIME=docker
@@ -402,6 +406,62 @@ H_EOF
         ok "descoberta de checkout $shell ($img)"
     else
         bad "descoberta de checkout $shell ($img)"
+    fi
+    rm -f "$HARNESS"
+    "$RUNTIME" run --rm -u root -v "$home:/h" debian:stable-slim rm -rf /h >/dev/null 2>&1 || true
+    rm -rf "$home" 2>/dev/null || true
+done
+
+echo
+echo "== 9. instalador: parallel_installs nao derruba o script (set -e) =="
+# Simula o caso real que travava o menu: um Discord PURO varrido por ultimo pelo
+# discord_resources fazia o while de parallel_installs sair com status 1, o
+# assignment `parallels="$(parallel_installs)"` falhava e o `set -e` matava o
+# script inteiro sem mensagem (o instalador "nao fazia nada" depois de
+# "Fonte nao encontrado").
+for spec in \
+    "debian:stable-slim sh" \
+    "alpine:latest ash" \
+    "fedora:latest bash" \
+    "ubuntu:latest dash"
+do
+    set -- $spec
+    img="$1"; shell="$2"
+    home="$(mktemp -d)"
+    # Discord puro no .config (primeira secao da varredura)...
+    mkdir -p "$home/.config/discord/app-1.0.155/resources"
+    printf 'original' > "$home/.config/discord/app-1.0.155/resources/app.asar"
+    # ...um cliente paralelo no meio (secao de pacotes: app.asar direto na raiz,
+    # o unico formato que is_parallel_install reconhece - path termina em /vesktop)...
+    mkdir -p "$home/.local/share/vesktop"
+    printf 'original' > "$home/.local/share/vesktop/app.asar"
+    # ...e outro Discord puro por ULTIMO (secao .var/app): era ele que fazia a
+    # funcao sair com 1 quando o usuario so tinha Discord puro.
+    mkdir -p "$home/.var/app/com.discordapp.Discord/config/discord/app-1.0.0/resources"
+    printf 'original' > "$home/.var/app/com.discordapp.Discord/config/discord/app-1.0.0/resources/app.asar"
+
+    HARNESS="$(mktemp)"
+    awk '/^banner$/{exit} {print}' "$REPO/installer/golivebypass-installer.sh" > "$HARNESS"
+    cat >> "$HARNESS" <<'H_EOF'
+saida="$(parallel_installs)"
+[ "$(printf '%s\n' "$saida" | wc -l)" -eq 1 ] || { echo PARALLEL_BAD; exit 1; }
+case "$saida" in *vesktop*) ;; *) echo PARALLEL_BAD; exit 1 ;; esac
+# So com Discord puro (o caso do usuario): sai 0 e lista nada.
+rm -rf /home/testuser/.local/share/vesktop /home/testuser/.var/app
+saida="$(parallel_installs)"
+[ -z "$saida" ] || { echo PARALLEL_BAD; exit 1; }
+echo PARALLEL_OK
+H_EOF
+
+    if "$RUNTIME" run --rm \
+            -v "$HARNESS:/t.sh:ro" \
+            -v "$home:/home/testuser" \
+            -e HOME=/home/testuser \
+            -e XDG_DATA_HOME=/home/testuser/.local/share \
+            "$img" "$shell" /t.sh 2>/dev/null | grep -q PARALLEL_OK; then
+        ok "parallel_installs $shell ($img)"
+    else
+        bad "parallel_installs $shell ($img)"
     fi
     rm -f "$HARNESS"
     "$RUNTIME" run --rm -u root -v "$home:/h" debian:stable-slim rm -rf /h >/dev/null 2>&1 || true
