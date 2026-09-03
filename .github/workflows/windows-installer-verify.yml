@@ -11,6 +11,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -33,4 +35,4 @@ jobs:
           node tests/test-gateway-zumbi-revive.cjs
       - name: Diff hygiene
         shell: bash
-        run: git diff --check HEAD~4..HEAD
+        run: git diff --check origin/main...HEAD
