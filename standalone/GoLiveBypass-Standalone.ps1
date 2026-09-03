@@ -750,7 +750,7 @@ function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
 
         [byte[]]$hello = @(5,1,0)
         $stream.Write($hello,0,$hello.Length)
-        [byte[]]$reply = @(Read-ExactBytes $stream 2)
+        $reply = Read-ExactBytes $stream 2
         if ($reply[0] -ne 5 -or $reply[1] -ne 0) {
             $script:LastTorProbe = 'SOCKS greeting recusado'
             return $false
@@ -763,14 +763,14 @@ function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
         $request[5+$host.Length]=1; $request[6+$host.Length]=187
         $stream.Write($request,0,$request.Length)
 
-        [byte[]]$head = @(Read-ExactBytes $stream 4)
+        $head = Read-ExactBytes $stream 4
         if ($head[0] -ne 5 -or $head[1] -ne 0) {
             $script:LastTorProbe = "SOCKS CONNECT recusado (codigo $($head[1]))"
             return $false
         }
         switch ($head[3]) {
             1 { [void](Read-ExactBytes $stream 6) }
-            3 { [byte[]]$n=@(Read-ExactBytes $stream 1); [void](Read-ExactBytes $stream ([int]$n[0]+2)) }
+            3 { $n=Read-ExactBytes $stream 1; [void](Read-ExactBytes $stream ([int]$n[0]+2)) }
             4 { [void](Read-ExactBytes $stream 18) }
             default { return $false }
         }
