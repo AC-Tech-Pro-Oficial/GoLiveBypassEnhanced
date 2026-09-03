@@ -220,7 +220,7 @@ function Backup-ModSettings([string]$name) {
         throw "O settings.json do $name existe mas nao e JSON valido. Nao vou reescrever suas configuracoes. Backup: $backup"
     }
 
-    Write-Host "  [OK] Backup das configuracoes do $name: $backup" -ForegroundColor Green
+    Write-Host "  [OK] Backup das configuracoes do ${name}: $backup" -ForegroundColor Green
     return [pscustomobject]@{ Path = $settings; Backup = $backup; PluginNames = $names }
 }
 
