@@ -1386,16 +1386,116 @@ function Get-TorExe {
 }
 
 function Test-TorReady {
-    # O probe barato: se a porta 9060 aceita conexao, um Tor ja esta escutando. Quem instalou
-    # o Tor por aqui tem o daemon verificado na hora; se for o Tor da GUI, ele tambem serve.
+    # Cheap ownership/bootstrap hint only. A listening SOCKS port is NOT readiness:
+    # Tor opens it before a usable circuit necessarily exists.
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         $task = $client.ConnectAsync('127.0.0.1', $TorPort)
         if (-not $task.Wait(1500)) { $client.Close(); return $false }
-        if (-not $client.Connected) { $client.Close(); return $false }
+        $ok = $client.Connected
         $client.Close()
-        return $true
+        return $ok
     } catch { return $false }
+}
+
+function Read-ExactBytes($stream, [int]$count) {
+    [byte[]]$buffer = New-Object byte[] $count
+    $offset = 0
+    while ($offset -lt $count) {
+        $read = $stream.Read($buffer, $offset, $count - $offset)
+        if ($read -le 0) { throw 'socket fechou antes da resposta completa' }
+        $offset += $read
+    }
+    return ,$buffer
+}
+
+function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
+    $target = 'gateway.discord.gg'
+    $client = $null
+    $ssl = $null
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $connect = $client.BeginConnect('127.0.0.1', $TorPort, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne(1500)) { return $false }
+        $client.EndConnect($connect)
+
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = $TimeoutMs
+        $stream.WriteTimeout = $TimeoutMs
+
+        # SOCKS5: no-auth greeting.
+        [byte[]]$hello = @(5, 1, 0)
+        $stream.Write($hello, 0, $hello.Length)
+        [byte[]]$helloReply = @(Read-ExactBytes $stream 2)
+        if ($helloReply.Length -ne 2 -or $helloReply[0] -ne 5 -or $helloReply[1] -ne 0) { return $false }
+
+        # SOCKS5 CONNECT using the hostname so Tor resolves it remotely.
+        [byte[]]$hostBytes = [Text.Encoding]::ASCII.GetBytes($target)
+        if ($hostBytes.Length -gt 255) { return $false }
+        [byte[]]$request = New-Object byte[] ($hostBytes.Length + 7)
+        $request[0] = 5
+        $request[1] = 1
+        $request[2] = 0
+        $request[3] = 3
+        $request[4] = [byte]$hostBytes.Length
+        [Array]::Copy($hostBytes, 0, $request, 5, $hostBytes.Length)
+        $request[5 + $hostBytes.Length] = 1
+        $request[6 + $hostBytes.Length] = 187 # 443 = 0x01BB
+        $stream.Write($request, 0, $request.Length)
+
+        [byte[]]$head = @(Read-ExactBytes $stream 4)
+        if ($head.Length -ne 4 -or $head[0] -ne 5 -or $head[1] -ne 0) { return $false }
+
+        # Consume the SOCKS bind address before starting TLS.
+        switch ($head[3]) {
+            1 { [void](Read-ExactBytes $stream 6) }   # IPv4 + port
+            3 {
+                [byte[]]$size = @(Read-ExactBytes $stream 1)
+                [void](Read-ExactBytes $stream ([int]$size[0] + 2))
+            }
+            4 { [void](Read-ExactBytes $stream 18) }  # IPv6 + port
+            default { return $false }
+        }
+
+        # Port-open and SOCKS CONNECT are still not enough: prove the tunnel can
+        # complete TLS to the exact Discord gateway host.
+        $ssl = New-Object System.Net.Security.SslStream($stream, $false)
+        $auth = $ssl.BeginAuthenticateAsClient($target, $null, $null)
+        if (-not $auth.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+        $ssl.EndAuthenticateAsClient($auth)
+        return $ssl.IsAuthenticated
+    } catch {
+        return $false
+    } finally {
+        if ($ssl) { try { $ssl.Dispose() } catch { } }
+        if ($client) { try { $client.Close() } catch { } }
+    }
+}
+
+function Wait-TorGateway([int]$TimeoutSeconds = 90) {
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        if (Test-TorReady) {
+            Write-Step 'Porta SOCKS aberta; confirmando tunel TLS ate o gateway do Discord'
+            if (Test-TorGatewayTunnel 20000) { return $true }
+        }
+        Start-Sleep -Milliseconds 1500
+    }
+    return $false
+}
+
+function Stop-ManagedTor($exe) {
+    if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return }
+    try {
+        $target = [IO.Path]::GetFullPath($exe)
+        Get-CimInstance Win32_Process -Filter "Name='tor.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                if ($_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $target) {
+                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
+    } catch { }
 }
 
 function Get-TorServiceStatus {
@@ -1410,21 +1510,29 @@ function Install-Tor {
     $base = Get-TorBaseDir
     $exe = Get-TorExe
     $torrc = Join-Path $base 'torrc'
+    $bootstrapLog = Join-Path $base 'tor-bootstrap.log'
 
-    # Ja esta pondo a luz? Nada a fazer. Isso cobre um Tor do sistema (9050/9150) e o da GUI
-    # (9060) que ja esteja rodando — a GUI morre com ela, mas se esta de pe agora, serve.
+    # A porta pode abrir varios segundos/minutos antes de existir circuito. If it is
+    # already listening, first give that daemon a chance to prove end-to-end delivery.
     if (Test-TorReady) {
-        Write-Ok "Tor ja esta atendendo em 127.0.0.1:$TorPort — reaproveitando."
-        return $true
-    }
+        Write-Step "Tor escutando em 127.0.0.1:$TorPort; validando o circuito"
+        if (Wait-TorGateway 45) {
+            if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $torrc)) {
+                [void](Set-RunKey $exe $torrc)
+            }
+            Write-Ok 'Tor abriu SOCKS + TLS ate gateway.discord.gg.'
+            return $true
+        }
 
-    # Primeiro tenta achar um Tor do sistema para reaproveitar o binario (sem baixar nada).
-    if (Test-Tool 'tor') {
-        Write-Step 'Tor do sistema encontrado; verificando se ele atende'
-        # Um tor do sistema usa a porta dele; o nosso servicio usa a 9060. O daemon do sistema
-        # so vale se ele ja estiver escutando na 9060 — senao, baixamos o nosso.
-        if (-not (Test-TorReady)) {
-            Write-Step 'Tor do sistema nao atende na porta 9060; baixando o bundle'
+        # A stuck daemon owned by GoLiveBypass may be restarted safely. Never kill
+        # Tor Browser/system Tor: exact executable path is mandatory.
+        if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $torrc)) {
+            Write-Warn 'Nosso Tor esta escutando mas nao entrega o gateway; reiniciando somente este daemon.'
+            Stop-ManagedTor $exe
+            Start-Sleep -Milliseconds 700
+        } else {
+            Write-Warn 'Existe algo na porta 9060, mas nao e um Tor utilizavel que este instalador possa reiniciar.'
+            return $false
         }
     }
 
@@ -1450,7 +1558,6 @@ function Install-Tor {
 
         Write-Step 'Extraindo o Tor'
         New-Item -ItemType Directory -Path $base -Force | Out-Null
-        # O bundle compacta um único diretório "tor"; tar.exe do Windows 11+ extrai direto.
         & tar -xzf $archive -C $base --exclude 'tor/pluggable_transports/*' --exclude 'debug/*'
         if ($LASTEXITCODE -ne 0) {
             Write-Warn 'Falha ao extrair o bundle do Tor.'
@@ -1464,51 +1571,40 @@ function Install-Tor {
         return $false
     }
 
-    # torrc com a porta dedicada, como a GUI usa.
     $dataDir = Join-Path $base 'data-state'
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-    $geoip = Join-Path $base 'tor\data'
+    $logPath = ($bootstrapLog -replace '\\','/')
     $torrcText = @"
 SocksPort $TorPort
-DataDirectory $($dataDir -replace '\\','\')
+ClientOnly 1
+DataDirectory $($dataDir -replace '\','/')
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
-        "GeoIPFile $(Join-Path $base 'tor\data\geoip')"
+        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\','/')"
     }
 )
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
-        "GeoIPv6File $(Join-Path $base 'tor\data\geoip6')"
+        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\','/')"
     }
 )
-Log notice stdout
+Log notice file "$logPath"
 "@
     Save-Text $torrc $torrcText
 
-    # O caminho do Windows: o servico (tor.exe --service install) roda como LocalService e
-    # nao tem acesso a %LOCALAPPDATA% do usuario, entao o Tor nao consegue escrever no
-    # DataDirectory e o servico fica parado. A Run key sobe o Tor no logon do USUARIO — mesmo
-    # contexto da GUI — e e o caminho que funciona aqui, com ou sem admin. So vale a pena o
-    # servico se o DataDirectory morar em ProgramData (caso da GUI), nao dos instaladores.
-    Write-Step 'Registrando o Tor na inicializacao do usuario (sobe no logon)'
-    Set-RunKey $exe $torrc
+    Write-Step 'Registrando o Tor na inicializacao do usuario (invisivel)'
+    if (-not (Set-RunKey $exe $torrc)) { return $false }
 
-    # A Run key so vale no proximo logon; para a sessao atual, sobe o daemon agora.
-    Write-Step 'Iniciando o Tor'
+    Write-Step 'Iniciando o Tor sem janela'
     Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
 
-    # Espera subir e valida com um tunel SOCKS de verdade.
-    Write-Step 'Esperando o Tor subir'
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Milliseconds 1000
-        if (Test-TorReady) { break }
-    }
-
-    if (-not (Test-TorReady)) {
-        Write-Warn 'Tor nao subiu em 30s. Veja o log em tor/data-state.'
+    Write-Step 'Esperando bootstrap + SOCKS + TLS ate gateway.discord.gg'
+    if (-not (Wait-TorGateway 90)) {
+        Write-Warn "Tor abriu a porta mas nao conseguiu entregar o gateway. Log: $bootstrapLog"
         return $false
     }
-    Write-Ok "Tor atendendo em 127.0.0.1:$TorPort"
+
+    Write-Ok "Tor pronto de verdade em 127.0.0.1:$TorPort (gateway TLS confirmado)."
     return $true
 }
 
