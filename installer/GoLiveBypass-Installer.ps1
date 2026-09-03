@@ -72,17 +72,18 @@ $Mods = @{
     Vencord  = @{ Git = 'https://github.com/Vendicated/Vencord'; Label = 'Vencord'; Note = 'o original, mais enxuto' }
 }
 
-# Tor embutido: mesma versao e mesmos hashes da GUI (golive-gui/electron/main.ts), para os
-# instaladores de linha de comando entregarem exatamente o mesmo daemon que ela usa. A porta
-# dedicada 9060 evita conflito com um Tor do sistema (9050) ou do Tor Browser (9150).
-$TorBundle = '13.5'
+# Tor embutido. Tor 0.4.8 e anteriores deixaram de funcionar na rede em 2026-09-01,
+# entao o enhanced fork fixa o Expert Bundle atual (Tor Browser 15.0.21 / Tor 0.4.9.11).
+# A porta dedicada 9060 evita conflito com Tor do sistema (9050) ou Tor Browser (9150).
+$TorBundle = '15.0.21'
 $TorPort = 9060
 $TorUrls = @{
-    'tor-expert-bundle-windows-x86_64-13.5.tar.gz' = @{
-        Url = 'https://archive.torproject.org/tor-package-archive/torbrowser/13.5/tor-expert-bundle-windows-x86_64-13.5.tar.gz'
-        Sha256 = '5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb'
+    'tor-expert-bundle-windows-x86_64-15.0.21.tar.gz' = @{
+        Url = 'https://dist.torproject.org/torbrowser/15.0.21/tor-expert-bundle-windows-x86_64-15.0.21.tar.gz'
+        Sha256 = 'f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490'
     }
 }
+$script:LastTorProbe = 'nao executado'
 
 function Write-Step($text) { Write-Host "  [*] $text" -ForegroundColor DarkGray }
 function Write-Ok($text) { Write-Host "  [OK] $text" -ForegroundColor Green }
@@ -107,7 +108,7 @@ function Show-Banner {
     Write-Host ''
     Write-Host '  GoLiveBypass' -ForegroundColor Cyan
     Write-Host '  Go Live e camera de volta no Discord' -ForegroundColor DarkGray
-    Write-Host '  https://github.com/bezumiya/GoLiveBypass' -ForegroundColor DarkGray
+    Write-Host '  https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -1424,23 +1425,32 @@ function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
     $target = 'gateway.discord.gg'
     $client = $null
     $ssl = $null
+    $script:LastTorProbe = 'TCP local'
+
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         $connect = $client.BeginConnect('127.0.0.1', $TorPort, $null, $null)
-        if (-not $connect.AsyncWaitHandle.WaitOne(1500)) { return $false }
+        if (-not $connect.AsyncWaitHandle.WaitOne(1500)) {
+            $script:LastTorProbe = 'timeout conectando na porta SOCKS local'
+            return $false
+        }
         $client.EndConnect($connect)
 
         $stream = $client.GetStream()
         $stream.ReadTimeout = $TimeoutMs
         $stream.WriteTimeout = $TimeoutMs
 
+        $script:LastTorProbe = 'SOCKS5 greeting'
         [byte[]]$hello = @(5, 1, 0)
         $stream.Write($hello, 0, $hello.Length)
         [byte[]]$helloReply = @(Read-ExactBytes $stream 2)
-        if ($helloReply.Length -ne 2 -or $helloReply[0] -ne 5 -or $helloReply[1] -ne 0) { return $false }
+        if ($helloReply.Length -ne 2 -or $helloReply[0] -ne 5 -or $helloReply[1] -ne 0) {
+            $script:LastTorProbe = 'SOCKS5 greeting recusado'
+            return $false
+        }
 
+        $script:LastTorProbe = 'SOCKS5 CONNECT gateway.discord.gg:443'
         [byte[]]$hostBytes = [Text.Encoding]::ASCII.GetBytes($target)
-        if ($hostBytes.Length -gt 255) { return $false }
         [byte[]]$request = New-Object byte[] ($hostBytes.Length + 7)
         $request[0] = 5
         $request[1] = 1
@@ -1453,7 +1463,14 @@ function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
         $stream.Write($request, 0, $request.Length)
 
         [byte[]]$head = @(Read-ExactBytes $stream 4)
-        if ($head.Length -ne 4 -or $head[0] -ne 5 -or $head[1] -ne 0) { return $false }
+        if ($head.Length -ne 4 -or $head[0] -ne 5) {
+            $script:LastTorProbe = 'resposta SOCKS invalida'
+            return $false
+        }
+        if ($head[1] -ne 0) {
+            $script:LastTorProbe = "SOCKS CONNECT recusado (codigo $($head[1]))"
+            return $false
+        }
 
         switch ($head[3]) {
             1 { [void](Read-ExactBytes $stream 6) }
@@ -1462,15 +1479,29 @@ function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
                 [void](Read-ExactBytes $stream ([int]$size[0] + 2))
             }
             4 { [void](Read-ExactBytes $stream 18) }
-            default { return $false }
+            default {
+                $script:LastTorProbe = 'tipo de endereco SOCKS desconhecido'
+                return $false
+            }
         }
 
+        $script:LastTorProbe = 'TLS gateway.discord.gg'
         $ssl = New-Object System.Net.Security.SslStream($stream, $false)
         $auth = $ssl.BeginAuthenticateAsClient($target, $null, $null)
-        if (-not $auth.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+        if (-not $auth.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            $script:LastTorProbe = 'timeout no TLS do gateway'
+            return $false
+        }
         $ssl.EndAuthenticateAsClient($auth)
-        return $ssl.IsAuthenticated
+        if (-not $ssl.IsAuthenticated) {
+            $script:LastTorProbe = 'TLS terminou sem autenticacao'
+            return $false
+        }
+
+        $script:LastTorProbe = 'OK SOCKS5 + TLS'
+        return $true
     } catch {
+        $script:LastTorProbe = "erro em probe: $($_.Exception.GetType().Name): $($_.Exception.Message)"
         return $false
     } finally {
         if ($ssl) { try { $ssl.Dispose() } catch { } }
@@ -1478,15 +1509,46 @@ function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
     }
 }
 
+function Test-TorGatewayWithCurl([int]$TimeoutSeconds = 25) {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curl) { return $false }
+
+    try {
+        $out = & $curl.Source --silent --show-error --socks5-hostname "127.0.0.1:$TorPort" --connect-timeout 15 --max-time $TimeoutSeconds --output NUL --write-out '%{http_code}' 'https://gateway.discord.gg/?v=10&encoding=json' 2>$null
+        if ($LASTEXITCODE -eq 0 -and "$out" -match '^\d{3}$' -and "$out" -ne '000') {
+            $script:LastTorProbe = "OK via curl (HTTP $out)"
+            return $true
+        }
+    } catch { }
+
+    return $false
+}
+
 function Wait-TorGateway([int]$TimeoutSeconds = 90) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $lastStatusAt = -10000
+    $announcedPort = $false
+
     while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         if (Test-TorReady) {
-            Write-Step 'Porta SOCKS aberta; confirmando tunel TLS ate o gateway do Discord'
-            if (Test-TorGatewayTunnel 20000) { return $true }
+            if (-not $announcedPort) {
+                Write-Step 'Porta SOCKS aberta; aguardando circuito funcional ate o gateway do Discord'
+                $announcedPort = $true
+            }
+
+            if ((Test-TorGatewayTunnel 20000) -or (Test-TorGatewayWithCurl 25)) {
+                return $true
+            }
+
+            if (($watch.ElapsedMilliseconds - $lastStatusAt) -ge 10000) {
+                Write-Step "Tor ainda inicializando: $script:LastTorProbe"
+                $lastStatusAt = $watch.ElapsedMilliseconds
+            }
         }
-        Start-Sleep -Milliseconds 1500
+
+        Start-Sleep -Milliseconds 1000
     }
+
     return $false
 }
 
@@ -1548,45 +1610,43 @@ function Install-Tor {
     $exe = Get-TorExe
     $torrc = Join-Path $base 'torrc'
     $bootstrapLog = Join-Path $base 'tor-bootstrap.log'
+    $marker = Join-Path $base 'bundle-version.txt'
     $legacyVisibleStartup = Test-LegacyTorStartup
 
-    if (Test-TorReady) {
-        Write-Step "Tor escutando em 127.0.0.1:$TorPort; validando o circuito"
-        if (Wait-TorGateway 45) {
-            if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $torrc)) {
-                [void](Set-RunKey $exe $torrc)
-                Remove-LegacyTorStartupEntries
+    $installedBundle = $null
+    if (Test-Path -LiteralPath $marker) {
+        try { $installedBundle = (Get-Content -LiteralPath $marker -Raw).Trim() } catch { }
+    }
 
-                if ($legacyVisibleStartup) {
-                    Write-Step 'Migrando o Tor visivel desta sessao para o launcher oculto'
-                    Stop-ManagedTor $exe
-                    Start-Sleep -Milliseconds 700
-                    Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
-                    if (-not (Wait-TorGateway 90)) {
-                        Write-Warn 'Tor nao voltou saudavel depois da migracao para modo oculto.'
-                        return $false
-                    }
-                }
-            }
+    if ((Test-Path -LiteralPath $exe) -and $installedBundle -ne $TorBundle) {
+        Write-Step "Atualizando Tor antigo para Expert Bundle $TorBundle (Tor 0.4.9.11)"
+        Stop-ManagedTor $exe
+        Start-Sleep -Milliseconds 600
+        Remove-CaminhoSilencioso (Join-Path $base 'tor')
+        Remove-CaminhoSilencioso (Join-Path $base 'data')
+        Remove-CaminhoSilencioso $marker
+    }
+
+    if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $marker) -and (Test-TorReady)) {
+        Write-Step "Tor $TorBundle escutando em 127.0.0.1:$TorPort; validando circuito"
+        if (Wait-TorGateway 45) {
+            [void](Set-RunKey $exe $torrc)
+            Remove-LegacyTorStartupEntries
             Write-Ok 'Tor abriu SOCKS + TLS ate gateway.discord.gg.'
             return $true
         }
 
-        if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $torrc)) {
-            Write-Warn 'Nosso Tor esta escutando mas nao entrega o gateway; reiniciando somente este daemon.'
-            Stop-ManagedTor $exe
-            Start-Sleep -Milliseconds 700
-        } else {
-            Write-Warn 'Existe algo na porta 9060, mas nao e um Tor utilizavel que este instalador possa reiniciar.'
-            return $false
-        }
+        Write-Warn "Tor atual esta escutando mas nao entrega o gateway ($script:LastTorProbe); reiniciando somente este daemon."
+        Stop-ManagedTor $exe
+        Start-Sleep -Milliseconds 700
     }
 
     if (-not (Test-Path -LiteralPath $exe)) {
-        Write-Step 'Baixando o Tor (tor-expert-bundle 13.5, ~30 MB)'
+        Write-Step "Baixando Tor Expert Bundle $TorBundle (Tor 0.4.9.11, ~22 MB)"
         $asset = $TorUrls.Values | Select-Object -First 1
         $temp = if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
         $archive = Join-Path $temp $asset.Url.Split('/')[-1]
+
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $asset.Url -OutFile $archive
         } catch {
@@ -1594,11 +1654,11 @@ function Install-Tor {
             return $false
         }
 
-        Write-Step 'Conferindo SHA-256'
+        Write-Step 'Conferindo SHA-256 oficial'
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
         if ($hash -ne $asset.Sha256.ToLower()) {
             Remove-CaminhoSilencioso $archive
-            Write-Warn 'O download do Tor veio corrompido (SHA-256 diferente). Abortando.'
+            Write-Warn "SHA-256 do Tor nao confere (obtido $hash). Abortando."
             return $false
         }
 
@@ -1625,12 +1685,16 @@ SocksPort $TorPort
 ClientOnly 1
 DataDirectory $($dataDir -replace '\\','/')
 $(
-    if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
+    if (Test-Path -LiteralPath (Join-Path $base 'data\geoip')) {
+        "GeoIPFile $((Join-Path $base 'data\geoip') -replace '\\','/')"
+    } elseif (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
         "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\\','/')"
     }
 )
 $(
-    if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
+    if (Test-Path -LiteralPath (Join-Path $base 'data\geoip6')) {
+        "GeoIPv6File $((Join-Path $base 'data\geoip6') -replace '\\','/')"
+    } elseif (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
         "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\\','/')"
     }
 )
@@ -1642,16 +1706,25 @@ Log notice file "$logPath"
     if (-not (Set-RunKey $exe $torrc)) { return $false }
     Remove-LegacyTorStartupEntries
 
+    Stop-ManagedTor $exe
+    Start-Sleep -Milliseconds 300
     Write-Step 'Iniciando o Tor sem janela'
     Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
 
     Write-Step 'Esperando bootstrap + SOCKS + TLS ate gateway.discord.gg'
-    if (-not (Wait-TorGateway 90)) {
-        Write-Warn "Tor abriu a porta mas nao conseguiu entregar o gateway. Log: $bootstrapLog"
+    if (-not (Wait-TorGateway 120)) {
+        Write-Warn "Tor nao conseguiu entregar o gateway: $script:LastTorProbe"
+        if (Test-Path -LiteralPath $bootstrapLog) {
+            Write-Host '      Ultimas linhas do tor-bootstrap.log:' -ForegroundColor DarkGray
+            Get-Content -LiteralPath $bootstrapLog -Tail 30 | ForEach-Object {
+                Write-Host "      $_" -ForegroundColor DarkGray
+            }
+        }
         return $false
     }
 
-    Write-Ok "Tor pronto de verdade em 127.0.0.1:$TorPort (gateway TLS confirmado)."
+    Save-Text $marker $TorBundle
+    Write-Ok "Tor $TorBundle pronto em 127.0.0.1:$TorPort (SOCKS5 + TLS confirmado)."
     return $true
 }
 
