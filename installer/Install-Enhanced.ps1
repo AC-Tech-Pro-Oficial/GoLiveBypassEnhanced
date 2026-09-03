@@ -50,6 +50,21 @@ foreach ($name in @('Discord', 'DiscordPTB', 'DiscordCanary')) {
     if (Get-Process -Name $name -ErrorAction SilentlyContinue) { $runningBefore += $name }
 }
 
+# Detecta instalacoes antigas que iniciavam nosso tor.exe diretamente e, por isso,
+# deixavam um console aberto. So consideramos entradas que apontam para a NOSSA pasta.
+$legacyVisibleTor = $false
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+try {
+    $props = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
+    foreach ($p in $props.PSObject.Properties) {
+        if ($p.Name -like 'PS*' -or -not ($p.Value -is [string])) { continue }
+        $v = [string]$p.Value
+        if ($v -match '(?i)GoLiveBypass[\\/]Tor' -and $v -match '(?i)tor\.exe' -and $v -notmatch '(?i)wscript\.exe') {
+            $legacyVisibleTor = $true
+        }
+    }
+} catch { }
+
 $work = Join-Path ([System.IO.Path]::GetTempPath()) 'GoLiveBypassEnhanced-installer'
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $installer = Join-Path $work 'GoLiveBypass-Standalone.ps1'
@@ -86,10 +101,48 @@ try {
 
     if (-not (Test-Port 9060)) { throw 'Tor nao esta atendendo na porta 9060 depois da instalacao.' }
 
-    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $run = (Get-ItemProperty -Path $runKey -Name 'GoLiveBypassTor' -ErrorAction Stop).GoLiveBypassTor
     if ($run -notmatch '(?i)wscript\.exe' -or $run -notmatch '(?i)GoLiveBypassTor\.vbs') {
         throw "A inicializacao do Tor nao ficou oculta: $run"
+    }
+
+    # Remove duplicatas antigas SOMENTE quando apontam para a pasta Tor do GoLiveBypass.
+    try {
+        $props = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -like 'PS*' -or $p.Name -eq 'GoLiveBypassTor' -or -not ($p.Value -is [string])) { continue }
+            $v = [string]$p.Value
+            if ($v -match '(?i)GoLiveBypass[\\/]Tor' -and $v -match '(?i)tor\.exe') {
+                Remove-ItemProperty -Path $runKey -Name $p.Name -ErrorAction SilentlyContinue
+                $legacyVisibleTor = $true
+            }
+        }
+    } catch { }
+
+    # Se a sessao atual nasceu de uma entrada antiga visivel, derruba APENAS o tor.exe
+    # que vive na nossa pasta e o relanca oculto. Tor Browser/outros daemons nao sao tocados.
+    if ($legacyVisibleTor) {
+        $torExe = Join-Path $installDir 'Tor\tor\tor.exe'
+        $torrc = Join-Path $installDir 'Tor\torrc'
+        if ((Test-Path -LiteralPath $torExe) -and (Test-Path -LiteralPath $torrc)) {
+            try {
+                $target = [IO.Path]::GetFullPath($torExe)
+                Get-CimInstance Win32_Process -Filter "Name='tor.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+                    try {
+                        if ($_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $target) {
+                            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                        }
+                    } catch { }
+                }
+                Start-Sleep -Milliseconds 500
+                Start-Process -FilePath $torExe -ArgumentList '-f', $torrc -WindowStyle Hidden
+                for ($i = 0; $i -lt 20 -and -not (Test-Port 9060); $i++) { Start-Sleep -Milliseconds 500 }
+                if (-not (Test-Port 9060)) { throw 'Tor nao voltou depois da migracao para o modo oculto.' }
+                Write-Host '  [OK] Tor antigo visivel foi reiniciado em modo oculto.' -ForegroundColor Green
+            } catch {
+                throw "Falha ao migrar o Tor visivel para oculto: $($_.Exception.Message)"
+            }
+        }
     }
 
     Write-Host ''
