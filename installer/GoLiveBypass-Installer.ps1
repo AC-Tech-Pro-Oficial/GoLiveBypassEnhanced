@@ -50,7 +50,11 @@ $RepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEn
 $PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypass/rtcRecovery.ts', 'goLiveBypass/rtcShim.ts', 'goLiveBypass/manifest.json')
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
-$DiscordStableUrl = 'https://discord.com/api/download?platform=win&format=exe'
+$DiscordStableUrls = @(
+    'https://discord.com/api/downloads/distributions/app/installers/latest?channel=stable&platform=win&arch=x64',
+    'https://discordapp.com/api/download?platform=win',
+    'https://discord.com/api/download?platform=win&format=exe'
+)
 
 # O caminho base tem que RESOLVER, nao apenas existir na variavel (mesmo raciocinio do
 # standalone): perfil com nome acentuado/especial pode ter %LOCALAPPDATA% gravado na
@@ -568,9 +572,25 @@ function Install-OfficialDiscordStable {
     $setup = Join-Path $tempRoot 'DiscordSetup.exe'
 
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $DiscordStableUrl -OutFile $setup
-        if (-not (Test-Path -LiteralPath $setup) -or (Get-Item -LiteralPath $setup).Length -lt 1000000) {
-            throw 'o download do Discord veio incompleto'
+        $downloaded = $false
+        $downloadErrors = @()
+        foreach ($url in $DiscordStableUrls) {
+            try {
+                Remove-CaminhoSilencioso $setup
+                Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $setup -Headers @{
+                    'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36'
+                }
+                if ((Test-Path -LiteralPath $setup) -and (Get-Item -LiteralPath $setup).Length -ge 1000000) {
+                    $downloaded = $true
+                    break
+                }
+                $downloadErrors += "$url => arquivo incompleto"
+            } catch {
+                $downloadErrors += "$url => $($_.Exception.Message)"
+            }
+        }
+        if (-not $downloaded) {
+            throw "nenhum endpoint oficial entregou o instalador: $($downloadErrors -join ' | ')"
         }
 
         Write-Step 'Validando assinatura digital do DiscordSetup.exe'
