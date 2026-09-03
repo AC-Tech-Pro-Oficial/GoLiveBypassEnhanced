@@ -1068,7 +1068,7 @@ function Copy-Plugin($root) {
 
     foreach ($file in $PluginFiles) {
         $leaf = Split-Path -Leaf $file
-        if ($PluginSource -eq '') {
+        if (-not $PluginSource -or [string]::IsNullOrWhiteSpace($PluginSource)) {
             Save-Text (Join-Path $target $leaf) (Get-RepoFile $file)
             continue
         }
@@ -1078,7 +1078,9 @@ function Copy-Plugin($root) {
         Copy-Item -LiteralPath $local -Destination (Join-Path $target $leaf) -Force
     }
 
-    if ($PluginSource -ne '') { Write-Warn "Plugin copiado de $PluginSource, e nao do GitHub." }
+    if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
+        Write-Warn "Plugin copiado de $PluginSource, e nao do GitHub."
+    }
 }
 
 function Build-Mod($root) {
