@@ -1776,8 +1776,7 @@ function Select-Proxy {
     switch (Read-Escolha '  Escolha') {
         '2' {
             if (-not (Install-Tor)) {
-                Write-Warn 'Nao deu para preparar o Tor. Seguindo com proxy gratuita.'
-                return ''
+                throw 'Tor nao conseguiu abrir um tunel TLS ate gateway.discord.gg. Nao vou cair para proxy publica.'
             }
             return "socks5://127.0.0.1:$TorPort"
         }
