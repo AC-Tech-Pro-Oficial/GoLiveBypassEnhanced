@@ -37,7 +37,9 @@ jobs:
           tail -n 25 /tmp/enhanced-before.log
 
       - name: Apply deterministic enhanced RTC transform
-        run: python3 scripts/apply-enhanced-rtc.py
+        run: |
+          python3 scripts/apply-enhanced-rtc.py
+          python3 scripts/apply-enhanced-rtc-gui-tests.py
 
       - name: Run enhanced RTC regression
         run: node tests/test-enhanced-rtc-recovery.cjs
@@ -58,7 +60,7 @@ jobs:
 
       - name: Run GUI tests
         working-directory: golive-gui
-        run: npm test
+        run: npm test -- --reporter=verbose
 
       - name: Compile GUI
         working-directory: golive-gui
@@ -85,12 +87,17 @@ jobs:
               'tests/test-native-rtc-recovery.cjs',
               'CHANGELOG.md',
               'golive-gui/electron/bypass.ts',
+              'golive-gui/tests/gateway-probe.test.ts',
           }
           changed = set(subprocess.check_output(['git','diff','--name-only'], text=True).splitlines())
           unexpected = changed - allowed
           if unexpected:
               raise SystemExit('Unexpected generated changes: ' + ', '.join(sorted(unexpected)))
-          missing = {'standalone/golivebypass.js', 'golive-gui/electron/bypass.ts'} - changed
+          missing = {
+              'standalone/golivebypass.js',
+              'golive-gui/electron/bypass.ts',
+              'golive-gui/tests/gateway-probe.test.ts',
+          } - changed
           if missing:
               raise SystemExit('Expected generated changes missing: ' + ', '.join(sorted(missing)))
           PY
@@ -101,6 +108,6 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add standalone/golivebypass.js tests/test-native-rtc-recovery.cjs CHANGELOG.md golive-gui/electron/bypass.ts
+          git add standalone/golivebypass.js tests/test-native-rtc-recovery.cjs CHANGELOG.md golive-gui/electron/bypass.ts golive-gui/tests/gateway-probe.test.ts
           git commit -m 'fix: add role-aware native RTC recovery [enhanced-generated]'
           git push origin HEAD:enhanced/rtc-viewer-recovery-v1
