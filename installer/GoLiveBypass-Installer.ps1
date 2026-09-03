@@ -1011,9 +1011,16 @@ function Install-Toolchain($needGit) {
             & winget install --id $id --accept-source-agreements --accept-package-agreements --silent | Out-Host
         }
 
-        Write-Host ''
-        Write-Warn 'Feche este terminal, abra outro e rode o instalador de novo para o PATH atualizar.'
-        exit 0
+        # winget updates the persistent PATH but not this PowerShell process.
+        # Refresh it here so the one-click install can continue without asking the
+        # user to open another terminal.
+        Update-PathFromEnvironment
+        $stillMissing = @()
+        if ($needGit -and -not (Test-Tool 'git')) { $stillMissing += 'git' }
+        if (-not (Test-Tool 'node')) { $stillMissing += 'node' }
+        if ($stillMissing.Count -gt 0) {
+            throw "O winget instalou $($stillMissing -join ', '), mas o executavel ainda nao apareceu no PATH desta sessao. Reinicie o Windows uma vez e rode o mesmo instalador novamente."
+        }
     }
 
     if (-not (Test-Pnpm)) { Install-Pnpm }
