@@ -40,6 +40,9 @@ jobs:
               exit 1
             }
           }
+      - name: Real Tor gateway smoke test
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode TestTor -Tor -Yes
       - name: Diff hygiene
         shell: bash
         run: git diff --check origin/main...HEAD
