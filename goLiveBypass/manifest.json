@@ -7,10 +7,10 @@
       "id": "1366453661970071633"
     }
   ],
-  "version": "1.1.11",
+  "version": "1.1.12-enhanced.1",
   "updater": {
     "type": "github",
-    "id": "bezumiya/GoLiveBypass",
+    "id": "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced",
     "assetName": "goLiveBypass-vencord.zip"
   }
 }
