@@ -1725,6 +1725,28 @@ Log notice file "$logPath"
 "@
     Save-Text $torrc $torrcText
 
+    $actualTorVersion = Get-ManagedTorVersion $exe
+    if (-not (Test-SupportedManagedTor $exe)) {
+        Write-Warn "O tor.exe baixado nao iniciou corretamente ou e antigo (versao detectada: $actualTorVersion)."
+        return $false
+    }
+    Write-Step "Binario Tor confirmado: $actualTorVersion"
+
+    Write-Step 'Validando torrc com o proprio Tor'
+    $verifyOutput = @()
+    try {
+        $verifyOutput = @(& $exe --verify-config -f $torrc 2>&1)
+        $verifyExit = $LASTEXITCODE
+    } catch {
+        Write-Warn "tor.exe falhou antes do bootstrap: $($_.Exception.Message)"
+        return $false
+    }
+    if ($verifyExit -ne 0) {
+        Write-Warn "torrc recusado pelo Tor (codigo $verifyExit)."
+        $verifyOutput | Select-Object -Last 20 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+        return $false
+    }
+
     Write-Step 'Registrando o Tor na inicializacao do usuario (invisivel)'
     if (-not (Set-RunKey $exe $torrc)) { return $false }
     Remove-LegacyTorStartupEntries
@@ -1732,7 +1754,25 @@ Log notice file "$logPath"
     Stop-ManagedTor $exe
     Start-Sleep -Milliseconds 300
     Write-Step 'Iniciando o Tor sem janela'
-    Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
+    try {
+        $torProcess = Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden -PassThru
+    } catch {
+        Write-Warn "Windows nao conseguiu iniciar tor.exe: $($_.Exception.Message)"
+        return $false
+    }
+
+    Start-Sleep -Milliseconds 1200
+    try {
+        if ($torProcess.HasExited) {
+            Write-Warn "tor.exe encerrou imediatamente (codigo $($torProcess.ExitCode))."
+            if (Test-Path -LiteralPath $bootstrapLog) {
+                Get-Content -LiteralPath $bootstrapLog -Tail 30 | ForEach-Object {
+                    Write-Host "      $_" -ForegroundColor DarkGray
+                }
+            }
+            return $false
+        }
+    } catch { }
 
     Write-Step 'Esperando bootstrap + SOCKS + TLS ate gateway.discord.gg'
     if (-not (Wait-TorGateway 120)) {
@@ -1747,11 +1787,6 @@ Log notice file "$logPath"
     }
 
     $actualTorVersion = Get-ManagedTorVersion $exe
-    if (-not (Test-SupportedManagedTor $exe)) {
-        Write-Warn "O binario extraido nao reporta Tor 0.4.9+ (versao detectada: $actualTorVersion)."
-        return $false
-    }
-
     Save-Text $marker $TorBundle
     Write-Ok "Tor $TorBundle / $actualTorVersion pronto em 127.0.0.1:$TorPort (SOCKS5 + TLS confirmado)."
     return $true
