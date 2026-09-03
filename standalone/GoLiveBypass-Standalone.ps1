@@ -58,6 +58,7 @@ function Get-EffectiveLocalApp {
 $LocalApp = Get-EffectiveLocalApp
 $InstallDir = Join-Path $LocalApp 'GoLiveBypass'
 $PatcherName = 'golivebypass.js'
+$EnhancedRepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1'
 $DiscordFlavours = @('Discord', 'DiscordPTB', 'DiscordCanary')
 $StubPackage = '{"name":"discord","main":"index.js","version":"1.0.0"}'
 
@@ -661,7 +662,7 @@ function Install-Patcher {
         $code = [IO.File]::ReadAllText($source)
     } else {
         Write-Step "Baixando $PatcherName do GitHub"
-        $url = "https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/standalone/$PatcherName"
+        $url = "$EnhancedRepoRaw/standalone/$PatcherName"
         try {
             $code = (Invoke-WebRequest -UseBasicParsing -Uri $url).Content
         } catch {
@@ -721,6 +722,13 @@ function Install-Tor {
     # Ja esta atendendo? Reusa (pode ser o Tor da GUI, que morre com ela, ou o servico nosso).
     if (Test-TorReady) {
         Write-Ok "Tor ja esta atendendo em 127.0.0.1:$TorPort."
+        # Migracao importante: versoes antigas registravam tor.exe diretamente na
+        # Run key e abriam um console a cada logon. Mesmo com o daemon ja vivo,
+        # regrave a inicializacao pelo wrapper invisivel atual.
+        if ((Test-Path -LiteralPath $TorExe) -and (Test-Path -LiteralPath $TorTorrc)) {
+            Write-Step 'Reparando a inicializacao oculta do Tor'
+            Set-RunKey
+        }
         return $true
     }
 
