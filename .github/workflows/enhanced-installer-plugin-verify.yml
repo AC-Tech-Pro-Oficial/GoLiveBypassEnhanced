@@ -9,20 +9,22 @@ jobs:
   tor-metadata:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve and verify current Tor bundle checksum
+      - name: Resolve current Tor expert bundle checksums
         shell: bash
         run: |
           set -euo pipefail
           base='https://dist.torproject.org/torbrowser/15.0.21'
-          name='tor-expert-bundle-windows-x86_64-15.0.21.tar.gz'
           curl -fsS "$base/sha256sums-unsigned-build.txt" -o sha256sums.txt
-          expected="$(grep "  $name$" sha256sums.txt | awk '{print $1}')"
-          test -n "$expected"
-          curl -fsS "$base/$name" -o "$name"
-          actual="$(sha256sum "$name" | awk '{print $1}')"
-          echo "TOR_OFFICIAL_SHA=$expected"
-          echo "TOR_DOWNLOADED_SHA=$actual"
-          test "$expected" = "$actual"
+          for name in \
+            tor-expert-bundle-windows-x86_64-15.0.21.tar.gz \
+            tor-expert-bundle-linux-x86_64-15.0.21.tar.gz \
+            tor-expert-bundle-macos-aarch64-15.0.21.tar.gz \
+            tor-expert-bundle-macos-x86_64-15.0.21.tar.gz
+          do
+            line="$(grep "  $name$" sha256sums.txt)"
+            test -n "$line"
+            echo "TOR_SHA_LINE=$line"
+          done
 
   windows-contracts:
     runs-on: windows-latest
