@@ -11,6 +11,7 @@ import { request } from "https";
 import { AddressInfo, connect, createServer, Server, Socket } from "net";
 import { dirname, join } from "path";
 import { connect as connectTls } from "tls";
+import { rtcRecoveryStatus, startRtcRecovery, stopRtcRecovery } from "./rtcRecovery";
 
 const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
 const DISCORD_HOST = "discord.com";
@@ -1325,7 +1326,10 @@ async function stopRouter() {
 // dividirem uma unica subida em vez de duas.
 let enabling: Promise<{ success: boolean; }> | null = null;
 
-export function enable(_?: IpcMainInvokeEvent) {
+export function enable(event?: IpcMainInvokeEvent) {
+    // Vencord/Equicord keeps its own app.asar and plugins. Enhanced RTC recovery
+    // attaches through the plugin native bridge instead of replacing that injection.
+    startRtcRecovery(event?.sender, log);
     enabling ??= enableOnce().finally(() => { enabling = null; });
     return enabling;
 }
@@ -1425,6 +1429,7 @@ async function installPacWithScope(next: Scope) {
 }
 
 export async function shutdown(_: IpcMainInvokeEvent) {
+    stopRtcRecovery();
     await stopRouter();
     settleExit(null);
     // Drenados os que esperavam, a proxima ativacao precisa segurar o gateway de novo ate
@@ -1438,7 +1443,9 @@ export function getActiveProxy(_: IpcMainInvokeEvent) {
 }
 
 export function getLog(_: IpcMainInvokeEvent) {
-    return history.join("\n");
+    const rtc = rtcRecoveryStatus();
+    const rtcLine = `rtc.enhanced.status | active=${rtc.active ? "sim" : "nao"} pending=${rtc.pending ? rtc.pending.role + ":" + rtc.pending.level : "nenhum"} attempts=${rtc.attempts} blocked=${rtc.blocked ? "sim" : "nao"}`;
+    return history.concat([rtcLine]).join("\n");
 }
 
 export function sessionWorked(_: IpcMainInvokeEvent) {
