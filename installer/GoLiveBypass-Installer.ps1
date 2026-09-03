@@ -50,6 +50,7 @@ $RepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEn
 $PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypass/rtcRecovery.ts', 'goLiveBypass/rtcShim.ts', 'goLiveBypass/manifest.json')
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
+$DiscordStableUrl = 'https://discord.com/api/download?platform=win&format=exe'
 
 # O caminho base tem que RESOLVER, nao apenas existir na variavel (mesmo raciocinio do
 # standalone): perfil com nome acentuado/especial pode ter %LOCALAPPDATA% gravado na
@@ -285,6 +286,7 @@ function Test-ShouldReport([string]$msg) {
     if ($msg -like '*ja existe e nao parece um checkout*') { return $false }
     if ($msg -like 'Nao achei o patcher *') { return $false }
     if ($msg -like 'Nao achei nenhum Discord instalado*') { return $false }
+    if ($msg -like 'Nao consegui instalar o Discord oficial*') { return $false }
     # ferramenta externa (ambiente)
     if ($msg -eq 'git clone falhou') { return $false }
     if ($msg -eq 'pnpm install falhou') { return $false }
@@ -546,6 +548,79 @@ function Get-RepoFile($relativePath) {
 
 function Test-Tool($name) {
     return [bool] (Get-Command $name -ErrorAction SilentlyContinue)
+}
+
+function Test-DiscordPatchTarget {
+    try { return (@(Get-PatchTargets).Count -gt 0) } catch { return $false }
+}
+
+function Install-OfficialDiscordStable {
+    if (Test-DiscordPatchTarget) { return }
+
+    Write-Warn 'Nenhum cliente Discord compativel foi encontrado.'
+    Write-Step 'Baixando o Discord Stable oficial'
+
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) 'GoLiveBypassEnhanced-discord'
+    if (Test-Path -LiteralPath $tempRoot) {
+        Remove-CaminhoSilencioso $tempRoot
+    }
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    $setup = Join-Path $tempRoot 'DiscordSetup.exe'
+
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $DiscordStableUrl -OutFile $setup
+        if (-not (Test-Path -LiteralPath $setup) -or (Get-Item -LiteralPath $setup).Length -lt 1000000) {
+            throw 'o download do Discord veio incompleto'
+        }
+
+        Write-Step 'Validando assinatura digital do DiscordSetup.exe'
+        $sig = Get-AuthenticodeSignature -LiteralPath $setup
+        if (-not $sig -or $sig.Status -ne 'Valid' -or -not $sig.SignerCertificate) {
+            throw "assinatura Authenticode invalida (status=$($sig.Status))"
+        }
+        $subject = [string]$sig.SignerCertificate.Subject
+        if ($subject -notmatch '(?i)Discord') {
+            throw "assinatura valida, mas o editor nao e Discord ($subject)"
+        }
+        Write-Ok "DiscordSetup.exe assinado por $subject"
+
+        Write-Step 'Instalando o Discord Stable no perfil do usuario'
+        $proc = Start-Process -FilePath $setup -ArgumentList '-s' -WindowStyle Hidden -PassThru -Wait
+        if ($proc.ExitCode -ne 0) {
+            throw "DiscordSetup.exe terminou com codigo $($proc.ExitCode)"
+        }
+
+        # O bootstrap Squirrel pode terminar antes do app-* ficar totalmente materializado.
+        # O que interessa para a proxima etapa e resources\app.asar realmente existir.
+        $ready = $false
+        for ($i = 0; $i -lt 120; $i++) {
+            if (Test-DiscordPatchTarget) {
+                $ready = $true
+                break
+            }
+            Start-Sleep -Milliseconds 1000
+        }
+        if (-not $ready) {
+            throw 'o instalador terminou, mas nenhum resources\app.asar apareceu em 120s'
+        }
+
+        # O instalador pode abrir o Discord no final. Fechamos antes da injecao para que
+        # o primeiro launch normal do usuario ja seja Equicord/Vencord + plugin enhanced.
+        Stop-Discord
+        Write-Ok 'Discord Stable oficial instalado e pronto para receber o mod.'
+    } catch {
+        throw "Nao consegui instalar o Discord oficial: $($_.Exception.Message)"
+    } finally {
+        Remove-CaminhoSilencioso $tempRoot
+    }
+}
+
+function Ensure-DiscordPatchTarget {
+    if (Test-DiscordPatchTarget) { return }
+    Install-OfficialDiscordStable
+    if (-not (Test-DiscordPatchTarget)) {
+        throw 'Nao achei nenhum Discord instalado mesmo apos o bootstrap oficial.'
+    }
 }
 
 # O endereco da proxy pode carregar usuario e senha, e ele e mostrado na tela e em resumo de
@@ -1178,6 +1253,11 @@ function Start-Discord {
 }
 
 function Invoke-Install($root) {
+    # Em maquina limpa, instale o cliente oficial ANTES de gastar tempo clonando/buildando
+    # o mod. Nao redistribuimos um Discord alterado: baixamos do proprio Discord, conferimos
+    # Authenticode e so entao injetamos o mod/plugin localmente.
+    Ensure-DiscordPatchTarget
+
     $root = Select-Target $root
 
     # Um comando nativo escreve na saida da funcao que o chama, e Select-Target chama outras que
