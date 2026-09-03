@@ -1687,16 +1687,19 @@ async function revertOrphanedInjection() {
 // O "modo Tor" da GUI pode funcionar sem o Tor instalado: baixa o daemon oficial do
 // Tor Project, extrai para a pasta do GoLiveBypass e sobe como processo filho.
 //
-// O asset com o daemon SOZINHO (sem o navegador inteiro) e o "expert bundle" — hospedado no
-// archive oficial (archive.torproject.org), versao "13.5", que foi a ultima serie a publicar
-// esse pacote (~31MB, com geoip e as libs compartilhadas do tor). O dist.torproject.org
-// atual (15.x/16.x) so publica o navegador inteiro (~137MB), pesado demais para isso.
+// O asset com o daemon SOZINHO (sem o navegador inteiro) e o Expert Bundle oficial.
+// Tor 0.4.8 e anteriores deixaram de funcionar na rede em 2026-09-01; por isso o enhanced
+// fork fixa Tor Browser 15.0.21, que contem Tor 0.4.9.11.
 
-const TOR_BUNDLE = "13.5";
+const TOR_BUNDLE = "15.0.21";
 const TOR_PORTA = 9060; // dedicada, para nao conflitar com um Tor do sistema (9050)
 
 function torDir() {
   return path.join(settingsDir(), "tor");
+}
+
+function torBundleMarkerPath() {
+  return path.join(torDir(), "bundle-version.txt");
 }
 
 function torExePath() {
@@ -1712,19 +1715,19 @@ function torExePath() {
 // bastaria o archive sair do ar e um certificado indevido para virar execucao de codigo em
 // quem usa o modo Tor. Ao trocar TOR_BUNDLE, troque os quatro hashes junto.
 const TOR_SHA256: Record<string, string> = {
-  "tor-expert-bundle-linux-x86_64-13.5.tar.gz":
-    "147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d",
-  "tor-expert-bundle-windows-x86_64-13.5.tar.gz":
-    "5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb",
-  "tor-expert-bundle-macos-aarch64-13.5.tar.gz":
-    "e18f749fbe6114c918735e950b28c1f476a5c9d8bf224f5ec26e6bffa1222d49",
-  "tor-expert-bundle-macos-x86_64-13.5.tar.gz":
-    "9e23c21a4e45dc45b599e723373530ef7cabef106367b43677a534fae099b10d",
+  "tor-expert-bundle-linux-x86_64-15.0.21.tar.gz":
+    "40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11",
+  "tor-expert-bundle-windows-x86_64-15.0.21.tar.gz":
+    "f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490",
+  "tor-expert-bundle-macos-aarch64-15.0.21.tar.gz":
+    "83dec16412c1d97b91af603229481dd29f578e1485620ecffd9ac4aabcf6fb46",
+  "tor-expert-bundle-macos-x86_64-15.0.21.tar.gz":
+    "7e21f5dab4c627e2ff8e894b2039fa49bdd78d12b025f96893d4d6238c6577e4",
 };
 
 // URL e hash saem juntos de proposito: separados, era facil trocar um e esquecer o outro.
 function torAsset(): { url: string; sha256: string | undefined; nome: string } {
-  const base = "https://archive.torproject.org/tor-package-archive/torbrowser";
+  const base = "https://dist.torproject.org/torbrowser";
   let nome: string;
   if (process.platform === "win32") {
     nome = `tor-expert-bundle-windows-x86_64-${TOR_BUNDLE}.tar.gz`;
@@ -2171,7 +2174,31 @@ function avisarTorReiniciado() {
 async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
   try {
     const exe = torExePath();
-    if (fs.existsSync(exe)) return { ok: true };
+    const marker = torBundleMarkerPath();
+
+    let installedBundle = "";
+    try {
+      if (fs.existsSync(marker)) installedBundle = fs.readFileSync(marker, "utf8").trim();
+    } catch {
+      installedBundle = "";
+    }
+
+    if (fs.existsSync(exe) && installedBundle === TOR_BUNDLE) return { ok: true };
+
+    if (fs.existsSync(exe) && installedBundle !== TOR_BUNDLE) {
+      console.log("[tor] bundle antigo detectado; atualizando para", TOR_BUNDLE);
+      stopTor();
+      try {
+        fs.rmSync(path.join(torDir(), "tor"), { recursive: true, force: true });
+        fs.rmSync(path.join(torDir(), "data"), { recursive: true, force: true });
+        fs.rmSync(marker, { force: true });
+      } catch (error) {
+        return {
+          ok: false,
+          error: "nao consegui substituir o Tor antigo: " + (error instanceof Error ? error.message : String(error)),
+        };
+      }
+    }
 
     const dir = torDir();
     fs.mkdirSync(dir, { recursive: true });
@@ -2256,6 +2283,8 @@ async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
     } catch {
       // windows: chmod nao aplica
     }
+
+    fs.writeFileSync(marker, TOR_BUNDLE, "utf8");
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
