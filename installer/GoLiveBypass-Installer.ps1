@@ -703,7 +703,8 @@ function Find-CheckoutOnDisk {
         $candidates = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
             Where-Object {
                 if ($Mod) { $_.Name -ieq $Mod }
-                else { $_.Name -match '^(Equicord|Vencord)
+                else { $_.Name -match '^(Equicord|Vencord)$' }
+            }
 
         foreach ($dir in $candidates) {
             if ($dir -and $dir.FullName -and (Test-ModCheckout $dir.FullName)) { return $dir.FullName }
@@ -714,7 +715,8 @@ function Find-CheckoutOnDisk {
     $deep = Get-ChildItem -LiteralPath $env:USERPROFILE -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue |
         Where-Object {
             if ($Mod) { $_.Name -ieq $Mod }
-            else { $_.Name -match '^(Equicord|Vencord)
+            else { $_.Name -match '^(Equicord|Vencord)$' }
+        } |
         Select-Object -First 20
 
     foreach ($dir in $deep) {
