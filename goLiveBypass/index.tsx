@@ -131,7 +131,7 @@ function StreamRegionPicker() {
 function AboutPlugin() {
     return (
         <Paragraph>
-            Made by bezumiya. Source and issues on <MaskedLink href="https://github.com/bezumiya/GoLiveBypass">GitHub</MaskedLink>, and I post about it on <MaskedLink href="https://twitter.com/obezumiya">Twitter</MaskedLink>.
+            Original project by bezumiya. Enhanced fork source on <MaskedLink href="https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced">GitHub</MaskedLink>, and I post about it on <MaskedLink href="https://twitter.com/obezumiya">Twitter</MaskedLink>.
         </Paragraph>
     );
 }
