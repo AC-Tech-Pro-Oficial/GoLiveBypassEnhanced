@@ -7,136 +7,22 @@ on:
 
 jobs:
   tor-metadata:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Resolve and verify current Tor bundle checksum
-        shell: powershell
-        run: |
-          $base = 'https://dist.torproject.org/torbrowser/15.0.21'
-          $name = 'tor-expert-bundle-windows-x86_64-15.0.21.tar.gz'
-          $sumFile = Join-Path $env:RUNNER_TEMP 'sha256sums.txt'
-          $bundle = Join-Path $env:RUNNER_TEMP $name
-          Invoke-WebRequest -UseBasicParsing -Uri "$base/sha256sums-unsigned-build.txt" -OutFile $sumFile
-          $line = Select-String -LiteralPath $sumFile -Pattern ([regex]::Escape($name) + '
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Installer and RTC contracts
-        run: |
-          node tests/test-windows-enhanced-installer.cjs
-          node tests/test-plugin-enhanced-rtc.cjs
-          node tests/test-enhanced-rtc-recovery.cjs
-          node tests/test-native-rtc-recovery.cjs
-          node tests/test-gateway-zumbi-revive.cjs
-
-      - name: Parse PowerShell
-        shell: pwsh
-        run: |
-          $files = @(
-            'installer/Install-Enhanced.ps1',
-            'installer/GoLiveBypass-Installer.ps1',
-            'standalone/GoLiveBypass-Standalone.ps1'
-          )
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            if ($errors.Count -gt 0) {
-              Write-Host "Parser errors in $file"
-              foreach ($err in $errors) {
-                Write-Host ("{0}:{1} {2} :: {3}" -f $err.Extent.StartLineNumber, $err.Extent.StartColumnNumber, $err.ErrorId, $err.Message)
-                Write-Host ("  > " + $err.Extent.Text)
-              }
-              exit 1
-            }
-          }
-
-      - name: Read official current Tor checksum
-        shell: powershell
-        run: |
-          $sumUrl = 'https://dist.torproject.org/torbrowser/15.0.21/sha256sums-unsigned-build.txt'
-          $sumFile = Join-Path $env:RUNNER_TEMP 'tor-sha256.txt'
-          Invoke-WebRequest -UseBasicParsing -Uri $sumUrl -OutFile $sumFile
-          $line = Select-String -LiteralPath $sumFile -Pattern 'tor-expert-bundle-windows-x86_64-15\.0\.21\.tar\.gz$' | Select-Object -First 1
-          if (-not $line) { throw 'Official checksum line not found.' }
-          Write-Host ('TOR_OFFICIAL_SHA_LINE=' + $line.Line.Trim())
-
-      - name: Real Tor gateway smoke test
-        shell: powershell
-        run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode TestTor -Tor -Yes
-          if ($LASTEXITCODE -ne 0) {
-            $log = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor-bootstrap.log'
-            if (Test-Path -LiteralPath $log) {
-              Write-Host '--- tor-bootstrap.log tail ---'
-              Get-Content -LiteralPath $log -Tail 120
-            }
-            exit $LASTEXITCODE
-          }
-
-      - name: Diff hygiene
         shell: bash
-        run: git diff --check origin/main...HEAD
-
-  mod-build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Vencord
-            repo: https://github.com/Vendicated/Vencord.git
-          - name: Equicord
-            repo: https://github.com/Equicord/Equicord.git
-
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: enhanced
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Clone ${{ matrix.name }}
-        run: git clone --depth 1 "${{ matrix.repo }}" mod
-
-      - name: Install matching pnpm
-        working-directory: mod
         run: |
-          PM="$(node -p "require('./package.json').packageManager")"
-          npm install -g "$PM"
-          pnpm --version
-
-      - name: Copy enhanced userplugin
-        run: |
-          mkdir -p mod/src/userplugins
-          rm -rf mod/src/userplugins/goLiveBypass
-          cp -R enhanced/goLiveBypass mod/src/userplugins/goLiveBypass
-
-      - name: Install dependencies
-        working-directory: mod
-        run: pnpm install --frozen-lockfile
-
-      - name: Build ${{ matrix.name }} with enhanced plugin
-        working-directory: mod
-        run: pnpm build
-) | Select-Object -First 1
-          if (-not $line) { throw 'Official checksum line not found.' }
-          $expected = (($line.Line.Trim() -split '\s+')[0]).ToLowerInvariant()
-          Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile $bundle
-          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundle).Hash.ToLowerInvariant()
-          Write-Host "TOR_OFFICIAL_SHA=$expected"
-          Write-Host "TOR_DOWNLOADED_SHA=$actual"
-          if ($expected -ne $actual) { throw 'Tor checksum mismatch.' }
+          set -euo pipefail
+          base='https://dist.torproject.org/torbrowser/15.0.21'
+          name='tor-expert-bundle-windows-x86_64-15.0.21.tar.gz'
+          curl -fsS "$base/sha256sums-unsigned-build.txt" -o sha256sums.txt
+          expected="$(grep "  $name$" sha256sums.txt | awk '{print $1}')"
+          test -n "$expected"
+          curl -fsS "$base/$name" -o "$name"
+          actual="$(sha256sum "$name" | awk '{print $1}')"
+          echo "TOR_OFFICIAL_SHA=$expected"
+          echo "TOR_DOWNLOADED_SHA=$actual"
+          test "$expected" = "$actual"
 
   windows-contracts:
     runs-on: windows-latest
@@ -178,16 +64,6 @@ jobs:
               exit 1
             }
           }
-
-      - name: Read official current Tor checksum
-        shell: powershell
-        run: |
-          $sumUrl = 'https://dist.torproject.org/torbrowser/15.0.21/sha256sums-unsigned-build.txt'
-          $sumFile = Join-Path $env:RUNNER_TEMP 'tor-sha256.txt'
-          Invoke-WebRequest -UseBasicParsing -Uri $sumUrl -OutFile $sumFile
-          $line = Select-String -LiteralPath $sumFile -Pattern 'tor-expert-bundle-windows-x86_64-15\.0\.21\.tar\.gz$' | Select-Object -First 1
-          if (-not $line) { throw 'Official checksum line not found.' }
-          Write-Host ('TOR_OFFICIAL_SHA_LINE=' + $line.Line.Trim())
 
       - name: Real Tor gateway smoke test
         shell: powershell
