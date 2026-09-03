@@ -6,10 +6,12 @@
 - Replaces destructive native RTC recovery with role-aware state machines. Broadcaster stalls replay/clear+replay the exact captured desktop source on the same native connection; viewer stalls use `fastUdpReconnect()` then a targeted `setLocalVideoDisabled(streamUserId, true/false)` resubscription.
 - Adds decoder telemetry and a regression for issue #186: a viewer that previously decoded ~30 FPS can re-enter with `fps_dec=0` / `dec=0`; replacement sockets alone no longer count as recovery.
 - Recovery success now requires 10 seconds of sustained encoded/decoded frame progress. Voice, `discord.media`, gateway and renderer are preserved by automatic RTC recovery.
-- Keeps Tor as the trusted gateway route and leaves bulk media direct; public proxy fallback is not added to the enhanced reliability path.
-
-### Known gap
-- The standalone/GUI path is enhanced first. The separately implemented Vencord/Equicord plugin does not yet claim parity with this role-aware RTC recovery.
+- Ports the same role-aware RTC shim/controller into the Vencord/Equicord userplugin; clean current Vencord and Equicord checkouts are compiled in CI.
+- Reworks the one-click Windows path to preserve/reinject Vencord or Equicord instead of replacing their `app.asar` with the standalone injector. Existing mod settings/plugins are backed up and verified after installation, with rollback/reinjection on failure.
+- Keeps Tor as the trusted gateway route and leaves bulk media direct. Explicit/unattended Tor never falls through to the public proxy pool.
+- Replaces the obsolete Tor Browser 13.5 / Tor 0.4.8 Expert Bundle with Tor Browser 15.0.21 / Tor 0.4.9.11. Tor Project intentionally ended 0.4.8 network compatibility on 2026-09-01.
+- Pins the official Expert Bundle SHA-256, migrates old managed Tor binaries through a version marker, verifies the extracted `tor.exe` generation and `torrc`, and requires a real SOCKS5 + TLS path to `gateway.discord.gg` before installation succeeds.
+- Fixes Windows Tor startup where file logging itself could abort Tor 0.4.9; managed startup uses stdout/stderr capture for diagnostics instead.
 
 Todas as mudanças notáveis deste projeto são documentadas aqui. O formato segue
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
