@@ -49,6 +49,14 @@ assert(native.includes("startRtcRecovery(event?.sender, log)"));
 assert(native.includes("stopRtcRecovery()"));
 assert(native.includes("rtcRecoveryStatus()"));
 
+const pickStart = native.indexOf("async function pickExit(");
+const pickEnd = native.indexOf("async function autoExit(", pickStart);
+assert(pickStart >= 0 && pickEnd > pickStart);
+const pickBlock = native.slice(pickStart, pickEnd);
+assert(pickBlock.includes("proxy configurado indisponivel; nenhuma proxy publica sera usada"));
+assert(pickBlock.includes("return settleExit(null)"),
+  "configured Tor/private proxy must fail closed to direct, not public proxy discovery");
+
 assert.equal(manifest.updater.id, "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced");
 assert(installer.includes("goLiveBypass/rtcRecovery.ts"));
 assert(installer.includes("goLiveBypass/rtcShim.ts"));
