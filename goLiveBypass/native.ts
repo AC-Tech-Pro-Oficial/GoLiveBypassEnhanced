@@ -5,6 +5,7 @@
  */
 
 import { NativeSettings, RendererSettings } from "@main/settings";
+import { spawn } from "child_process";
 import { app, IpcMainInvokeEvent, session } from "electron";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { request } from "https";
@@ -105,6 +106,8 @@ const MAX_RETRIES = 2;
 // sempre travaria o login; soltar na hora perderia a corrida em toda abertura fria. Se
 // estourar, perde-se o Go Live daquela sessao, nunca o Discord.
 const STALL_BUDGET_MS = 12_000;
+const TOR_STARTUP_WAIT_MS = 45_000;
+const TOR_STARTUP_STALL_MS = TOR_STARTUP_WAIT_MS + 5_000;
 
 // Menores que o teste de candidata: uma saida agonizante que demora a falhar no trafego vivo
 // faria o Chromium desistir do roteador inteiro.
@@ -218,6 +221,69 @@ function isTorProxy(proxy: string | null): boolean {
     if (parsed === null || parsed.scheme !== "socks5") return false;
 
     return (parsed.host === "127.0.0.1" || parsed.host === "localhost") && (TOR_PORTS as number[]).includes(parsed.port);
+}
+
+function sleep(ms: number) {
+    return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
+
+function managedTorPaths(proxy: string) {
+    if (process.platform !== "win32") return null;
+    const parsed = parseProxy(proxy);
+    if (parsed === null || parsed.scheme !== "socks5" ||
+        (parsed.host !== "127.0.0.1" && parsed.host !== "localhost") ||
+        parsed.port !== 9060) return null;
+
+    const base = logDir();
+    if (base === null) return null;
+    return {
+        exe: join(base, "Tor", "tor", "tor.exe"),
+        torrc: join(base, "Tor", "torrc")
+    };
+}
+
+function startManagedTorIfPresent(proxy: string) {
+    const paths = managedTorPaths(proxy);
+    if (paths === null || !existsSync(paths.exe) || !existsSync(paths.torrc)) return false;
+
+    try {
+        const child = spawn(paths.exe, ["-f", paths.torrc], {
+            windowsHide: true,
+            detached: true,
+            stdio: "ignore"
+        });
+        child.unref();
+        log("Tor gerenciado nao estava escutando; relancado invisivelmente pelo plugin");
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Windows Run entries have no reliable ordering. Discord can start while Tor is still
+// bootstrapping, so an explicitly configured local Tor gets a bounded startup window.
+// If our hashed/installed daemon is absent we relaunch only that known executable.
+// The window is finite: after it expires the gateway goes direct, never to a public proxy.
+async function waitForConfiguredTor(proxy: string, totalMs = TOR_STARTUP_WAIT_MS) {
+    const parsed = parseProxy(proxy);
+    if (parsed === null || !isTorProxy(proxy)) return false;
+
+    const deadline = Date.now() + totalMs;
+    let launchAttempted = false;
+    while (Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        if (await listening(parsed.port, TOR_PORT_TIMEOUT_MS)) {
+            const probe = Math.max(1000, Math.min(PROBE_TIMEOUT_MS, remaining));
+            if (await torReachable(proxy, probe)) return true;
+        } else if (!launchAttempted) {
+            launchAttempted = true;
+            startManagedTorIfPresent(proxy);
+        }
+
+        if (Date.now() < deadline) await sleep(Math.min(750, deadline - Date.now()));
+    }
+
+    return false;
 }
 
 function pluginSettings() {
@@ -782,11 +848,16 @@ function currentExit(): Promise<string | null> {
             resolve(value);
         };
 
+        const configured = manualProxy();
+        const budget = configured !== "auto" && configured !== "invalid" && isTorProxy(configured.proxy)
+            ? TOR_STARTUP_STALL_MS
+            : STALL_BUDGET_MS;
+
         const guard = setTimeout(() => {
             waiting = waiting.filter(entry => entry !== resume);
-            log("nenhuma saida ficou pronta a tempo, esta conexao vai direta");
+            log(`nenhuma saida ficou pronta em ${Math.round(budget / 1000)}s, esta conexao vai direta`);
             resolve(null);
-        }, STALL_BUDGET_MS);
+        }, budget);
 
         waiting.push(resume);
     });
@@ -849,7 +920,7 @@ async function pickExit(excluded: Set<string>) {
         // (Tor respondendo fora do plugin, measure() ainda assim reprovando dentro do prazo).
         const started = Date.now();
         const manualOk = isTorProxy(manual.proxy)
-            ? await torReachable(manual.proxy, PROBE_TIMEOUT_MS)
+            ? await waitForConfiguredTor(manual.proxy)
             : await measure(manual.proxy, WARM_PROBE_TIMEOUT_MS) !== null;
         if (manualOk) {
             log(`seu proxy respondeu em ${Date.now() - started}ms: ${safeProxy(manual.proxy)}`);
