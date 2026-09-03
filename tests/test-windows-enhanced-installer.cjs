@@ -48,6 +48,30 @@ assert(
   "mod installer needs an explicit Tor mode"
 );
 assert(
+  pluginInstaller.includes("https://discord.com/api/download?platform=win&format=exe"),
+  "clean install must bootstrap Discord from Discord's official download endpoint"
+);
+assert(
+  pluginInstaller.includes("Get-AuthenticodeSignature") &&
+  pluginInstaller.includes("assinatura valida, mas o editor nao e Discord"),
+  "downloaded DiscordSetup.exe must be Authenticode-verified as Discord"
+);
+assert(
+  pluginInstaller.includes("Start-Process -FilePath $setup -ArgumentList '-s'"),
+  "official Discord bootstrap must use the silent installer"
+);
+assert(
+  pluginInstaller.includes("Ensure-DiscordPatchTarget") &&
+  pluginInstaller.indexOf("Ensure-DiscordPatchTarget", pluginInstaller.indexOf("function Invoke-Install")) <
+    pluginInstaller.indexOf("$root = Select-Target $root", pluginInstaller.indexOf("function Invoke-Install")),
+  "clean Discord bootstrap must happen before mod clone/build"
+);
+assert(
+  pluginInstaller.includes("Install-Mod (Show-ModChoice)") &&
+  pluginInstaller.includes("git clone --depth 1"),
+  "missing Equicord/Vencord must still be bootstrapped from source"
+);
+assert(
   !pluginInstaller.includes("if ($Yes) { return '' }"),
   "-Yes must never silently select public proxies"
 );
