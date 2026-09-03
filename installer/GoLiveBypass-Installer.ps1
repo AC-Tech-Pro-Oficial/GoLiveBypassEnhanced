@@ -1636,15 +1636,15 @@ function Install-Tor {
     $torrcText = @"
 SocksPort $TorPort
 ClientOnly 1
-DataDirectory $($dataDir -replace '\','/')
+DataDirectory $($dataDir -replace '\\','/')
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
-        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\','/')"
+        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\\','/')"
     }
 )
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
-        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\','/')"
+        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\\','/')"
     }
 )
 Log notice file "$logPath"
@@ -3065,15 +3065,15 @@ function Install-Tor {
     $torrcText = @"
 SocksPort $TorPort
 ClientOnly 1
-DataDirectory $($dataDir -replace '\','/')
+DataDirectory $($dataDir -replace '\\','/')
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
-        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\','/')"
+        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\\','/')"
     }
 )
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
-        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\','/')"
+        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\\','/')"
     }
 )
 Log notice file "$logPath"
@@ -4481,15 +4481,15 @@ function Install-Tor {
     $torrcText = @"
 SocksPort $TorPort
 ClientOnly 1
-DataDirectory $($dataDir -replace '\','/')
+DataDirectory $($dataDir -replace '\\','/')
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
-        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\','/')"
+        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\\','/')"
     }
 )
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
-        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\','/')"
+        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\\','/')"
     }
 )
 Log notice file "$logPath"
@@ -5906,15 +5906,15 @@ function Install-Tor {
     $torrcText = @"
 SocksPort $TorPort
 ClientOnly 1
-DataDirectory $($dataDir -replace '\','/')
+DataDirectory $($dataDir -replace '\\','/')
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
-        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\','/')"
+        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\\','/')"
     }
 )
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
-        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\','/')"
+        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\\','/')"
     }
 )
 Log notice file "$logPath"
