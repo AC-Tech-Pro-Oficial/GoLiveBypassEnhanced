@@ -1504,6 +1504,37 @@ function Stop-ManagedTor($exe) {
     } catch { }
 }
 
+function Test-LegacyTorStartup {
+    try {
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -like 'PS*' -or -not ($p.Value -is [string])) { continue }
+            $value = [string]$p.Value
+            if ($value -match '(?i)GoLiveBypass[\\/]Tor' -and
+                $value -match '(?i)tor\.exe' -and
+                $value -notmatch '(?i)wscript\.exe') {
+                return $true
+            }
+        }
+    } catch { }
+    return $false
+}
+
+function Remove-LegacyTorStartupEntries {
+    try {
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -like 'PS*' -or $p.Name -eq 'GoLiveBypassTor' -or -not ($p.Value -is [string])) { continue }
+            $value = [string]$p.Value
+            if ($value -match '(?i)GoLiveBypass[\\/]Tor' -and $value -match '(?i)tor\.exe') {
+                Remove-ItemProperty -Path $key -Name $p.Name -ErrorAction SilentlyContinue
+            }
+        }
+    } catch { }
+}
+
 function Get-TorServiceStatus {
     try {
         $svc = Get-CimInstance Win32_Service -Filter "Name='tor'" -ErrorAction SilentlyContinue
@@ -1517,6 +1548,7 @@ function Install-Tor {
     $exe = Get-TorExe
     $torrc = Join-Path $base 'torrc'
     $bootstrapLog = Join-Path $base 'tor-bootstrap.log'
+    $legacyVisibleStartup = Test-LegacyTorStartup
 
     # A porta pode abrir varios segundos/minutos antes de existir circuito. If it is
     # already listening, first give that daemon a chance to prove end-to-end delivery.
@@ -1525,6 +1557,18 @@ function Install-Tor {
         if (Wait-TorGateway 45) {
             if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $torrc)) {
                 [void](Set-RunKey $exe $torrc)
+                Remove-LegacyTorStartupEntries
+
+                if ($legacyVisibleStartup) {
+                    Write-Step 'Migrando o Tor visivel desta sessao para o launcher oculto'
+                    Stop-ManagedTor $exe
+                    Start-Sleep -Milliseconds 700
+                    Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
+                    if (-not (Wait-TorGateway 90)) {
+                        Write-Warn 'Tor nao voltou saudavel depois da migracao para modo oculto.'
+                        return $false
+                    }
+                }
             }
             Write-Ok 'Tor abriu SOCKS + TLS ate gateway.discord.gg.'
             return $true
@@ -1600,6 +1644,7 @@ Log notice file "$logPath"
 
     Write-Step 'Registrando o Tor na inicializacao do usuario (invisivel)'
     if (-not (Set-RunKey $exe $torrc)) { return $false }
+    Remove-LegacyTorStartupEntries
 
     Write-Step 'Iniciando o Tor sem janela'
     Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
