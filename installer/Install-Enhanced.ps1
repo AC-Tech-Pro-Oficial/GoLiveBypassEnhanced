@@ -1,10 +1,10 @@
 # GoLiveBypassEnhanced - Windows one-click installer / migration
 #
-# Safe default architecture:
-#   Discord + existing/new Vencord/Equicord + enhanced GoLiveBypass userplugin + Tor
+# Safe architecture:
+#   Discord + Vencord/Equicord + enhanced GoLiveBypass userplugin + local Tor
 #
-# It never intentionally replaces Vencord/Equicord with the standalone injector and
-# never falls back to a public proxy.
+# This wrapper preserves the selected mod and its settings. It can also undo the
+# older enhanced standalone injection before installing the userplugin.
 
 [CmdletBinding()]
 param(
@@ -43,6 +43,7 @@ function Get-EffectiveRoamingApp {
 function Get-DiscordResources {
     $found = @()
     $local = Get-EffectiveLocalApp
+
     foreach ($name in $DiscordNames) {
         $root = Join-Path $local $name
         if (-not (Test-Path -LiteralPath $root)) { continue }
@@ -61,6 +62,7 @@ function Get-DiscordResources {
             }
         }
     }
+
     return $found
 }
 
@@ -75,9 +77,6 @@ function Read-InjectionText([string]$resources) {
         if (Test-Path -LiteralPath $asar -PathType Leaf) {
             $item = Get-Item -LiteralPath $asar
             if ($item.Length -le 65536) { return [IO.File]::ReadAllText($asar) }
-            [byte[]]$bytes = [IO.File]::ReadAllBytes($asar)
-            $take = [Math]::Min(65536, $bytes.Length)
-            return [Text.Encoding]::UTF8.GetString($bytes, 0, $take)
         }
 
         $legacyIndex = Join-Path $resources 'app\index.js'
@@ -85,6 +84,7 @@ function Read-InjectionText([string]$resources) {
             return [IO.File]::ReadAllText($legacyIndex)
         }
     } catch { }
+
     return ''
 }
 
@@ -96,16 +96,41 @@ function Get-InjectedPath([string]$resources) {
     return $null
 }
 
+function Test-ModCheckout([string]$path) {
+    if (-not $path -or -not (Test-Path -LiteralPath $path)) { return $false }
+    return (Test-Path -LiteralPath (Join-Path $path 'package.json')) -and
+        (Test-Path -LiteralPath (Join-Path $path 'src\utils\types.ts'))
+}
+
 function Get-ModSettingsPath([string]$name) {
     $override = [Environment]::GetEnvironmentVariable("$($name.ToUpper())_USER_DATA_DIR")
     if ($override) { return (Join-Path $override 'settings\settings.json') }
     return (Join-Path (Get-EffectiveRoamingApp) "$name\settings\settings.json")
 }
 
-function Test-ModCheckout([string]$path) {
-    if (-not $path -or -not (Test-Path -LiteralPath $path)) { return $false }
-    return (Test-Path -LiteralPath (Join-Path $path 'package.json')) -and
-        (Test-Path -LiteralPath (Join-Path $path 'src\utils\types.ts'))
+function Find-ModCheckout([string]$name) {
+    foreach ($target in Get-DiscordResources) {
+        $injected = Get-InjectedPath $target.Resources
+        if (-not $injected) { continue }
+        if ($injected -notmatch "(?i)$name") { continue }
+
+        $root = Split-Path -Parent (Split-Path -Parent $injected)
+        if (Test-ModCheckout $root) { return $root }
+    }
+
+    if ($env:USERPROFILE) {
+        foreach ($candidate in @(
+            (Join-Path $env:USERPROFILE $name),
+            (Join-Path $env:USERPROFILE "Documents\$name"),
+            (Join-Path $env:USERPROFILE "Desktop\$name"),
+            (Join-Path $env:USERPROFILE "dev\$name"),
+            (Join-Path $env:USERPROFILE "repos\$name")
+        )) {
+            if (Test-ModCheckout $candidate) { return $candidate }
+        }
+    }
+
+    return $null
 }
 
 function Detect-Mod {
@@ -114,7 +139,6 @@ function Detect-Mod {
     $scores = @{ Equicord = 0; Vencord = 0 }
     $settingsTimes = @{ Equicord = [datetime]::MinValue; Vencord = [datetime]::MinValue }
 
-    # Strongest signal: what Discord is currently injected with.
     foreach ($target in Get-DiscordResources) {
         $text = Read-InjectionText $target.Resources
         if ($text -match '(?i)equicord') { $scores.Equicord += 1000 }
@@ -128,16 +152,13 @@ function Detect-Mod {
             $settingsTimes[$name] = (Get-Item -LiteralPath $settings).LastWriteTimeUtc
         }
 
-        $checkout = Join-Path $env:USERPROFILE $name
-        if (Test-ModCheckout $checkout) { $scores[$name] += 100 }
+        if (Find-ModCheckout $name) { $scores[$name] += 100 }
     }
 
     if ($scores.Equicord -gt $scores.Vencord) { return 'Equicord' }
     if ($scores.Vencord -gt $scores.Equicord) { return 'Vencord' }
-
-    # If both have remnants, the settings file touched most recently is the least
-    # destructive tie-breaker. With no evidence at all, install Equicord (project default).
     if ($settingsTimes.Vencord -gt $settingsTimes.Equicord) { return 'Vencord' }
+
     return 'Equicord'
 }
 
@@ -149,11 +170,13 @@ function Stop-Discord {
         if (-not (Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue)) { return }
         Start-Sleep -Milliseconds 250
     }
+
     throw 'O Discord nao fechou; feche pelo icone da bandeja e rode novamente.'
 }
 
 function Start-Discord {
     if ($NoLaunch) { return }
+
     $local = Get-EffectiveLocalApp
     foreach ($name in $DiscordNames) {
         $update = Join-Path $local "$name\Update.exe"
@@ -166,10 +189,12 @@ function Start-Discord {
 
 function Get-StandaloneTargets {
     $targets = @()
+
     foreach ($target in Get-DiscordResources) {
         $asar = Join-Path $target.Resources 'app.asar'
         $index = Join-Path $asar 'index.js'
         $backup = Join-Path $target.Resources '_app.asar'
+
         if ((Test-Path -LiteralPath $asar -PathType Container) -and
             (Test-Path -LiteralPath $index -PathType Leaf) -and
             (Test-Path -LiteralPath $backup)) {
@@ -180,25 +205,26 @@ function Get-StandaloneTargets {
             } catch { }
         }
     }
+
     return $targets
 }
 
 function Restore-AccidentalStandalone {
     $targets = @(Get-StandaloneTargets)
-    if ($targets.Count -eq 0) { return $false }
+    if ($targets.Count -eq 0) { return }
 
-    Write-Host '  [*] Migrando a instalacao standalone para o userplugin (preserva Vencord/Equicord)...' -ForegroundColor Cyan
+    Write-Host '  [*] Migrando a injecao standalone anterior para o userplugin...' -ForegroundColor Cyan
     Stop-Discord
 
     foreach ($target in $targets) {
         $asar = Join-Path $target.Resources 'app.asar'
         $backup = Join-Path $target.Resources '_app.asar'
+
         Remove-Item -LiteralPath $asar -Recurse -Force
         Rename-Item -LiteralPath $backup -NewName 'app.asar' -Force
-        Write-Host "  [OK] $($target.Name): standalone removido; Discord original restaurado antes da reinjecao." -ForegroundColor Green
-    }
 
-    return $true
+        Write-Host "  [OK] $($target.Name): app.asar anterior restaurado." -ForegroundColor Green
+    }
 }
 
 function Backup-ModSettings([string]$name) {
@@ -209,6 +235,7 @@ function Backup-ModSettings([string]$name) {
 
     $dir = Join-Path (Get-EffectiveLocalApp) 'GoLiveBypass\backups'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
     $backup = Join-Path $dir "$name-settings-before-enhanced-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
     Copy-Item -LiteralPath $settings -Destination $backup -Force
 
@@ -217,15 +244,25 @@ function Backup-ModSettings([string]$name) {
         $json = Get-Content -LiteralPath $settings -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($json.plugins) { $names = @($json.plugins.PSObject.Properties.Name) }
     } catch {
-        throw "O settings.json do $name existe mas nao e JSON valido. Nao vou reescrever suas configuracoes. Backup: $backup"
+        throw "O settings.json do $name nao e JSON valido. Backup: $backup"
     }
 
-    Write-Host "  [OK] Backup das configuracoes do ${name}: $backup" -ForegroundColor Green
+    Write-Host "  [OK] Backup das configuracoes do $($name): $backup" -ForegroundColor Green
     return [pscustomobject]@{ Path = $settings; Backup = $backup; PluginNames = $names }
 }
 
+function Restore-ModSettings($snapshot) {
+    if (-not $snapshot.Backup -or -not (Test-Path -LiteralPath $snapshot.Backup)) { return }
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $snapshot.Path) -Force | Out-Null
+    Copy-Item -LiteralPath $snapshot.Backup -Destination $snapshot.Path -Force
+}
+
 function Verify-SettingsPreserved($snapshot) {
-    if (-not (Test-Path -LiteralPath $snapshot.Path)) { throw 'O arquivo de configuracoes do mod desapareceu.' }
+    if (-not (Test-Path -LiteralPath $snapshot.Path)) {
+        throw 'O arquivo de configuracoes do mod desapareceu.'
+    }
+
     $json = Get-Content -LiteralPath $snapshot.Path -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $json.plugins) { throw 'A secao de plugins do mod desapareceu.' }
 
@@ -237,7 +274,9 @@ function Verify-SettingsPreserved($snapshot) {
     }
 
     $glb = $json.plugins.GoLiveBypass
-    if (-not $glb -or $glb.enabled -ne $true) { throw 'GoLiveBypass nao ficou ativado no mod.' }
+    if (-not $glb -or $glb.enabled -ne $true) {
+        throw 'GoLiveBypass nao ficou ativado no mod.'
+    }
     if ($glb.proxy -ne 'socks5://127.0.0.1:9060') {
         throw "GoLiveBypass nao ficou preso ao Tor local (proxy=$($glb.proxy))."
     }
@@ -245,37 +284,66 @@ function Verify-SettingsPreserved($snapshot) {
 
 function Verify-ModInjection([string]$name) {
     $ok = $false
+
     foreach ($target in Get-DiscordResources) {
         $asar = Join-Path $target.Resources 'app.asar'
         $standaloneIndex = Join-Path $asar 'index.js'
+
         if ((Test-Path -LiteralPath $asar -PathType Container) -and
             (Test-Path -LiteralPath $standaloneIndex -PathType Leaf)) {
             $text = [IO.File]::ReadAllText($standaloneIndex)
             if ($text.Contains('golivebypass.js')) {
-                throw "$($target.Name) ainda esta com a injecao standalone; isso removeria os plugins do mod."
+                throw "$($target.Name) ainda esta usando a injecao standalone."
             }
         }
 
         $injected = Get-InjectedPath $target.Resources
-        if ($injected -and $injected -match "(?i)$name") {
-            $root = Split-Path -Parent (Split-Path -Parent $injected)
-            if (Test-ModCheckout $root) {
-                $plugin = Join-Path $root 'src\userplugins\goLiveBypass'
-                foreach ($needed in @('index.tsx', 'native.ts', 'rtcRecovery.ts', 'rtcShim.ts', 'manifest.json')) {
-                    if (-not (Test-Path -LiteralPath (Join-Path $plugin $needed))) {
-                        throw "O build do $name nao recebeu $needed."
-                    }
-                }
-                $manifest = Get-Content -LiteralPath (Join-Path $plugin 'manifest.json') -Raw | ConvertFrom-Json
-                if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') {
-                    throw 'O plugin instalado ainda aponta o updater para outra origem.'
-                }
-                $ok = $true
+        if (-not $injected -or $injected -notmatch "(?i)$name") { continue }
+
+        $root = Split-Path -Parent (Split-Path -Parent $injected)
+        if (-not (Test-ModCheckout $root)) { continue }
+
+        $plugin = Join-Path $root 'src\userplugins\goLiveBypass'
+        foreach ($needed in @('index.tsx', 'native.ts', 'rtcRecovery.ts', 'rtcShim.ts', 'manifest.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $plugin $needed))) {
+                throw "O build do $name nao recebeu $needed."
             }
         }
+
+        $manifest = Get-Content -LiteralPath (Join-Path $plugin 'manifest.json') -Raw | ConvertFrom-Json
+        if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') {
+            throw 'O plugin instalado aponta o updater para uma origem incorreta.'
+        }
+
+        $ok = $true
     }
 
-    if (-not $ok) { throw "Nao consegui confirmar que $name foi reinjetado com o plugin enhanced." }
+    if (-not $ok) {
+        throw "Nao consegui confirmar a reinjecao do $name com o plugin enhanced."
+    }
+}
+
+function Try-RepairModInjection([string]$name) {
+    $root = Find-ModCheckout $name
+    if (-not $root) { return }
+
+    try {
+        Stop-Discord
+        Push-Location -LiteralPath $root
+        try {
+            foreach ($target in Get-DiscordResources) {
+                $loc = Split-Path -Parent (Split-Path -Parent $target.Resources)
+                & pnpm run inject -- --location $loc
+                if ($LASTEXITCODE -ne 0) { & pnpm inject }
+            }
+        } finally {
+            Pop-Location
+        }
+
+        Write-Host "  [OK] $name reinjetado durante o rollback." -ForegroundColor Green
+    } catch {
+        Write-Host "  [!] Nao consegui confirmar a reinjecao do $($name): $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ''
@@ -287,17 +355,18 @@ $selected = Detect-Mod
 Write-Host "  [*] Mod escolhido: $selected" -ForegroundColor Cyan
 
 $snapshot = Backup-ModSettings $selected
-$migratedStandalone = $false
 $work = Join-Path ([IO.Path]::GetTempPath()) 'GoLiveBypassEnhanced-oneclick'
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $installer = Join-Path $work 'GoLiveBypass-Installer.ps1'
 
 try {
-    $migratedStandalone = Restore-AccidentalStandalone
+    Restore-AccidentalStandalone
 
     Write-Host '  [*] Baixando o instalador enhanced do userplugin...' -ForegroundColor Cyan
     Invoke-WebRequest -UseBasicParsing -Uri "$RepoRaw/installer/GoLiveBypass-Installer.ps1" -OutFile $installer
-    if ((Get-Item -LiteralPath $installer).Length -lt 50000) { throw 'Download do instalador veio incompleto.' }
+    if ((Get-Item -LiteralPath $installer).Length -lt 50000) {
+        throw 'Download do instalador veio incompleto.'
+    }
 
     $installerText = [IO.File]::ReadAllText($installer)
     foreach ($required in @(
@@ -306,12 +375,16 @@ try {
         'Test-TorGatewayTunnel',
         'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced'
     )) {
-        if (-not $installerText.Contains($required)) { throw "Instalador baixado nao contem o contrato enhanced esperado: $required" }
+        if (-not $installerText.Contains($required)) {
+            throw "Instalador baixado nao contem o contrato enhanced esperado: $required"
+        }
     }
 
-    Write-Host '  [*] Instalando dependencias, $selected, plugin enhanced e Tor...' -ForegroundColor Cyan
+    Write-Host "  [*] Instalando dependencias, $selected, plugin enhanced e Tor..." -ForegroundColor Cyan
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Mode Install -Mod $selected -Tor -Yes
-    if ($LASTEXITCODE -ne 0) { throw "O instalador do userplugin terminou com codigo $LASTEXITCODE." }
+    if ($LASTEXITCODE -ne 0) {
+        throw "O instalador do userplugin terminou com codigo $LASTEXITCODE."
+    }
 
     Verify-SettingsPreserved $snapshot
     Verify-ModInjection $selected
@@ -324,26 +397,26 @@ try {
 
     Write-Host ''
     Write-Host '  [OK] Instalacao enhanced concluida.' -ForegroundColor Green
-    Write-Host "  [OK] $selected e seus plugins/configuracoes foram preservados." -ForegroundColor Green
-    Write-Host '  [OK] GoLiveBypass roda como userplugin, sem substituir app.asar pelo standalone.' -ForegroundColor Green
-    Write-Host '  [OK] Tor so foi aceito depois de SOCKS5 + TLS ate gateway.discord.gg.' -ForegroundColor Green
+    Write-Host "  [OK] $selected e os plugins/configuracoes preexistentes foram preservados." -ForegroundColor Green
+    Write-Host '  [OK] GoLiveBypass roda como userplugin, nao como substituto do mod.' -ForegroundColor Green
+    Write-Host '  [OK] Tor passou SOCKS5 + TLS ate gateway.discord.gg.' -ForegroundColor Green
     Write-Host '  [OK] Tor inicia invisivel nos proximos logons.' -ForegroundColor Green
     Write-Host ''
+
+    Start-Discord
 } catch {
     Write-Host ''
     Write-Host "  [X] Instalacao abortada: $($_.Exception.Message)" -ForegroundColor Red
 
-    if ($snapshot.Backup -and (Test-Path -LiteralPath $snapshot.Backup)) {
-        try {
-            Stop-Discord
-            New-Item -ItemType Directory -Path (Split-Path -Parent $snapshot.Path) -Force | Out-Null
-            Copy-Item -LiteralPath $snapshot.Backup -Destination $snapshot.Path -Force
-            Write-Host '  [OK] Configuracoes anteriores do mod restauradas do backup.' -ForegroundColor Green
-        } catch {
-            Write-Host "  [!] Nao consegui restaurar automaticamente o settings.json: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+    try {
+        Stop-Discord
+        Restore-ModSettings $snapshot
+        Write-Host '  [OK] Configuracoes anteriores do mod restauradas do backup.' -ForegroundColor Green
+    } catch {
+        Write-Host "  [!] Falha ao restaurar settings.json: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
+    Try-RepairModInjection $selected
     try { Start-Discord } catch { }
     throw
 } finally {
