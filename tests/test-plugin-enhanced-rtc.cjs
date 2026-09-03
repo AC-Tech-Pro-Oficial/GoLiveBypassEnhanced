@@ -57,6 +57,17 @@ assert(pickBlock.includes("proxy configurado indisponivel; nenhuma proxy publica
 assert(pickBlock.includes("return settleExit(null)"),
   "configured Tor/private proxy must fail closed to direct, not public proxy discovery");
 
+for (const marker of [
+  "TOR_STARTUP_WAIT_MS",
+  "TOR_STARTUP_STALL_MS",
+  "waitForConfiguredTor",
+  "startManagedTorIfPresent",
+  'windowsHide: true',
+  'detached: true'
+]) {
+  assert(native.includes(marker), `configured Tor cold-boot recovery missing ${marker}`);
+}
+
 assert.equal(manifest.updater.id, "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced");
 assert(installer.includes("goLiveBypass/rtcRecovery.ts"));
 assert(installer.includes("goLiveBypass/rtcShim.ts"));
