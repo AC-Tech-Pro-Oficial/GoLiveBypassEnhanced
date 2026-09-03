@@ -19,7 +19,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Uninstall', 'Restore', 'CheckUpdate', 'Update')]
+    [ValidateSet('Menu', 'Install', 'Uninstall', 'Restore', 'CheckUpdate', 'Update', 'TestTor')]
     [string] $Mode = 'Menu',
 
     [ValidateSet('Equicord', 'Vencord')]
@@ -2160,6 +2160,10 @@ try {
         'Restore'     { Invoke-RestoreEverything }
         'CheckUpdate' { Invoke-CheckUpdate }
         'Update'      { Invoke-Update }
+        'TestTor'     {
+            if (-not (Install-Tor)) { throw 'Teste Tor falhou: sem tunel TLS ate gateway.discord.gg.' }
+            Write-Ok 'Teste Tor: SOCKS5 + TLS ate gateway.discord.gg funcionando.'
+        }
         default       { Show-MainMenu }
     }
 } catch {
