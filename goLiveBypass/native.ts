@@ -857,7 +857,12 @@ async function pickExit(excluded: Set<string>) {
         }
 
         log(`seu proxy nao respondeu: ${safeProxy(manual.proxy)}`);
-        log("se for Tor, ele precisa estar aberto ANTES do Discord. Procurando alternativa.");
+        // Explicit proxy means explicit trust. Never reinterpret a dead configured
+        // Tor/private proxy as permission to send the gateway through strangers.
+        // settleExit(null) lets Discord remain usable via its normal direct route;
+        // Go Live bypass stays unavailable until the chosen proxy returns.
+        log("proxy configurado indisponivel; nenhuma proxy publica sera usada");
+        return settleExit(null);
     }
 
     return autoExit(excluded);
