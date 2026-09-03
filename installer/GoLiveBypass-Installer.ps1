@@ -1754,8 +1754,14 @@ Log notice file "$logPath"
     Stop-ManagedTor $exe
     Start-Sleep -Milliseconds 300
     Write-Step 'Iniciando o Tor sem janela'
+    $torStdout = Join-Path $base 'tor-startup.stdout.log'
+    $torStderr = Join-Path $base 'tor-startup.stderr.log'
+    Remove-CaminhoSilencioso $torStdout
+    Remove-CaminhoSilencioso $torStderr
+
     try {
-        $torProcess = Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden -PassThru
+        $torProcess = Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $torStdout -RedirectStandardError $torStderr
     } catch {
         Write-Warn "Windows nao conseguiu iniciar tor.exe: $($_.Exception.Message)"
         return $false
@@ -1765,9 +1771,12 @@ Log notice file "$logPath"
     try {
         if ($torProcess.HasExited) {
             Write-Warn "tor.exe encerrou imediatamente (codigo $($torProcess.ExitCode))."
-            if (Test-Path -LiteralPath $bootstrapLog) {
-                Get-Content -LiteralPath $bootstrapLog -Tail 30 | ForEach-Object {
-                    Write-Host "      $_" -ForegroundColor DarkGray
+            foreach ($startupLog in @($torStderr, $torStdout, $bootstrapLog)) {
+                if (Test-Path -LiteralPath $startupLog) {
+                    Write-Host "      --- $(Split-Path -Leaf $startupLog) ---" -ForegroundColor DarkGray
+                    Get-Content -LiteralPath $startupLog -Tail 40 | ForEach-Object {
+                        Write-Host "      $_" -ForegroundColor DarkGray
+                    }
                 }
             }
             return $false
