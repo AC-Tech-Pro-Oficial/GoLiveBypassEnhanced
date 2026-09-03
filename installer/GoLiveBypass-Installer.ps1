@@ -1398,6 +1398,28 @@ function Get-TorExe {
     return (Join-Path (Get-TorBaseDir) 'tor\tor.exe')
 }
 
+function Get-ManagedTorVersion($exe) {
+    if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return $null }
+    try {
+        $out = & $exe --version 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $text = ($out | Out-String).Trim()
+        $match = [regex]::Match($text, 'Tor version ([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)')
+        if ($match.Success) { return $match.Groups[1].Value }
+    } catch { }
+    return $null
+}
+
+function Test-SupportedManagedTor($exe) {
+    $version = Get-ManagedTorVersion $exe
+    if (-not $version) { return $false }
+    try {
+        return ([version]$version) -ge ([version]'0.4.9.0')
+    } catch {
+        return $false
+    }
+}
+
 function Test-TorReady {
     # Cheap bootstrap hint only. A listening SOCKS port is NOT readiness.
     try {
@@ -1627,7 +1649,8 @@ function Install-Tor {
         Remove-CaminhoSilencioso $marker
     }
 
-    if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $marker) -and (Test-TorReady)) {
+    if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $marker) -and
+        (Test-SupportedManagedTor $exe) -and (Test-TorReady)) {
         Write-Step "Tor $TorBundle escutando em 127.0.0.1:$TorPort; validando circuito"
         if (Wait-TorGateway 45) {
             [void](Set-RunKey $exe $torrc)
@@ -1723,8 +1746,14 @@ Log notice file "$logPath"
         return $false
     }
 
+    $actualTorVersion = Get-ManagedTorVersion $exe
+    if (-not (Test-SupportedManagedTor $exe)) {
+        Write-Warn "O binario extraido nao reporta Tor 0.4.9+ (versao detectada: $actualTorVersion)."
+        return $false
+    }
+
     Save-Text $marker $TorBundle
-    Write-Ok "Tor $TorBundle pronto em 127.0.0.1:$TorPort (SOCKS5 + TLS confirmado)."
+    Write-Ok "Tor $TorBundle / $actualTorVersion pronto em 127.0.0.1:$TorPort (SOCKS5 + TLS confirmado)."
     return $true
 }
 
