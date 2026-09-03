@@ -32,6 +32,10 @@ param(
     # e um teste feito assim mede a versao errada sem avisar.
     [string] $PluginSource = '',
 
+    # Enhanced noninteractive installs use the trusted local Tor daemon. Unlike
+    # the legacy -Yes path, this never means "fall back to a public proxy".
+    [switch] $Tor,
+
     [switch] $Yes
 )
 
@@ -42,8 +46,8 @@ $ErrorActionPreference = 'Stop'
 # recusado, e nesse caso nao ha o que fazer aqui: o proprio .bat ja abre com -ExecutionPolicy Bypass.
 try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
 
-$RepoRaw = 'https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main'
-$PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypass/manifest.json')
+$RepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1'
+$PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypass/rtcRecovery.ts', 'goLiveBypass/rtcShim.ts', 'goLiveBypass/manifest.json')
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
 
@@ -1569,7 +1573,14 @@ function Remove-Tor {
 }
 
 function Select-Proxy {
-    if ($Yes) { return '' }
+    # The enhanced unattended path is Tor-only. An empty string means the plugin
+    # hunts public proxies, so -Yes must never silently return one.
+    if ($Tor -or $Yes) {
+        if (-not (Install-Tor)) {
+            throw 'Tor nao conseguiu abrir um tunel TLS ate gateway.discord.gg. O Discord nao sera alterado.'
+        }
+        return "socks5://127.0.0.1:$TorPort"
+    }
 
     if (Test-TuiInteractive) {
         $tui = Tui-Menu 'Como o bypass vai sair para fora do Brasil?' @(
@@ -1580,8 +1591,7 @@ function Select-Proxy {
         switch ($tui) {
             2 {
                 if (-not (Install-Tor)) {
-                    Write-Warn 'Nao deu para preparar o Tor. Seguindo com proxy gratuita.'
-                    return ''
+                    throw 'Tor nao conseguiu abrir um tunel TLS ate gateway.discord.gg. Nao vou cair para proxy publica.'
                 }
                 return "socks5://127.0.0.1:$TorPort"
             }
