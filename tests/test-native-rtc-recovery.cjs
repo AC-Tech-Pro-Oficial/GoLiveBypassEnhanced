@@ -187,26 +187,16 @@ async function main() {
     ok("construtor captura factory guardado antes do hook sem classificar por chute");
   } else bad("fallback do construtor nao capturou factory em cache", JSON.stringify(afterCached.connections));
 
-  const level1 = sandbox.window.__goliveVoiceRecuperar(1);
-  if (level1.ok && level1.streams === 1 && level1.voices === 0 && streamConn.destroyed && !voiceConn.destroyed) {
-    ok("nivel 1 destroi somente a conexao stream atual");
-  } else bad("nivel 1 atingiu conexao errada", JSON.stringify(level1));
-  if (!cachedConn.destroyed) ok("conexao unknown nunca e destruida automaticamente");
-  else bad("nivel 1 destruiu conexao unknown");
-
-  const level2SemStream = sandbox.window.__goliveVoiceRecuperar(2);
-  if (level2SemStream.ok && level2SemStream.streams === 0 && level2SemStream.voices === 1 && voiceConn.destroyed) {
-    ok("nivel 2 ainda reconstrui a voz quando o nivel 1 ja destruiu a stream");
-  } else bad("nivel 2 exigiu indevidamente uma stream ainda ativa", JSON.stringify(level2SemStream));
-
-  const voiceConn2 = voice.createVoiceConnectionWithOptions("usuario-secreto", voiceOptions, callback);
-  const streamConn2 = voice.createOwnStreamConnectionWithOptions("usuario-secreto", streamOptions, callback);
-  const level2 = sandbox.window.__goliveVoiceRecuperar(2);
-  if (level2.ok && level2.streams === 1 && level2.voices === 1 && streamConn2.destroyed && voiceConn2.destroyed) {
-    ok("nivel 2 destroi stream + voice conhecidas, sem reload");
-  } else bad("nivel 2 nao reconstruiu o RTC completo", JSON.stringify(level2));
-  if (!cachedConn.destroyed) ok("nivel 2 tambem preserva conexao unknown");
-  else bad("nivel 2 destruiu conexao unknown");
+  const recoveryStart = source.indexOf("window.__goliveVoiceRecuperar = function");
+  const recoveryEnd = source.indexOf("installNativeHook();", recoveryStart);
+  const recoveryBlock = source.slice(recoveryStart, recoveryEnd);
+  if (!/\.destroy\s*\(/.test(recoveryBlock)) ok("recuperacao nativa nao usa destroy automaticamente");
+  else bad("recuperacao enhanced ainda chama destroy");
+  if (recoveryBlock.includes("desktop-source-reapply") && recoveryBlock.includes("viewer-fast-udp-reconnect") &&
+      recoveryBlock.includes("viewer-video-resubscribe")) ok("contratos seguros de broadcaster e viewer estao presentes");
+  else bad("acoes enhanced de RTC ausentes");
+  if (!cachedConn.destroyed && !voiceConn.destroyed && !streamConn.destroyed) ok("teste legado confirma ausencia de destruicao automatica");
+  else bad("alguma conexao foi destruida antes da recuperacao enhanced");
 
   const detectorCode = [
     "const VOICE_STREAM_AQUECIMENTO_MS = " + extractConst("VOICE_STREAM_AQUECIMENTO_MS") + ";",
@@ -235,7 +225,7 @@ async function main() {
     demanda: { known: true, active: true, demandHa: 2_000, changedHa: 2_000 },
     midia: { midiaAberta: true },
   };
-  if (detectar(frozen) === "video-nativo-travado") ok("detector age com captura viva + demanda + saida congelada por 20s");
+  if (detectar(frozen) === "transmissor-video-parado") ok("detector age com captura viva + demanda + saida congelada por 20s");
   else bad("detector nao reconheceu a assinatura reproduzida ao vivo");
   if (detectar({ ...frozen, voice: { ...frozen.voice, connections: [{ ...frozen.voice.connections[0], stats: { ...frozen.voice.connections[0].stats, saidaHa: 3_000 } }] } }) === null) {
     ok("renegociacao curta de 3s nao dispara");

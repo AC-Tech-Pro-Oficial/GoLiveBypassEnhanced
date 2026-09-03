@@ -1,5 +1,16 @@
 # Changelog
 
+## Enhanced fork — RTC recovery v1
+
+### Changed
+- Replaces destructive native RTC recovery with role-aware state machines. Broadcaster stalls replay/clear+replay the exact captured desktop source on the same native connection; viewer stalls use `fastUdpReconnect()` then a targeted `setLocalVideoDisabled(streamUserId, true/false)` resubscription.
+- Adds decoder telemetry and a regression for issue #186: a viewer that previously decoded ~30 FPS can re-enter with `fps_dec=0` / `dec=0`; replacement sockets alone no longer count as recovery.
+- Recovery success now requires 10 seconds of sustained encoded/decoded frame progress. Voice, `discord.media`, gateway and renderer are preserved by automatic RTC recovery.
+- Keeps Tor as the trusted gateway route and leaves bulk media direct; public proxy fallback is not added to the enhanced reliability path.
+
+### Known gap
+- The standalone/GUI path is enhanced first. The separately implemented Vencord/Equicord plugin does not yet claim parity with this role-aware RTC recovery.
+
 Todas as mudanças notáveis deste projeto são documentadas aqui. O formato segue
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
