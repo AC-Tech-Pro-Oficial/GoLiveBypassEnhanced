@@ -36,7 +36,10 @@ jobs:
             [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
             if ($errors.Count -gt 0) {
               Write-Host "Parser errors in $file"
-              $errors | Format-List
+              foreach ($err in $errors) {
+                Write-Host ("{0}:{1} {2} :: {3}" -f $err.Extent.StartLineNumber, $err.Extent.StartColumnNumber, $err.ErrorId, $err.Message)
+                Write-Host ("  > " + $err.Extent.Text)
+              }
               exit 1
             }
           }
