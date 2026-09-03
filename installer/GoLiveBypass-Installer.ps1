@@ -1702,26 +1702,27 @@ function Install-Tor {
 
     $dataDir = Join-Path $base 'data-state'
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-    $logPath = ($bootstrapLog -replace '\\','/')
     $torrcText = @"
 SocksPort $TorPort
 ClientOnly 1
-DataDirectory $($dataDir -replace '\\','/')
+DataDirectory $dataDir
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'data\geoip')) {
-        "GeoIPFile $((Join-Path $base 'data\geoip') -replace '\\','/')"
+        "GeoIPFile $(Join-Path $base 'data\geoip')"
     } elseif (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
-        "GeoIPFile $((Join-Path $base 'tor\data\geoip') -replace '\\','/')"
+        "GeoIPFile $(Join-Path $base 'tor\data\geoip')"
     }
 )
 $(
     if (Test-Path -LiteralPath (Join-Path $base 'data\geoip6')) {
-        "GeoIPv6File $((Join-Path $base 'data\geoip6') -replace '\\','/')"
+        "GeoIPv6File $(Join-Path $base 'data\geoip6')"
     } elseif (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
-        "GeoIPv6File $((Join-Path $base 'tor\data\geoip6') -replace '\\','/')"
+        "GeoIPv6File $(Join-Path $base 'tor\data\geoip6')"
     }
 )
-Log notice file "$logPath"
+# File logging itself can make Tor abort on Windows if the target is parsed
+# differently across Tor generations. The managed launcher captures stdout/stderr.
+Log notice stdout
 "@
     Save-Text $torrc $torrcText
 
@@ -1786,10 +1787,12 @@ Log notice file "$logPath"
     Write-Step 'Esperando bootstrap + SOCKS + TLS ate gateway.discord.gg'
     if (-not (Wait-TorGateway 120)) {
         Write-Warn "Tor nao conseguiu entregar o gateway: $script:LastTorProbe"
-        if (Test-Path -LiteralPath $bootstrapLog) {
-            Write-Host '      Ultimas linhas do tor-bootstrap.log:' -ForegroundColor DarkGray
-            Get-Content -LiteralPath $bootstrapLog -Tail 30 | ForEach-Object {
-                Write-Host "      $_" -ForegroundColor DarkGray
+        foreach ($diagLog in @($torStderr, $torStdout, $bootstrapLog)) {
+            if (Test-Path -LiteralPath $diagLog) {
+                Write-Host "      --- $(Split-Path -Leaf $diagLog) ---" -ForegroundColor DarkGray
+                Get-Content -LiteralPath $diagLog -Tail 40 | ForEach-Object {
+                    Write-Host "      $_" -ForegroundColor DarkGray
+                }
             }
         }
         return $false
