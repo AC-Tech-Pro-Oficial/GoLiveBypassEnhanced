@@ -71,6 +71,7 @@ jobs:
           pnpm --version
       - name: Copy enhanced userplugin
         run: |
+          mkdir -p mod/src/userplugins
           rm -rf mod/src/userplugins/goLiveBypass
           cp -R enhanced/goLiveBypass mod/src/userplugins/goLiveBypass
       - name: Install dependencies
