@@ -6,6 +6,7 @@ const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 const standalone = fs.readFileSync(path.join(root, "standalone", "GoLiveBypass-Standalone.ps1"), "utf8");
+const gui = fs.readFileSync(path.join(root, "golive-gui", "electron", "main.ts"), "utf8");
 const pluginInstaller = fs.readFileSync(path.join(root, "installer", "GoLiveBypass-Installer.ps1"), "utf8");
 const oneClick = fs.readFileSync(path.join(root, "installer", "Install-Enhanced.ps1"), "utf8");
 const click = fs.readFileSync(path.join(root, "INSTALL-ENHANCED.cmd"), "utf8");
@@ -20,6 +21,28 @@ assert(
   pluginInstaller.includes("goLiveBypass/rtcShim.ts"),
   "mod installer must ship enhanced RTC modules"
 );
+
+for (const [name, source] of [
+  ["plugin installer", pluginInstaller],
+  ["standalone installer", standalone],
+  ["GUI", gui]
+]) {
+  assert(source.includes("15.0.21"), `${name} must pin the supported Tor 15.0.21 bundle`);
+  assert(
+    source.includes("f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490"),
+    `${name} must pin the official Windows x64 Tor 15.0.21 SHA-256`
+  );
+  assert(
+    !source.includes("tor-expert-bundle-windows-x86_64-13.5"),
+    `${name} must not retain the obsolete Tor 13.5/0.4.8 Windows bundle`
+  );
+}
+
+assert(pluginInstaller.includes("bundle-version.txt"));
+assert(pluginInstaller.includes("Test-SupportedManagedTor"));
+assert(pluginInstaller.includes("Tor version ([0-9]+"));
+assert(oneClick.split("GoLiveBypassEnhanced - Windows one-click installer / migration").length - 1 === 1,
+  "one-click wrapper must contain exactly one clean script body");
 assert(
   pluginInstaller.includes("[switch] $Tor"),
   "mod installer needs an explicit Tor mode"
