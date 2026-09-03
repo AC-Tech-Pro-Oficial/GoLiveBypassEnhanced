@@ -25,6 +25,15 @@ text = text.replace(
     1,
 )
 
+old_media_close_expectation = 'expect(src).toContain("window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0");'
+if old_media_close_expectation not in text:
+    raise SystemExit("legacy automatic media-close expectation missing")
+text = text.replace(
+    old_media_close_expectation,
+    'expect(src).not.toContain("window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0");',
+    1,
+)
+
 viewer_test_anchor = '''  it("oscilacao curta de 3s nao dispara", () => {\n'''
 viewer_test = '''  it("viewer reentrando com decoder em zero confirma o zumbi do receptor", () => {\n    const viewer: VoiceContexto = {\n      ...base,\n      voice: {\n        ...base.voice,\n        connections: [{\n          id: 8, kind: "stream", destroyed: false, createdHa: 30_000,\n          stats: {\n            statsOk: true, role: "viewer", sampleHa: 0, entradaHa: -1, saidaHa: -1,\n            captureFrames: null, inputFrameRate: null, framesEncoded: null, encodeFrameRate: null,\n            videoExpected: true, framesDecoded: 0, decodeFrameRate: 0, decodeHa: 15_000,\n          },\n        }],\n      },\n    };\n    expect(g(viewer)).toBe("viewer-video-parado");\n    const stream = viewer.voice.connections[0];\n    expect(g({ ...viewer, voice: { ...viewer.voice, connections: [{\n      ...stream, stats: { ...stream.stats, framesDecoded: 8215, decodeFrameRate: 30, decodeHa: 0 },\n    }] } })).toBeNull();\n  });\n\n'''
 if viewer_test_anchor not in text:
