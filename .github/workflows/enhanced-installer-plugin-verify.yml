@@ -1,0 +1,81 @@
+name: Enhanced Installer and Plugin Verify
+
+on:
+  push:
+    branches:
+      - enhanced/rtc-viewer-recovery-v1
+
+jobs:
+  windows-contracts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Installer and RTC contracts
+        run: |
+          node tests/test-windows-enhanced-installer.cjs
+          node tests/test-plugin-enhanced-rtc.cjs
+          node tests/test-enhanced-rtc-recovery.cjs
+          node tests/test-native-rtc-recovery.cjs
+          node tests/test-gateway-zumbi-revive.cjs
+      - name: Parse PowerShell
+        shell: pwsh
+        run: |
+          $files = @(
+            'installer/Install-Enhanced.ps1',
+            'installer/GoLiveBypass-Installer.ps1',
+            'standalone/GoLiveBypass-Standalone.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Host "Parser errors in $file"
+              $errors | Format-List
+              exit 1
+            }
+          }
+      - name: Diff hygiene
+        shell: bash
+        run: git diff --check origin/main...HEAD
+
+  mod-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Vencord
+            repo: https://github.com/Vendicated/Vencord.git
+          - name: Equicord
+            repo: https://github.com/Equicord/Equicord.git
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: enhanced
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Clone ${{ matrix.name }}
+        run: git clone --depth 1 "${{ matrix.repo }}" mod
+      - name: Install matching pnpm
+        working-directory: mod
+        run: |
+          PM="$(node -p "require('./package.json').packageManager")"
+          npm install -g "$PM"
+          pnpm --version
+      - name: Copy enhanced userplugin
+        run: |
+          rm -rf mod/src/userplugins/goLiveBypass
+          cp -R enhanced/goLiveBypass mod/src/userplugins/goLiveBypass
+      - name: Install dependencies
+        working-directory: mod
+        run: pnpm install --frozen-lockfile
+      - name: Build ${{ matrix.name }} with enhanced plugin
+        working-directory: mod
+        run: pnpm build
