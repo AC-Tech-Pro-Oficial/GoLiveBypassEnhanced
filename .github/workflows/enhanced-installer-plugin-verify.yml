@@ -98,10 +98,10 @@ jobs:
           if (Test-Path (Join-Path $env:USERPROFILE 'Equicord')) { throw 'Runner unexpectedly already has Equicord checkout.' }
           if (Test-Path (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor\tor.exe')) { throw 'Runner unexpectedly already has managed Tor.' }
 
-      - name: Install from zero
+      - name: Install from zero through the public one-liner
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode Install -Mod Equicord -Tor -Yes
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify clean bootstrap result
