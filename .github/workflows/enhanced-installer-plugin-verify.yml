@@ -84,6 +84,62 @@ jobs:
         shell: bash
         run: git diff --check origin/main...HEAD
 
+  clean-windows-bootstrap:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assert clean app state
+        shell: powershell
+        run: |
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Discord')) { throw 'Runner unexpectedly already has Discord.' }
+          if (Test-Path (Join-Path $env:USERPROFILE 'Equicord')) { throw 'Runner unexpectedly already has Equicord checkout.' }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor\tor.exe')) { throw 'Runner unexpectedly already has managed Tor.' }
+
+      - name: Install from zero
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode Install -Mod Equicord -Tor -Yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify clean bootstrap result
+        shell: powershell
+        run: |
+          $discordResources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $discordResources) { throw 'Discord resources were not installed.' }
+
+          $equicord = Join-Path $env:USERPROFILE 'Equicord'
+          if (-not (Test-Path (Join-Path $equicord 'package.json'))) { throw 'Equicord checkout missing.' }
+
+          $plugin = Join-Path $equicord 'src\userplugins\goLiveBypass'
+          foreach ($file in @('index.tsx','native.ts','rtcRecovery.ts','rtcShim.ts','manifest.json')) {
+            if (-not (Test-Path (Join-Path $plugin $file))) { throw "Enhanced plugin file missing: $file" }
+          }
+
+          $settingsFile = Join-Path $env:APPDATA 'Equicord\settings\settings.json'
+          if (-not (Test-Path $settingsFile)) { throw 'Equicord settings.json missing.' }
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          if (-not $settings.plugins.GoLiveBypass.enabled) { throw 'GoLiveBypass is not enabled.' }
+          if ($settings.plugins.GoLiveBypass.proxy -ne 'socks5://127.0.0.1:9060') { throw 'GoLiveBypass is not pinned to local Tor.' }
+
+          $tor = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor\tor.exe'
+          if (-not (Test-Path $tor)) { throw 'Managed Tor missing.' }
+          $torVersion = (& $tor --version | Out-String)
+          if ($torVersion -notmatch 'Tor version 0\.4\.9\.') { throw "Unexpected Tor version: $torVersion" }
+
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $run = (Get-ItemProperty -Path $runKey -Name 'GoLiveBypassTor' -ErrorAction Stop).GoLiveBypassTor
+          if ($run -notmatch '(?i)wscript\.exe' -or $run -notmatch '(?i)GoLiveBypassTor\.vbs') {
+            throw "Tor startup is not hidden: $run"
+          }
+
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+
   mod-build:
     strategy:
       fail-fast: false
