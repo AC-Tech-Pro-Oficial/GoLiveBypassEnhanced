@@ -62,15 +62,18 @@ $EnhancedRepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLive
 $DiscordFlavours = @('Discord', 'DiscordPTB', 'DiscordCanary')
 $StubPackage = '{"name":"discord","main":"index.js","version":"1.0.0"}'
 
-# Tor embutido: mesma versao, mesmos hashes e mesma porta da GUI (golive-gui/electron/main.ts).
-$TorBundle = '13.5'
+# Tor embutido: Tor 0.4.8 deixou de funcionar na rede em 2026-09-01.
+# O enhanced standalone usa o mesmo Expert Bundle atual da GUI/plugin.
+$TorBundle = '15.0.21'
 $TorPort = 9060
 $TorDir = Join-Path $InstallDir 'Tor'
 $TorExe = Join-Path $TorDir 'tor\tor.exe'
 $TorTorrc = Join-Path $TorDir 'torrc'
-$TorArchiveName = 'tor-expert-bundle-windows-x86_64-13.5.tar.gz'
-$TorUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/$TorBundle/$TorArchiveName"
-$TorSha256 = '5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb'
+$TorMarker = Join-Path $TorDir 'bundle-version.txt'
+$TorArchiveName = 'tor-expert-bundle-windows-x86_64-15.0.21.tar.gz'
+$TorUrl = "https://dist.torproject.org/torbrowser/$TorBundle/$TorArchiveName"
+$TorSha256 = 'f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490'
+$script:LastTorProbe = 'nao executado'
 
 function Write-Step($m) { Write-Host "  [*] $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
@@ -712,99 +715,185 @@ function Test-TorReady {
         $client = New-Object System.Net.Sockets.TcpClient
         $task = $client.ConnectAsync('127.0.0.1', $TorPort)
         if (-not $task.Wait(1500)) { $client.Close(); return $false }
-        if (-not $client.Connected) { $client.Close(); return $false }
+        $ok = $client.Connected
         $client.Close()
-        return $true
+        return $ok
     } catch { return $false }
 }
 
-function Install-Tor {
-    # Ja esta atendendo? Reusa (pode ser o Tor da GUI, que morre com ela, ou o servico nosso).
-    if (Test-TorReady) {
-        Write-Ok "Tor ja esta atendendo em 127.0.0.1:$TorPort."
-        # Migracao importante: versoes antigas registravam tor.exe diretamente na
-        # Run key e abriam um console a cada logon. Mesmo com o daemon ja vivo,
-        # regrave a inicializacao pelo wrapper invisivel atual.
-        if ((Test-Path -LiteralPath $TorExe) -and (Test-Path -LiteralPath $TorTorrc)) {
-            Write-Step 'Reparando a inicializacao oculta do Tor'
-            Set-RunKey
+function Read-ExactBytes($stream, [int]$count) {
+    [byte[]]$buffer = New-Object byte[] $count
+    $offset = 0
+    while ($offset -lt $count) {
+        $read = $stream.Read($buffer, $offset, $count - $offset)
+        if ($read -le 0) { throw 'socket fechou antes da resposta completa' }
+        $offset += $read
+    }
+    return ,$buffer
+}
+
+function Test-TorGatewayTunnel([int]$TimeoutMs = 20000) {
+    $target = 'gateway.discord.gg'
+    $client = $null
+    $ssl = $null
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $connect = $client.BeginConnect('127.0.0.1', $TorPort, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne(1500)) {
+            $script:LastTorProbe = 'timeout conectando na porta SOCKS'
+            return $false
         }
+        $client.EndConnect($connect)
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = $TimeoutMs
+        $stream.WriteTimeout = $TimeoutMs
+
+        [byte[]]$hello = @(5,1,0)
+        $stream.Write($hello,0,$hello.Length)
+        [byte[]]$reply = @(Read-ExactBytes $stream 2)
+        if ($reply[0] -ne 5 -or $reply[1] -ne 0) {
+            $script:LastTorProbe = 'SOCKS greeting recusado'
+            return $false
+        }
+
+        [byte[]]$host = [Text.Encoding]::ASCII.GetBytes($target)
+        [byte[]]$request = New-Object byte[] ($host.Length + 7)
+        $request[0]=5; $request[1]=1; $request[2]=0; $request[3]=3; $request[4]=[byte]$host.Length
+        [Array]::Copy($host,0,$request,5,$host.Length)
+        $request[5+$host.Length]=1; $request[6+$host.Length]=187
+        $stream.Write($request,0,$request.Length)
+
+        [byte[]]$head = @(Read-ExactBytes $stream 4)
+        if ($head[0] -ne 5 -or $head[1] -ne 0) {
+            $script:LastTorProbe = "SOCKS CONNECT recusado (codigo $($head[1]))"
+            return $false
+        }
+        switch ($head[3]) {
+            1 { [void](Read-ExactBytes $stream 6) }
+            3 { [byte[]]$n=@(Read-ExactBytes $stream 1); [void](Read-ExactBytes $stream ([int]$n[0]+2)) }
+            4 { [void](Read-ExactBytes $stream 18) }
+            default { return $false }
+        }
+
+        $ssl = New-Object System.Net.Security.SslStream($stream,$false)
+        $auth = $ssl.BeginAuthenticateAsClient($target,$null,$null)
+        if (-not $auth.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            $script:LastTorProbe = 'timeout no TLS do gateway'
+            return $false
+        }
+        $ssl.EndAuthenticateAsClient($auth)
+        if (-not $ssl.IsAuthenticated) { return $false }
+        $script:LastTorProbe = 'OK SOCKS5 + TLS'
         return $true
+    } catch {
+        $script:LastTorProbe = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($ssl) { try { $ssl.Dispose() } catch { } }
+        if ($client) { try { $client.Close() } catch { } }
+    }
+}
+
+function Wait-TorGateway([int]$TimeoutSeconds = 120) {
+    $sw=[Diagnostics.Stopwatch]::StartNew()
+    while($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        if ((Test-TorReady) -and (Test-TorGatewayTunnel 20000)) { return $true }
+        Start-Sleep -Milliseconds 1000
+    }
+    return $false
+}
+
+function Stop-ManagedTor {
+    if (-not (Test-Path -LiteralPath $TorExe)) { return }
+    try {
+        $target=[IO.Path]::GetFullPath($TorExe)
+        Get-CimInstance Win32_Process -Filter "Name='tor.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                if ($_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $target) {
+                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
+    } catch { }
+}
+function Install-Tor {
+    $installedBundle=$null
+    if(Test-Path -LiteralPath $TorMarker) {
+        try { $installedBundle=(Get-Content -LiteralPath $TorMarker -Raw).Trim() } catch { }
     }
 
-    if (-not (Test-Path -LiteralPath $TorExe)) {
-        Write-Step "Baixando o Tor ($TorArchiveName, ~30 MB)"
-        $temp = if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-        $archive = Join-Path $temp $TorArchiveName
-        try {
-            Invoke-WebRequest -UseBasicParsing -Uri $TorUrl -OutFile $archive
-        } catch {
-            Write-Warn "Falha ao baixar o Tor: $($_.Exception.Message)"
-            return $false
-        }
+    if((Test-Path -LiteralPath $TorExe) -and $installedBundle -ne $TorBundle) {
+        Write-Step "Atualizando Tor antigo para $TorBundle (Tor 0.4.9.11)"
+        Stop-ManagedTor
+        Start-Sleep -Milliseconds 600
+        Remove-Item -LiteralPath (Join-Path $TorDir 'tor') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $TorDir 'data') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $TorMarker -Force -ErrorAction SilentlyContinue
+    }
 
-        Write-Step 'Conferindo SHA-256'
-        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
-        if ($hash -ne $TorSha256.ToLower()) {
+    if((Test-Path -LiteralPath $TorExe) -and (Test-Path -LiteralPath $TorMarker) -and (Test-TorReady)) {
+        Write-Step 'Tor atual encontrado; validando gateway'
+        if(Wait-TorGateway 45) {
+            Set-RunKey
+            Write-Ok "Tor $TorBundle pronto em 127.0.0.1:$TorPort."
+            return $true
+        }
+        Stop-ManagedTor
+    }
+
+    if(-not (Test-Path -LiteralPath $TorExe)) {
+        Write-Step "Baixando Tor Expert Bundle $TorBundle (~22 MB)"
+        $temp=if($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)){$env:TEMP}else{[IO.Path]::GetTempPath()}
+        $archive=Join-Path $temp $TorArchiveName
+        try { Invoke-WebRequest -UseBasicParsing -Uri $TorUrl -OutFile $archive }
+        catch { Write-Warn "Falha ao baixar o Tor: $($_.Exception.Message)"; return $false }
+
+        Write-Step 'Conferindo SHA-256 oficial'
+        $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
+        if($hash -ne $TorSha256.ToLower()) {
             Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
-            Write-Warn 'O download do Tor veio corrompido (SHA-256 diferente). Abortando.'
+            Write-Warn "SHA-256 nao confere (obtido $hash)."
             return $false
         }
 
-        Write-Step 'Extraindo o Tor'
         New-Item -ItemType Directory -Path $TorDir -Force | Out-Null
         & tar -xzf $archive -C $TorDir --exclude 'tor/pluggable_transports/*' --exclude 'debug/*'
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn 'Falha ao extrair o bundle do Tor.'
-            return $false
-        }
+        if($LASTEXITCODE -ne 0) { Write-Warn 'Falha ao extrair o bundle do Tor.'; return $false }
         Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
     }
 
-    if (-not (Test-Path -LiteralPath $TorExe)) {
-        Write-Warn "O binario do Tor nao apareceu em $TorExe."
-        return $false
-    }
+    if(-not (Test-Path -LiteralPath $TorExe)) { Write-Warn "Tor nao apareceu em $TorExe."; return $false }
 
-    $dataDir = Join-Path $TorDir 'data-state'
+    $dataDir=Join-Path $TorDir 'data-state'
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-
-    $geoipLines = ''
-    if (Test-Path -LiteralPath (Join-Path $TorDir 'tor\data\geoip')) {
+    $geoipLines=''
+    if(Test-Path -LiteralPath (Join-Path $TorDir 'data\geoip')) {
+        $geoipLines += "GeoIPFile $(Join-Path $TorDir 'data\geoip')`n"
+    } elseif(Test-Path -LiteralPath (Join-Path $TorDir 'tor\data\geoip')) {
         $geoipLines += "GeoIPFile $(Join-Path $TorDir 'tor\data\geoip')`n"
     }
-    if (Test-Path -LiteralPath (Join-Path $TorDir 'tor\data\geoip6')) {
+    if(Test-Path -LiteralPath (Join-Path $TorDir 'data\geoip6')) {
+        $geoipLines += "GeoIPv6File $(Join-Path $TorDir 'data\geoip6')`n"
+    } elseif(Test-Path -LiteralPath (Join-Path $TorDir 'tor\data\geoip6')) {
         $geoipLines += "GeoIPv6File $(Join-Path $TorDir 'tor\data\geoip6')`n"
     }
-    [IO.File]::WriteAllText($TorTorrc, "SocksPort $TorPort`nDataDirectory $dataDir`n$geoipLines`Log notice stdout`n", (New-Object Text.UTF8Encoding $false))
+    [IO.File]::WriteAllText($TorTorrc,"SocksPort $TorPort`nClientOnly 1`nDataDirectory $dataDir`n$geoipLines`n",(New-Object Text.UTF8Encoding $false))
 
-    # O caminho do Windows: o servico (tor.exe --service install) roda como LocalService e
-    # nao tem acesso a %LOCALAPPDATA% do usuario, entao o Tor nao consegue escrever no
-    # DataDirectory e o servico fica parado. A Run key sobe o Tor no logon do USUARIO — mesmo
-    # contexto da GUI — e e o caminho que funciona para o standalone/plugin, com ou sem admin.
-    # So vale a pena o servico se o DataDirectory morar em ProgramData (acessivel por
-    # LocalService); isso e o caso da GUI, nao dos instaladores.
-    Write-Step 'Registrando o Tor na inicializacao do usuario (sobe no logon)'
     Set-RunKey
+    Stop-ManagedTor
+    Start-Sleep -Milliseconds 300
+    Start-Process -FilePath $TorExe -ArgumentList '-f',$TorTorrc -WindowStyle Hidden
 
-    # A Run key so vale no proximo logon; para a sessao atual, sobe o daemon agora.
-    Write-Step 'Iniciando o Tor'
-    Start-Process -FilePath $TorExe -ArgumentList '-f', $TorTorrc -WindowStyle Hidden
-
-    Write-Step 'Esperando o Tor subir'
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Milliseconds 1000
-        if (Test-TorReady) { break }
-    }
-
-    if (-not (Test-TorReady)) {
-        Write-Warn "Tor nao subiu em 30s. Veja o log em $TorDir\tor\data-state."
+    Write-Step 'Esperando Tor completar SOCKS5 + TLS ate o gateway'
+    if(-not (Wait-TorGateway 120)) {
+        Write-Warn "Tor nao ficou utilizavel: $script:LastTorProbe"
         return $false
     }
-    Write-Ok "Tor atendendo em 127.0.0.1:$TorPort"
+
+    [IO.File]::WriteAllText($TorMarker,$TorBundle,(New-Object Text.UTF8Encoding $false))
+    Write-Ok "Tor $TorBundle atendendo e entregando o gateway."
     return $true
 }
-
 function Set-RunKey {
     try {
         # ATENCAO: nada de "New-Item -Path <chave> -Force" aqui. No provider de
