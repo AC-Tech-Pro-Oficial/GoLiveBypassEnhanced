@@ -43,6 +43,56 @@ jobs:
               exit 1
             }
           }
+      - name: Read current Tor official checksum
+        shell: powershell
+        run: |
+          $sumUrl = 'https://dist.torproject.org/torbrowser/15.0.21/sha256sums-unsigned-build.txt'
+          $sumFile = Join-Path $env:RUNNER_TEMP 'tor-sha256.txt'
+          Invoke-WebRequest -UseBasicParsing -Uri $sumUrl -OutFile $sumFile
+          $line = Select-String -LiteralPath $sumFile -Pattern 'tor-expert-bundle-windows-x86_64-15\.0\.21\.tar\.gz
+      - name: Diff hygiene
+        shell: bash
+        run: git diff --check origin/main...HEAD
+
+  mod-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Vencord
+            repo: https://github.com/Vendicated/Vencord.git
+          - name: Equicord
+            repo: https://github.com/Equicord/Equicord.git
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: enhanced
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Clone ${{ matrix.name }}
+        run: git clone --depth 1 "${{ matrix.repo }}" mod
+      - name: Install matching pnpm
+        working-directory: mod
+        run: |
+          PM="$(node -p "require('./package.json').packageManager")"
+          npm install -g "$PM"
+          pnpm --version
+      - name: Copy enhanced userplugin
+        run: |
+          mkdir -p mod/src/userplugins
+          rm -rf mod/src/userplugins/goLiveBypass
+          cp -R enhanced/goLiveBypass mod/src/userplugins/goLiveBypass
+      - name: Install dependencies
+        working-directory: mod
+        run: pnpm install --frozen-lockfile
+      - name: Build ${{ matrix.name }} with enhanced plugin
+        working-directory: mod
+        run: pnpm build
+ | Select-Object -First 1
+          if (-not $line) { throw 'Official checksum line not found.' }
+          Write-Host ('TOR_OFFICIAL_SHA_LINE=' + $line.Line.Trim())
       - name: Real Tor gateway smoke test
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode TestTor -Tor -Yes
