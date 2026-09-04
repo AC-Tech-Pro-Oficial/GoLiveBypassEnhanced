@@ -15,6 +15,7 @@ import {
   cortarDoFim,
   extrairSegredosDaProxy,
   redigir,
+  redigirLiterais,
   segredosRemanescentes,
   type SegredosConhecidos,
 } from "./redact";
@@ -213,11 +214,21 @@ export async function submitBugReport(
 
   const home = app.getPath("home");
   const segredos = payload.includeLogs ? coletarSegredos(home) : [];
+  const caminhosLocais = [...new Set([
+    home,
+    process.env.USERPROFILE ?? "",
+    process.env.LOCALAPPDATA ?? "",
+    process.env.APPDATA ?? "",
+  ].map(v => v.trim()).filter(v => v.length >= 3))];
   const description = (payload.description ?? "").slice(0, DESC_MAX);
 
   const corpo: { title: string; description: string; log?: string; meta: Record<string, string> } = {
     title,
-    description: redigir(description, segredos, BUG_API_TOKEN),
+    description: redigirLiterais(
+      redigir(description, segredos, BUG_API_TOKEN),
+      caminhosLocais,
+      "<caminho-local>",
+    ),
     meta: {
       ...montarMeta(ctx.netMode, ctx.statusBypass, ctx.torAtivo, ctx.torPorta, ctx.routeModeDisco ?? "", ctx.autoRevive),
       // Flavours vistos na varredura (discord,vesktop,...) — mostra na hora se
@@ -225,12 +236,20 @@ export async function submitBugReport(
       ...(ctx.installsFlavours ? { installs_flavours: ctx.installsFlavours } : {}),
     },
   };
-  if (payload.includeLogs) corpo.log = cortarDoFim(montarLog(home, segredos, BUG_API_TOKEN), LOG_TOTAL_MAX);
+  if (payload.includeLogs) {
+    corpo.log = cortarDoFim(
+      redigirLiterais(montarLog(home, segredos, BUG_API_TOKEN), caminhosLocais, "<caminho-local>"),
+      LOG_TOTAL_MAX,
+    );
+  }
 
   // L3 — ultima barreira: se algum segredo conhecido sobreviveu, nada sai daqui.
   if (payload.includeLogs) {
     const textoCompleto = JSON.stringify(corpo);
-    const remanescentes = segredosRemanescentes(textoCompleto, segredos, BUG_API_TOKEN);
+    const remanescentes = [
+      ...segredosRemanescentes(textoCompleto, segredos, BUG_API_TOKEN),
+      ...caminhosLocais.filter(v => textoCompleto.includes(v)),
+    ];
     if (remanescentes.length > 0) {
       logger.error("report", "envio bloqueado: segredo remanescente no payload");
       return {
