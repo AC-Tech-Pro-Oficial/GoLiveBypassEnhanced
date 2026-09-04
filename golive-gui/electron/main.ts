@@ -1743,8 +1743,8 @@ function torExePath() {
     : path.join(torDir(), "tor", "tor");
 }
 
-// sha256 de cada pacote, do sha256sums-unsigned-build.txt publicado pelo Tor Project junto da
-// serie 13.5. A versao esta fixada, entao estes arquivos nao mudam mais e o hash pode morar
+// sha256 de cada pacote, do sha256sums-signed-build.txt publicado pelo Tor Project junto da
+// serie 15.0.21. A versao esta fixada, entao estes arquivos nao mudam mais e o hash pode morar
 // aqui. Sem esta conferencia o app baixava um .tar.gz, dava chmod +x e executava o que viesse:
 // bastaria o archive sair do ar e um certificado indevido para virar execucao de codigo em
 // quem usa o modo Tor. Ao trocar TOR_BUNDLE, troque os quatro hashes junto.
