@@ -560,8 +560,9 @@ while [ $# -gt 0 ]; do
 done
 
 case "$NET_MODE" in
-    ""|auto|tor|free) ;;
-    *) fail "Valor invalido para --net-mode: $NET_MODE (use auto, tor ou free)" ;;
+    ""|auto|tor) ;;
+    free) fail "O modo free foi removido do enhanced. Use Tor ou --proxy com uma saida sua." ;;
+    *) fail "Valor invalido para --net-mode: $NET_MODE (use auto ou tor)" ;;
 esac
 
 # Em automacao (--yes) o report automatico nao deve spammar a API: quase sempre essas
@@ -1064,9 +1065,9 @@ install_patcher() {
 
     # O modo de rede (routeMode/torAddr) e escolhido no seletor da GUI e vive no mesmo
     # arquivo. Regravar sem essas chaves apagava a escolha A CADA ativacao: o runtime
-    # voltava ao "auto" em silencio enquanto a GUI seguia mostrando Tor (issue #108).
+    # voltava ao modo errado em silencio enquanto a GUI seguia mostrando Tor (issue #108).
     # Precedencia: flag (--net-mode/--tor-addr, a GUI manda sempre) > --tor/TUI > o que
-    # o arquivo ja tinha. Sem nenhuma das tres (CLI puro), o runtime usa o "auto" classico.
+    # o arquivo ja tinha. O runtime enhanced normaliza ausencia/legado para Tor.
     local route_mode="" tor_addr="" autoupdate=""
     if [ -f "$INSTALL_DIR/settings.json" ]; then
         route_mode="$(sed -n 's/.*"routeMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
