@@ -654,7 +654,7 @@ os_field() {
 
 # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e :
 # codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
-# bypass cairia para a lista gratuita sem dizer por que.
+# bypass ficaria sem uma saida confiavel sem dizer por que.
 if [ -n "$PROXY" ]; then
     if ! printf '%s' "$PROXY" | grep -Eq '^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}(-[0-9]{1,5})?$'; then
         printf '\n  %s[X]%s Endereco de proxy invalido.\n' "$C_RED" "$C_OFF" >&2
@@ -1619,11 +1619,9 @@ tally="$(mktemp)"
 if [ "$MODE" = "install" ] && [ -z "$NET_MODE" ] && st_tui_is_interactive; then
     st_net="$(st_tui_menu "Como o bypass vai sair?" \
         "Tor automatico (recomendado, baixa e sobe sozinho)" \
-        "Proxy gratuita (escolhida e testada sozinha)" \
         "Proxy minha (socks5://host:porta)")"
     case "$st_net" in
-        2) PROXY="" ; TOR_MODE=0 ; NET_MODE="free" ;;
-        3) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ; NET_MODE="auto" ;;
+        2) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ; NET_MODE="auto" ;;
         *) TOR_MODE=1 ; NET_MODE="tor" ;;
     esac
 fi
