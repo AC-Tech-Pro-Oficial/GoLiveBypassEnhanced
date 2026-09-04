@@ -47,7 +47,7 @@ $ErrorActionPreference = 'Stop'
 try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
 
 $RepoRef = [Environment]::GetEnvironmentVariable('GOLIVE_ENHANCED_REF')
-if ($RepoRef -notmatch '^[0-9a-fA-F]{40}
+if ($RepoRef -match '^[0-9a-fA-F]{40}
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
 $DiscordStableUrls = @(
@@ -2957,8 +2957,11 @@ try {
 }
 
 Write-Host ''
-) { $RepoRef = 'enhanced/rtc-viewer-recovery-v1' }
-$RepoRaw = "https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/$RepoRef"
+) {
+    $RepoRaw = "https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/$($RepoRef.ToLowerInvariant())"
+} else {
+    $RepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1'
+}
 $PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypass/rtcRecovery.ts', 'goLiveBypass/rtcShim.ts', 'goLiveBypass/manifest.json')
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
