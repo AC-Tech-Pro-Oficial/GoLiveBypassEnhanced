@@ -1985,73 +1985,55 @@ select_target() {
 
 select_proxy() {
     if tui_is_interactive; then
-        local tui_choice
+        local tui_choice manual
         tui_choice="$(tui_menu "Como o bypass vai sair para fora do Brasil?" \
-            "Proxy gratuita (escolhida e testada sozinha)" \
-            "Tor automatico (baixa e sobe sozinho)" \
+            "Tor automatico (recomendado, baixa e sobe sozinho)" \
             "Proxy minha (socks5://host:porta)")"
-        case "$tui_choice" in
-            2)
-                if ! ensure_tor; then
-                    warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
-                    printf '\n'
-                    return 0
-                fi
-                printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
-                ;;
-            3)
-                local manual
-                manual="$(tui_input "Endereco da proxy")"
-                case "$manual" in
-                    socks5://*|https://*|http://*)
-                        printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
-                    *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
-                esac
-                printf '%s\n' "$manual"
-                ;;
-            *) printf '\n' ;;
-        esac
-        return 0
-    fi
-
-    printf '\n  %sComo o bypass vai sair para fora do Brasil?%s\n\n' "$C_BOLD" "$C_OFF" >&2
-    printf '    %s[1] Proxy gratuita, escolhida e testada sozinha%s\n' "$C_GREEN" "$C_OFF" >&2
-    printf '  %s      Nao precisa instalar nada. O plugin testa varias e usa a que passar.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '    %s[2] Tor automatico%s\n' "$C_CYAN" "$C_OFF" >&2
-    printf '  %s      Baixa e instala o Tor sozinho (uma vez) e deixa ele sempre rodando.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '    %s[3] Proxy minha%s\n' "$C_CYAN" "$C_OFF" >&2
-    printf '  %s      Voce informa o endereco, no formato socks5://host:porta.%s\n\n' "$C_DIM" "$C_OFF" >&2
-
-    local choice manual
-    printf '%s' "  Escolha: " >&2
-    read -r choice
-    case "$choice" in
-        2)
-            if ! ensure_tor; then
-                warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
-                printf '\n'
-                return 0
-            fi
-            printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
-            ;;
-        3)
-            printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
-            printf '  %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A)%s\n' "$C_DIM" "$C_OFF" >&2
-            printf '%s' "  Endereco da proxy: " >&2
-            read -r manual
-            # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
-            # : codificados. Recusar aqui deixaria o suporte a login existindo so no plugin.
-            # O mesmo casamento do =~ do bash, com case. O trecho antes do @ e opcional.
+        if [ "$tui_choice" = "2" ]; then
+            manual="$(tui_input "Endereco da proxy")"
             case "$manual" in
                 socks5://*|https://*|http://*)
-                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' \
+                        || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
                     ;;
                 *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
             esac
             printf '%s\n' "$manual"
-            ;;
-        *) printf '\n' ;;
-    esac
+            return 0
+        fi
+
+        ensure_tor || fail "Tor nao conseguiu entregar gateway.discord.gg. Nao vou usar proxy publica."
+        printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
+        return 0
+    fi
+
+    printf '\n  %sComo o bypass vai sair para fora do Brasil?%s\n\n' "$C_BOLD" "$C_OFF" >&2
+    printf '    %s[1] Tor automatico (recomendado)%s\n' "$C_GREEN" "$C_OFF" >&2
+    printf '  %s      Baixa, valida e deixa o daemon rodando sem janela.%s\n' "$C_DIM" "$C_OFF" >&2
+    printf '    %s[2] Proxy minha%s\n' "$C_CYAN" "$C_OFF" >&2
+    printf '  %s      socks5://host:porta ou https://host:porta%s\n' "$C_DIM" "$C_OFF" >&2
+    printf '  %sO Enhanced nunca escolhe proxy publica por conta propria.%s\n\n' "$C_DIM" "$C_OFF" >&2
+
+    local choice manual
+    printf '%s' "  Escolha: " >&2
+    read -r choice
+    if [ "$choice" = "2" ]; then
+        printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '%s' "  Endereco da proxy: " >&2
+        read -r manual
+        case "$manual" in
+            socks5://*|https://*|http://*)
+                printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' \
+                    || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+                ;;
+            *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
+        esac
+        printf '%s\n' "$manual"
+        return 0
+    fi
+
+    ensure_tor || fail "Tor nao conseguiu entregar gateway.discord.gg. Nao vou usar proxy publica."
+    printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
 }
 
 select_persistence() {
@@ -2435,13 +2417,10 @@ do_install() {
 
     printf '\n'
     ok "Pronto. O plugin ja vem ativado, nao precisa mexer em nada."
-    if [ -n "$proxy" ]; then
-        # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
-        # deu certo.
-        printf '  %sProxy: %s%s\n' "$C_DIM" "$(hide_proxy_secret "$proxy")" "$C_OFF"
-    else
-        printf '  %sProxy: gratuita, escolhida e testada sozinha a cada abertura%s\n' "$C_DIM" "$C_OFF"
-    fi
+    [ -n "$proxy" ] || fail "Instalacao terminou sem uma saida confiavel configurada."
+    # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
+    # deu certo.
+    printf '  %sSaida confiavel: %s%s\n' "$C_DIM" "$(hide_proxy_secret "$proxy")" "$C_OFF"
     printf '  %sEntre numa call e use Go Live ou a camera.%s\n' "$C_DIM" "$C_OFF"
 
     # O deploy do flatpak e refeito do zero a cada atualizacao, e a injecao mora dentro dele.
