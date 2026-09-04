@@ -69,7 +69,27 @@ assert(
 assert(
   pluginInstaller.includes("Install-Mod (Show-ModChoice)") &&
   pluginInstaller.includes("git clone --depth 1"),
-  "missing Equicord/Vencord must still be bootstrapped from source"
+  "missing Equicord/Vencord should still use git clone when Git is available"
+);
+for (const marker of [
+  "function Install-PortableNode",
+  "https://nodejs.org/dist/index.json",
+  "SHASUMS256.txt",
+  "function Install-ModFromArchive",
+  "archive/refs/heads/main.zip",
+  ".golive-source-commit",
+  "TestPortableNode"
+]) {
+  assert(pluginInstaller.includes(marker), `portable clean-machine fallback missing ${marker}`);
+}
+assert(
+  pluginInstaller.includes("Git nao encontrado; o mod sera obtido por source archive oficial"),
+  "missing Git must fall back to an official GitHub source archive"
+);
+assert(
+  pluginInstaller.includes("Node portatil") &&
+  pluginInstaller.includes("SHA-256 oficial do Node.js confere"),
+  "missing winget/Node must use a checksum-verified user-local Node fallback"
 );
 assert(
   !pluginInstaller.includes("if ($Yes) { return '' }"),
