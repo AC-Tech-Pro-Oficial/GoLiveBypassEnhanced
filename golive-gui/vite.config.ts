@@ -31,6 +31,12 @@ export default defineConfig({
           options.reload()
         },
       },
+      {
+        entry: 'electron/preload-logs.ts',
+        onstart(options) {
+          options.reload()
+        },
+      },
     ]),
     renderer(),
   ],
