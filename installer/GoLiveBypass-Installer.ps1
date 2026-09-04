@@ -1348,7 +1348,7 @@ function Check-ExternalBypassLaunchers {
         $props = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
         foreach ($p in $props.PSObject.Properties) {
             if ($p.Name -like 'PS*' -or -not ($p.Value -is [string])) { continue }
-            if ([string]$p.Value -match '(?i)DiscordGoLiveBypass') {
+            if (([string]$p.Value) -match '(?i)DiscordGoLiveBypass') {
                 Write-Warn "Existe um launcher externo de bypass no inicio do Windows ($($p.Name)). Nao o removi."
                 $script:ExternalBypassConflict = $true
             }
