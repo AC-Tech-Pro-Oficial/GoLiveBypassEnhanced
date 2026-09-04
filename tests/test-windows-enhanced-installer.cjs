@@ -86,6 +86,9 @@ assert(
   pluginInstaller.includes("Git nao encontrado; o mod sera obtido por source archive oficial"),
   "missing Git must fall back to an official GitHub source archive"
 );
+assert(pluginInstaller.includes("GOLIVE_PREFER_SOURCE_ARCHIVE") &&
+       pluginInstaller.includes("Source archive oficial solicitado; pulando git clone."),
+  "installer must expose a deterministic official-archive bootstrap path");
 assert(
   pluginInstaller.includes("Node portatil") &&
   pluginInstaller.includes("SHA-256 oficial do Node.js confere"),
