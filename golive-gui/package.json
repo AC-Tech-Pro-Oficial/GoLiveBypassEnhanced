@@ -25,8 +25,8 @@
     "productName": "GoLiveBypass",
     "publish": {
       "provider": "github",
-      "owner": "bezumiya",
-      "repo": "GoLiveBypass",
+      "owner": "AC-Tech-Pro-Oficial",
+      "repo": "GoLiveBypassEnhanced",
       "releaseType": "release"
     },
     "files": [
