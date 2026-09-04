@@ -1,126 +1,86 @@
-# Runbook de deploy — api.skyplaceia.com
+# Runbook — API de bug reports em api.skyplaceia.com
 
-Hospedagem da API de bug reports em container Docker isolado no servidor principal, atrás do OpenLiteSpeed (CyberPanel) que termina o TLS.
+A API roda em container isolado atrás do OpenLiteSpeed/CyberPanel, que termina TLS.
 
+```text
+Internet :443
+    |
+OpenLiteSpeed /bugs
+    |
+127.0.0.1:8091 -> container Go
+    |
+api.github.com
 ```
-Internet ──443──> OpenLiteSpeed (TLS pelo CyberPanel)
-                      │ rewrite [P] prefixo /bugs -> extprocessor
-                      ▼
-              127.0.0.1:8091 (container hardened)
-                      │
-                      └──> api.github.com (cria as issues)
-```
 
-A porta 8091 fica publicada apenas em `127.0.0.1` — nenhum acesso direto externo.
+A porta do container fica publicada somente em loopback.
 
-**Importante**: `api.skyplaceia.com` já hospeda outros serviços (Supabase em `/`, pagamentos em `/v2`). Esta API usa o **prefixo exclusivo `/bugs`** — nada existente é alterado.
+## Rotas
 
 - Health: `https://api.skyplaceia.com/bugs/healthz`
 - Reports: `https://api.skyplaceia.com/bugs/v1/reports`
+- Cota: `https://api.skyplaceia.com/bugs/v1/block-status`
 
-> Nota de integração dos apps clientes (GUI/standalone): a URL base passa a ser
-> `https://api.skyplaceia.com/bugs` (config `BASE_PATH=bugs` no servidor) e os
-> caminhos internos da API continuam `/healthz` e `/v1/reports`.
+`BASE_PATH=bugs` deve estar configurado no container.
 
-**Mecanismo de proxy**: o `context /bugs { type proxy }` do OLS repassa o path
-completo (`/bugs/...`) — por isso o container recebe o prefixo e a API usa
-`BASE_PATH=bugs`.
+## Segredo
 
-## Pré-requisitos
+Existe somente um segredo operacional de cliente externo: **`GITHUB_TOKEN` no servidor**.
 
-1. **DNS**: registro A `api.skyplaceia.com` -> IP do servidor principal.
-2. **CyberPanel**: criar website `api.skyplaceia.com` e emitir SSL Let's Encrypt pelo painel.
-3. **Docker** + plugin compose instalados no host.
-4. Segredos:
-   - `API_TOKEN`: `openssl rand -hex 32` (compartilhado com os apps clientes).
-   - `GITHUB_TOKEN`: PAT fine-grained no repo `bezumiya/GoLiveBypass`, permissão **Issues: Read and write**, sem acesso a código.
+Não configure `API_TOKEN`, `bugReportToken` ou bearer token no app. O endpoint de report é público porque qualquer segredo distribuído no binário seria extraível; abuso é contido por limites de payload + rate limit/bloqueio por IP.
 
-## Passos
+O PAT deve ser fine-grained, limitado ao repositório `AC-Tech-Pro-Oficial/GoLiveBypassEnhanced`, com **Issues: Read and write** e sem permissões de código.
 
-### 1. Preparar o `.env`
+## Deploy
 
 ```sh
 cd /caminho/para/repo/api
 cp .env.example .env
 chmod 600 .env
-# editar .env: API_TOKEN, GITHUB_TOKEN
-```
+# editar GITHUB_TOKEN e BASE_PATH=bugs
 
-### 2. Aplicar o snippet no servidor web
-
-O vhost já existe e tem outros serviços — **adicione** (não substitua), usando o conteúdo de `deploy/openlitespeed-vhost.conf`:
-
-1. Bloco `extProcessor golivebugapi` em `/usr/local/lsws/conf/httpd_config.conf` (nível de servidor — obrigatório: `[REWRITE] [P]` de vhost não resolve nome de host neste OLS, e os demais proxies do painel também vivem nesse nível)
-2. Bloco `context /bugs { type proxy ... }` no vhost `/usr/local/lsws/conf/vhosts/api.skyplaceia.com/vhost.conf`
-
-> Não use rewrite com flag `[P]`: neste OpenLiteSpeed falha com "Can not determine proxy host name".
-
-Depois valide e reinicie:
-
-```sh
-/usr/local/lsws/bin/lshttpd -t && systemctl restart lsws
-```
-
-### 3. Build + subir o container
-
-```sh
-cd /caminho/para/repo/api
 ./deploy/deploy.sh
 ```
 
-O script valida pré-requisitos, faz build, sobe o compose e espera `GET /healthz` responder em `127.0.0.1:8091`.
+O vhost deve manter o `context /bugs { type proxy ... }` já documentado em `openlitespeed-vhost.conf`. Não substitua os outros serviços do domínio.
 
-## Verificação end-to-end
+## Verificação
 
 ```sh
-# saude via HTTPS
 curl -fsS https://api.skyplaceia.com/bugs/healthz
-# esperado: {"status":"ok"}
 
-# report valido -> cria issue de teste no GitHub
-curl -fsS -X POST https://api.skyplaceia.com/bugs/v1/reports \
-  -H "Authorization: Bearer $API_TOKEN" \
+curl -i -X POST https://api.skyplaceia.com/bugs/v1/reports \
   -H 'Content-Type: application/json' \
-  -d '{"title":"validacao deploy","description":"teste pos-deploy"}'
-# esperado: 201 {"issue_number":N,"issue_url":"..."}
+  -d '{"title":"validacao deploy","description":"teste pos-deploy","meta":{"app":"curl"}}'
 
-# sem token -> 401 | payload invalido -> 400 | rajada >60/min -> 429 + Retry-After
-
-# regressao dos servicos existentes no mesmo dominio:
-curl -fsS https://api.skyplaceia.com/v2/...        # pagamentos deve seguir respondendo
+curl -fsS https://api.skyplaceia.com/bugs/v1/block-status
 ```
 
-Confirme também que a renovação de cert do CyberPanel segue funcionando (`/.well-known/acme-challenge/` tem context próprio, fora do rewrite) e que os demais sites do painel não foram afetados.
+O POST válido deve retornar `201` com `issue_number` e `issue_url`.
+
+Confirme também os serviços existentes do domínio após qualquer alteração no vhost.
 
 ## Operação
 
 | Tarefa | Comando |
 |---|---|
-| Logs | `docker compose logs -f` (em `api/`) |
+| Logs | `docker compose logs -f` |
 | Status | `docker compose ps` |
-| Atualizar versão | `git pull && ./deploy/deploy.sh` |
+| Atualizar | `git pull && ./deploy/deploy.sh` |
 | Reiniciar | `docker compose restart` |
 
-### Rotação de segredos
+### Rotação do GitHub PAT
 
-Edite `api/.env` com os novos valores e recrie o container (as variáveis são lidas só na inicialização):
+Atualize `GITHUB_TOKEN` em `api/.env` e recrie:
 
 ```sh
 docker compose up -d --force-recreate
 ```
 
-Se trocar `API_TOKEN`, coordene com a atualização nos apps clientes (GUI/standalone), senão os reports passam a receber 401.
+Nenhuma atualização de cliente é necessária, porque o PAT nunca é distribuído.
 
-### Rollback
+## Limitações
 
-```sh
-cd api && docker compose down
-```
-
-Remove apenas a API; o vhost volta a servir a página padrão. Nenhum outro site do painel é afetado.
-
-## Limitações conhecidas
-
-- Rate limit é **em memória**: reinício do container zera os contadores.
-- Sem CORS é intencional — consumo pelos apps desktop (Electron/standalone), não por browsers.
-- Healthcheck interno não existe na imagem (final é `FROM scratch`, sem shell); a checagem fica no `deploy.sh` e em monitor externo apontando para `https://api.skyplaceia.com/healthz`.
+- rate limit em memória; reinício zera contadores;
+- múltiplas réplicas precisam de store compartilhado;
+- sem CORS por design;
+- o container final é mínimo/read-only e não contém shell.
