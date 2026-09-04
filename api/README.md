@@ -1,137 +1,118 @@
-# GoLiveBypass — API de Bug Reports
+# GoLiveBypassEnhanced — API de Bug Reports
 
-API HTTP, em Go, que recebe relatos de bug dos apps do GoLiveBypass e abre
-issues no GitHub. Por enquanto só isto: um endpoint autenticado que transforma
-um relato (título, descrição, log de diagnóstico e metadados) em uma issue.
+Serviço HTTP em Go que recebe diagnósticos do app e cria issues no GitHub.
 
-- **Stack**: Go 1.25+ · [Echo v5](https://github.com/labstack/echo/v5)
-- **Dependência externa**: nenhuma além do Echo (o cliente do GitHub é stdlib)
+## Modelo de confiança
 
-## Como funciona
+O endpoint de cliente é **deliberadamente público**. Um segredo embutido em um aplicativo desktop pode ser extraído e reutilizado, então não usamos um bearer token compartilhado como autenticação.
 
-```
-app (GUI/standalone, futuro)              API (este serviço)              GitHub
-      │  POST /v1/reports                        │                              │
-      │  Authorization: Bearer <API_TOKEN>       │                              │
-      │  {title, description, log, meta} ───────►│  valida + monta markdown     │
-      │                                          │  POST /repos/{repo}/issues ──►│
-      │  201 {issue_number, issue_url} ◄─────────│◄── 201 {number, html_url}    │
+A proteção contra abuso fica no servidor:
+
+- limite de corpo HTTP: 512 KB;
+- `log` limitado por `MAX_LOG_BYTES`;
+- metadados limitados em quantidade/tamanho;
+- rate limit por IP e bloqueio temporário;
+- `@mentions` neutralizadas antes de publicar a issue;
+- headers `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` e `Referrer-Policy: no-referrer`;
+- o **GITHUB_TOKEN nunca sai do servidor**.
+
+Sem CORS é intencional: o consumidor normal é o processo principal Electron, não uma página web.
+
+## Fluxo
+
+```text
+Desktop                         API                              GitHub
+   | POST /v1/reports            |                                 |
+   | {title,description,log,meta}-> valida limites/rate limit       |
+   |                              | POST /repos/{repo}/issues ------>|
+   | <- 201 {issue_number,url} ---|<-------------------------- 201 ---|
 ```
 
 ## Setup
 
-1. **Crie um PAT (fine-grained)** em *GitHub → Settings → Developer settings →
-   Fine-grained personal access tokens*, com acesso somente ao repositório
-   alvo (`Repository access → Only select repositories`) e permissão
-   **Issues: write**.
-2. **Crie as labels** usadas por padrão (`bug`, `gui`) no repositório alvo — sem
-   elas o GitHub responde 422 e a issue não é criada. A lista vem de `ISSUE_LABELS`.
-3. **Gere o token compartilhado** com os apps (`API_TOKEN`), por exemplo:
-   `openssl rand -hex 32`. Este token será embutido na GUI/standalone quando
-   eles ganharem o botão de reportar bug — se vazar, troque o valor e o
-   segredo embutido nos apps.
-
-## Rodando
+1. Crie um PAT fine-grained com acesso somente a `AC-Tech-Pro-Oficial/GoLiveBypassEnhanced` e **Issues: write**.
+2. Garanta que as labels de `ISSUE_LABELS` existam no repositório.
+3. Exporte `GITHUB_TOKEN` apenas no servidor.
 
 ```sh
 cd api
-go run ./cmd/api        # exige API_TOKEN e GITHUB_TOKEN no ambiente
+GITHUB_TOKEN=github_pat_... go run ./cmd/api
 ```
 
-Variáveis (todas em `.env.example`):
+Variáveis:
 
 | Variável | Obrig. | Padrão | Descrição |
-|---|---|---|---|
-| `API_TOKEN` | sim | — | segredo compartilhado com os apps (Bearer) |
-| `GITHUB_TOKEN` | sim | — | PAT com permissão Issues: write no repo alvo |
-| `GITHUB_REPO` | não | `bezumiya/GoLiveBypass` | `owner/repo` da issue |
-| `ISSUE_LABELS` | não | `bug,gui` | labels separadas por vírgula (precisam existir no repo) |
+|---|---:|---|---|
+| `GITHUB_TOKEN` | sim | — | PAT server-side com Issues: write |
+| `GITHUB_REPO` | não | `AC-Tech-Pro-Oficial/GoLiveBypassEnhanced` | repositório que recebe issues |
+| `ISSUE_LABELS` | não | `bug,gui` | labels existentes |
 | `PORT` | não | `8080` | porta HTTP |
-| `RATE_LIMIT` | não | `60` | requisições por minuto por IP |
-| `MAX_LOG_BYTES` | não | `262144` | teto do campo `log` (256 KB) |
-| `LOG_LEVEL` | não | `info` | `debug`, `info`, `warn`, `error` |
-
-### Testar com curl
-
-```sh
-curl -s localhost:8080/healthz
-
-# sem token → 401
-curl -s -X POST localhost:8080/v1/reports -d '{"title":"x"}'
-
-# validação → 400
-curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer <API_TOKEN>' \
-  -d '{"title":""}'
-
-# com token fake → 502 (chega no GitHub e falha na auth) — confirma o fluxo
-API_TOKEN=dev GITHUB_TOKEN=fake GITHUB_REPO=bezumiya/GoLiveBypass go run ./cmd/api
-curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer dev' \
-  -d '{"title":"Teste","log":"linha do log","meta":{"app":"cli","os":"linux"}}'
-```
-
-### Docker
-
-```sh
-docker build -t golive-api api
-docker run --rm -p 8080:8080 \
-  -e API_TOKEN=... -e GITHUB_TOKEN=... \
-  -e GITHUB_REPO=bezumiya/GoLiveBypass \
-  golive-api
-```
+| `RATE_LIMIT` | não | `3` | reports/minuto por IP |
+| `BLOCK_SECONDS` | não | `600` | bloqueio após exceder a janela |
+| `MAX_LOG_BYTES` | não | `262144` | teto do campo log |
+| `BASE_PATH` | não | vazio | prefixo, ex. `bugs` |
+| `LOG_LEVEL` | não | `info` | nível de log |
 
 ## Endpoints
 
 ### `POST /v1/reports`
 
-Body (JSON):
-
 ```json
 {
   "title": "Go Live não sobe após atualização",
-  "description": "passos de reprodução...",
-  "log": "====\nabrindo | win32 x64 | electron 42...",
-  "meta": { "app": "golive-gui", "version": "1.2.0", "os": "linux x64" }
+  "description": "passos para reproduzir...",
+  "log": "linhas de diagnóstico",
+  "meta": {
+    "app": "golive-gui",
+    "version": "1.2.0",
+    "os": "win32 x64"
+  }
 }
 ```
 
-- `title` — obrigatório, até 200 caracteres (espaços nas bordas são removidos).
-- `description` — opcional, até 8 KB.
-- `log` — opcional; truncado em `MAX_LOG_BYTES`; o conteúdo é neutralizado para
-  não quebrar o bloco de código da issue.
-- `meta` — opcional; pares `chave: valor` exibidos numa tabela na issue.
+Limites adicionais de `meta`: até 32 entradas, chave até 64 bytes, valor até 512 bytes e até 8 KB no total.
 
-Resposta `201`:
+Resposta:
 
 ```json
-{ "issue_number": 123, "issue_url": "https://github.com/.../issues/123" }
+{"issue_number":123,"issue_url":"https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/issues/123"}
 ```
+
+### `GET /v1/block-status`
+
+Não consome a cota. Informa `blocked`, `retry_after` ou `remaining`.
 
 ### `GET /healthz`
 
-`200 {"status":"ok"}` — sem autenticação, para healthcheck.
+`200 {"status":"ok"}`.
 
-## Erros
+## Teste local
 
-| Status | Quando | Body |
-|---|---|---|
-| `400` | payload inválido (JSON, title, tamanhos) | `{"error": "..."}` |
-| `401` | token ausente ou errado | `{"error": "..."}` |
-| `413` | corpo acima de 512 KB | `{"error": "..."}` |
-| `429` | rate limit por IP excedido (header `Retry-After`) | `{"error": "..."}` |
-| `404` / `405` | rota/método inexistente | `{"error": "..."}` |
-| `502` | o GitHub recusou (auth, label inexistente, etc.) | detalhe só no log do servidor |
+```sh
+curl -fsS http://127.0.0.1:8080/healthz
+
+curl -i -X POST http://127.0.0.1:8080/v1/reports \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"validacao local","meta":{"app":"curl"}}'
+```
+
+Não existe `API_TOKEN` de cliente. Se uma instalação antiga ainda tiver `bugReportToken`/`GOLIVE_BUG_API_TOKEN`, eles são obsoletos e ignorados.
+
+## Docker
+
+```sh
+docker build -t golive-api api
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -e GITHUB_TOKEN=github_pat_... \
+  -e GITHUB_REPO=AC-Tech-Pro-Oficial/GoLiveBypassEnhanced \
+  golive-api
+```
 
 ## Operação
 
-- **TLS termina no reverse proxy** (Caddy, nginx, Traefik) — a API não fala
-  TLS sozinha. Atrás do proxy, o rate limit usa o IP real do cliente por
-  `X-Forwarded-For` (o Echo só confia em XFF vindo de IP de loopback ou rede
-  privada).
-- **Rate limit em memória**: suficiente para uma instância; com várias
-  instâncias atrás de um load balancer, cada uma tem a própria contagem e o
-  Redis seria o próximo passo (fora de escopo por enquanto).
-- Desligamento gracioso em `SIGINT`/`SIGTERM` (até 10 s para requisições em
-  andamento).
+TLS deve terminar no reverse proxy. O serviço confia em `X-Forwarded-For` somente através de peers loopback/rede privada, que é o desenho esperado quando o container fica publicado apenas em `127.0.0.1`.
+
+O rate limit é em memória; múltiplas réplicas exigiriam um store compartilhado (por exemplo Redis) para uma cota global.
 
 ## Testes
 
@@ -141,29 +122,4 @@ go vet ./...
 go test ./...
 ```
 
-Cobertura: validação do payload e montagem do markdown (`internal/bugreport`),
-cliente GitHub contra um fake HTTP (`internal/gh`), e os endpoints completos
-com auth, rate limit, body limit e erros (`internal/server`).
-
-## Integração (GUI)
-
-A GUI Electron usa esta API: o botão **"Reportar bug"** coleta `gui.log` +
-`golivebypass.log` + ring buffer, redige em camadas (L1 regex, L2 segredos
-literais da proxy, L3 varredura final com bloqueio) e chama `POST /v1/reports`
-com o `API_TOKEN` embutido ou configurado (`electron/bugreport.ts`). A resposta
-traz a URL da issue para mostrar ao usuário. Logs são cortados para 256 KB,
-corpo total limitado a 512 KB, rate limit 60/min por IP.
-
-Para apontar a GUI para sua própria instância, coloque em
-`settings.json` (ao lado do executável / `%LOCALAPPDATA%\GoLiveBypass\`):
-
-```json
-{
-  "bugReportApiUrl": "https://sua-api.exemplo.com",
-  "bugReportToken": "<mesmo valor de API_TOKEN>"
-}
-```
-
-(ou as variáveis de ambiente `GOLIVE_BUG_API_URL` / `GOLIVE_BUG_API_TOKEN`).
-Sem isso, a GUI cai no formulário `github.com/.../issues/new` com o diagnóstico
-no clipboard.
+A GUI redige credenciais/proxy antes do envio e possui uma última verificação local que bloqueia o report se um segredo conhecido sobreviver.
