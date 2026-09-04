@@ -6,7 +6,6 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
-	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 	t.Setenv("ISSUE_LABELS", "") // forca o default
 
@@ -14,17 +13,17 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.GitHubRepo != "bezumiya/GoLiveBypass" {
-		t.Errorf("GitHubRepo = %q, want bezumiya/GoLiveBypass", cfg.GitHubRepo)
+	if cfg.GitHubRepo != "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced" {
+		t.Errorf("GitHubRepo = %q, want AC-Tech-Pro-Oficial/GoLiveBypassEnhanced", cfg.GitHubRepo)
 	}
 	if cfg.Port != "8080" {
 		t.Errorf("Port = %q, want 8080", cfg.Port)
 	}
-	if cfg.RateLimitPerMin != 10 {
-		t.Errorf("RateLimitPerMin = %v, want 10 (agressivo)", cfg.RateLimitPerMin)
+	if cfg.RateLimitPerMin != 3 {
+		t.Errorf("RateLimitPerMin = %v, want 3 (public endpoint)", cfg.RateLimitPerMin)
 	}
-	if cfg.BlockSeconds != 300 {
-		t.Errorf("BlockSeconds = %d, want 300", cfg.BlockSeconds)
+	if cfg.BlockSeconds != 600 {
+		t.Errorf("BlockSeconds = %d, want 600", cfg.BlockSeconds)
 	}
 	if cfg.MaxLogBytes != 262144 {
 		t.Errorf("MaxLogBytes = %d, want 262144", cfg.MaxLogBytes)
@@ -34,17 +33,15 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadMissingAPIToken(t *testing.T) {
-	t.Setenv("API_TOKEN", "")
+func TestLoadWithoutClientAPIToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 
-	if _, err := Load(); err == nil {
-		t.Fatal("Load() esperava erro com API_TOKEN ausente")
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() nao deveria exigir segredo distribuido no cliente: %v", err)
 	}
 }
 
 func TestLoadMissingGitHubToken(t *testing.T) {
-	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "")
 
 	if _, err := Load(); err == nil {
@@ -53,7 +50,6 @@ func TestLoadMissingGitHubToken(t *testing.T) {
 }
 
 func TestLoadInvalidRepo(t *testing.T) {
-	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 	t.Setenv("GITHUB_REPO", "sem-barra")
 
@@ -63,9 +59,8 @@ func TestLoadInvalidRepo(t *testing.T) {
 }
 
 func TestLoadOverrides(t *testing.T) {
-	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
-	t.Setenv("GITHUB_REPO", "bezumiya/GoLiveBypass")
+	t.Setenv("GITHUB_REPO", "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced")
 	t.Setenv("ISSUE_LABELS", "bug, triage , ")
 	t.Setenv("RATE_LIMIT", "120")
 	t.Setenv("BLOCK_SECONDS", "60")
@@ -76,7 +71,7 @@ func TestLoadOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.GitHubRepo != "bezumiya/GoLiveBypass" {
+	if cfg.GitHubRepo != "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced" {
 		t.Errorf("GitHubRepo = %q", cfg.GitHubRepo)
 	}
 	if !reflect.DeepEqual(cfg.Labels, []string{"bug", "triage"}) {
@@ -97,7 +92,6 @@ func TestLoadOverrides(t *testing.T) {
 }
 
 func TestLoadEmptyLabelsFallsBackToBugGui(t *testing.T) {
-	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 	t.Setenv("ISSUE_LABELS", "")
 
@@ -111,7 +105,6 @@ func TestLoadEmptyLabelsFallsBackToBugGui(t *testing.T) {
 }
 
 func TestLoadBasePath(t *testing.T) {
-	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 
 	tests := []struct {
@@ -138,7 +131,6 @@ func TestLoadBasePath(t *testing.T) {
 }
 
 func TestLoadInvalidBasePath(t *testing.T) {
-	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 	t.Setenv("BASE_PATH", "nao/valido")
 
