@@ -82,6 +82,20 @@ for (const marker of [
 ]) {
   assert(pluginInstaller.includes(marker), `portable clean-machine fallback missing ${marker}`);
 }
+
+for (const marker of [
+  "function Get-RequiredPnpmVersion",
+  "function Ensure-PnpmForCheckout",
+  "package.packageManager",
+  "pnpm@$version",
+  "Ensure-PnpmForCheckout $root"
+]) {
+  assert(pluginInstaller.includes(marker), `checkout-pinned pnpm contract missing ${marker}`);
+}
+assert(!pluginInstaller.includes("https://get.pnpm.io/install.ps1"),
+  "installer must not execute the mutable remote pnpm install script");
+assert(!pluginInstaller.includes("npm install -g pnpm |"),
+  "installer must not install unconstrained latest pnpm");
 assert(
   pluginInstaller.includes("Git nao encontrado; o mod sera obtido por source archive oficial"),
   "missing Git must fall back to an official GitHub source archive"
