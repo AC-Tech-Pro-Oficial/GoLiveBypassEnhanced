@@ -43,4 +43,24 @@ describe("Electron renderer security boundary", () => {
     expect(renderer).toContain("issue.hostname === 'github.com'");
     expect(renderer).toContain("document.createElement('a')");
   });
+
+  it("does not expose public proxy lists as an enhanced GUI mode", () => {
+    const html = fs.readFileSync(path.resolve(process.cwd(), "index.html"), "utf8");
+    const electronMain = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    expect(html).not.toContain('data-mode="free"');
+    expect(renderer).not.toContain("setNetMode('free')");
+    expect(electronMain).not.toContain('["auto", "tor", "free"]');
+    expect(electronMain).toContain('["auto", "tor"]');
+  });
+
+  it("migrates legacy free-mode GUI settings back to Tor", () => {
+    const electronMain = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const readStart = electronMain.indexOf("function readNetMode()");
+    const readEnd = electronMain.indexOf("\n}", readStart);
+    expect(readStart).toBeGreaterThanOrEqual(0);
+    const block = electronMain.slice(readStart, readEnd + 2);
+    expect(block).not.toContain('m === "free"');
+    expect(block).toContain('return "tor"');
+  });
+
 });
