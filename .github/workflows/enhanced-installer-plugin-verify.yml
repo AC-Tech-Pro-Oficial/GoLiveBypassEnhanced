@@ -11,6 +11,21 @@ concurrency:
 
 
 jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: api/go.sum
+      - name: Vet bug-report API
+        working-directory: api
+        run: go vet ./...
+      - name: Test bug-report API
+        working-directory: api
+        run: go test ./...
+
   gui-security-and-build:
     runs-on: ubuntu-latest
     steps:
