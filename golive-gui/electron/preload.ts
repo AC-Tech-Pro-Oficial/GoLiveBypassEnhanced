@@ -36,9 +36,15 @@ const api = {
   onDevLogWindowClosed: (callback: () => void) => {
     ipcRenderer.on('dev-log-window-closed', () => callback());
   },
-  onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
-  onRefreshAutoUpdate: (callback: () => void) => ipcRenderer.on('refresh-auto-update', callback),
-  onRefreshStatus: (callback: () => void) => ipcRenderer.on('refresh-status', callback),
+  onRefreshStartup: (callback: () => void) => {
+    ipcRenderer.on('refresh-startup', () => callback());
+  },
+  onRefreshAutoUpdate: (callback: () => void) => {
+    ipcRenderer.on('refresh-auto-update', () => callback());
+  },
+  onRefreshStatus: (callback: () => void) => {
+    ipcRenderer.on('refresh-status', () => callback());
+  },
   // O watchdog do Tor ressuscitou o daemon no meio da sessao: a janela reabre o aviso do
   // Ctrl+R (a reconexao do gateway pode travar o video ate um reload).
   onTorWatchdogRecuperado: (callback: () => void) => ipcRenderer.on('tor-watchdog-recuperado', callback),
