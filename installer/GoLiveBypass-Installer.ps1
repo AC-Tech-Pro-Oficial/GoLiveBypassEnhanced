@@ -146,13 +146,22 @@ function Confirm-Action($question) {
 
 # =========================================================================== Report de bugs
 # Igual a GUI: ao falhar, monta diagnostico sanitizado e POST na API de bugs
-# (abre issue no bezumiya/GoLiveBypass). Nunca bloqueia o fluxo.
+# (abre issue publica no fork Enhanced). Nunca bloqueia o fluxo.
 
 $script:BugApiUrl = 'https://api.skyplaceia.com/bugs/v1/reports'
-$script:BugApiToken = 'c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511'
 
 function Invoke-BugReport([string]$title, [string]$description, [string]$log = '', [hashtable]$meta = @{}) {
     if ($Yes) { return }  # automacao: nao spammar a API
+    # Relatos viram issues publicas. Mesmo com sanitizacao, o usuario precisa consentir
+    # antes de qualquer log/diagnostico sair da maquina.
+    try {
+        if (-not (Confirm-Action 'Enviar diagnostico sanitizado para uma issue publica do GoLiveBypassEnhanced?')) {
+            Write-Host '  [i] Relatorio nao enviado.' -ForegroundColor DarkGray
+            return
+        }
+    } catch {
+        return
+    }
     # Dedupe: o mesmo erro NAO reabre issue. Os 3 reports duplos da 1.1.11
     # (issues 124-126) vieram daqui: cada rodada do mesmo bug abria issue nova.
     # Assinatura = titulo + primeira linha da descricao, com data; janela de 48h.
@@ -185,7 +194,7 @@ function Invoke-BugReport([string]$title, [string]$description, [string]$log = '
     # metadata vazios (ex.: issue #94).
     $body = @{ title = $title; description = $desc; log = $log; meta = $meta } | ConvertTo-Json
     try {
-        Invoke-RestMethod -Method Post -Uri $script:BugApiUrl -Body $body -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($script:BugApiToken)" } -TimeoutSec 15 -ErrorAction Stop | Out-Null
+        Invoke-RestMethod -Method Post -Uri $script:BugApiUrl -Body $body -ContentType 'application/json' -TimeoutSec 15 -ErrorAction Stop | Out-Null
         Write-Host ''
         Write-Host '  [OK] Relatorio enviado. Obrigado — os devs vao ver a issue no GitHub.' -ForegroundColor Green
     } catch {
