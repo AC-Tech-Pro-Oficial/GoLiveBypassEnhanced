@@ -1,6 +1,7 @@
 package bugreport
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -136,5 +137,41 @@ func TestBuildIssueBodyTruncaLogNoLimiteDoGitHub(t *testing.T) {
 	}
 	if !strings.HasSuffix(body, "\n"+logFence+"\n") {
 		t.Error("fence final nao foi fechado apos truncar")
+	}
+}
+
+
+func TestValidateRejectsOversizedMeta(t *testing.T) {
+	rep := &Report{Title: "t", Meta: map[string]string{}}
+	for i := 0; i < MaxMetaEntries+1; i++ {
+		rep.Meta[fmt.Sprintf("k%d", i)] = "v"
+	}
+	if err := rep.Validate(262144); err == nil {
+		t.Fatal("Validate() esperava erro com meta entries demais")
+	}
+
+	rep = &Report{Title: "t", Meta: map[string]string{"ok": strings.Repeat("x", MaxMetaValueLen+1)}}
+	if err := rep.Validate(262144); err == nil {
+		t.Fatal("Validate() esperava erro com valor de meta longo")
+	}
+}
+
+func TestBuildIssueBodyNeutralizesMentions(t *testing.T) {
+	rep := Report{
+		Title:       "@owner teste",
+		Description: "falhou para @alice",
+		Meta:        map[string]string{"user": "@bob"},
+	}
+	if err := rep.Validate(262144); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	body := BuildIssueBody(rep)
+	if strings.Contains(rep.Title, "@owner") {
+		t.Fatalf("title ainda contem mention direta: %q", rep.Title)
+	}
+	for _, forbidden := range []string{"@alice", "@bob"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("body ainda contem mention direta %q: %s", forbidden, body)
+		}
 	}
 }
