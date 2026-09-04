@@ -97,11 +97,45 @@ assert(
   "legacy visible Tor startup must migrate safely"
 );
 
+assert(oneClick.includes("KINGCIR: Rei dos Doentes"),
+  "one-click installer must show the requested KINGCIR signature");
+assert(oneClick.includes("Start-Sleep -Seconds 3"),
+  "KINGCIR signature must remain visible for three seconds before installation");
+
 assert(
   oneClick.includes("GoLiveBypass-Installer.ps1") &&
   !oneClick.includes("GoLiveBypass-Standalone.ps1"),
   "one-click path must install the userplugin, not the standalone injector"
 );
+
+for (const marker of [
+  "Restore-KnownGoLiveStandaloneInjections",
+  "Test-KnownGoLiveStandaloneInjection",
+  "Reset-GoLiveNativeState",
+  "Remove-DuplicateGoLiveUserplugins",
+  "Invoke-GoLiveCompatibilityMigration",
+  "Assert-EnhancedBuildMarkers",
+  "Assert-EnhancedInstallState",
+  "MigrationResetCritical"
+]) {
+  assert(pluginInstaller.includes(marker), `legacy migration contract missing ${marker}`);
+}
+
+assert(pluginInstaller.includes("golivebypass\\.js"),
+  "known legacy standalone detection must identify the old patcher by golivebypass.js");
+assert(pluginInstaller.includes("PSObject.Properties.Remove('GoLiveBypass')"),
+  "legacy native GoLiveBypass state must be removed without wiping other native plugin state");
+assert(pluginInstaller.includes("Remove-CaminhoSilencioso $target"),
+  "canonical userplugin directory must be replaced, not only overwritten file-by-file");
+assert(pluginInstaller.includes("viewer-video-parado") &&
+       pluginInstaller.includes("rtc.enhanced.status"),
+  "installer must verify enhanced markers are present in compiled output");
+assert(pluginInstaller.includes("sessionRouting -NotePropertyValue 'gateway'") &&
+       pluginInstaller.includes("voiceRegion -NotePropertyValue ''") &&
+       pluginInstaller.includes("streamRegion -NotePropertyValue ''"),
+  "legacy installs must normalize routing and forced-region settings");
+assert(pluginInstaller.includes("DiscordGoLiveBypass"),
+  "installer should detect the known external DiscordGoLiveBypass launcher conflict");
 assert(
   oneClick.includes("Restore-AccidentalStandalone"),
   "one-click path must repair machines affected by the old standalone command"
