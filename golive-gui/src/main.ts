@@ -220,7 +220,7 @@ document.querySelectorAll<HTMLButtonElement>('.theme-opt').forEach((opt) => {
 // necessaria para o main process redimensionar e nada ficar cortado.
 function fitWindowToContent() {
   // Espera o layout apos hidden/details: sem rAF a medicao ainda ve a altura antiga
-  // (Personalizado expandia e a janela nunca encolhia ao voltar para Tor/Gratuitas).
+  // (Personalizado expandia e a janela nunca encolhia ao voltar para Tor).
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       const container = document.querySelector('.container') as HTMLElement | null;
@@ -457,9 +457,8 @@ async function refreshProxy() {
 }
 
 // ---------------------------------------------------------------------------
-// Rede de saida: tres modos segmentados (Tor / Gratuitas / Personalizado).
-// O padrao e TOR (o app instala e usa o Tor sempre). O campo de proxy so aparece
-// no modo Personalizado.
+// Rede de saida: Tor (padrao) ou proxy personalizado explicitamente confiado.
+// O enhanced nao oferece listas publicas: o campo so aparece no modo Personalizado.
 // ---------------------------------------------------------------------------
 const segBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.seg-btn'));
 const torStatusEl = document.getElementById('torStatus') as HTMLElement;
@@ -509,12 +508,9 @@ async function refreshNetMode() {
   try {
     const saved = await window.api.getNetMode();
     const proxy = await window.api.getProxy();
-    // Mapeia o estado salvo para a UI de 3 opcoes:
-    // - "free" -> Gratuitas (escolha explicita)
-    // - "auto" com proxy preenchida -> Personalizado
-    // - o resto ("tor", "auto" sem proxy, vazio) -> Tor, que e o padrao
-    if (saved === 'free') selectMode('free');
-    else if (saved === 'auto' && proxy) selectMode('manual');
+    // Estado "free" de versoes antigas e migrado visualmente para Tor.
+    // "auto" so significa proxy personalizado quando ha um endereco explicito.
+    if (saved === 'auto' && proxy) selectMode('manual');
     else selectMode('tor');
   } catch (err) {
     console.error(err);
@@ -580,11 +576,6 @@ for (const btn of segBtns) {
         aplicarTravaDoTor();
       }).catch(() => {});
       fitWindowToContent();
-    } else if (mode === 'free') {
-      window.api.setNetMode('free').then((r) => mostrarNetModeHint(r.reescritos)).catch(() => {});
-      // Fora do modo Tor nao ha o que esperar: devolve o botao.
-      aplicarTravaDoTor();
-      updateStatus();
     } else {
       // Personalizado: volta ao auto com a proxy do campo.
       window.api.setNetMode('auto').then((r) => mostrarNetModeHint(r.reescritos)).catch(() => {});
