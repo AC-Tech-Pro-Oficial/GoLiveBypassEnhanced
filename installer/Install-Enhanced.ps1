@@ -22,18 +22,14 @@ $DiscordNames = @('Discord', 'DiscordPTB', 'DiscordCanary')
 
 function Show-KingcirSignature {
     $art = @'
-                 .-=========-.
-                /             \
-               /   .-------.   \
-              /___/_________\___\
-                 / /     \ \
-                /_/       \_\
-
-      KINGCIR: Rei dos Doentes
+########################
+#                      #
+#       KINGCIR        #
+#                      #
+########################
 '@
     Write-Host ''
     Write-Host $art -ForegroundColor Magenta
-    Write-Host '      GoLiveBypassEnhanced installer' -ForegroundColor DarkGray
     Write-Host ''
     Start-Sleep -Seconds 3
 }
