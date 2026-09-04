@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, "..");
 const shim = fs.readFileSync(path.join(root, "goLiveBypass", "rtcShim.ts"), "utf8");
 const recovery = fs.readFileSync(path.join(root, "goLiveBypass", "rtcRecovery.ts"), "utf8");
 const native = fs.readFileSync(path.join(root, "goLiveBypass", "native.ts"), "utf8");
+const index = fs.readFileSync(path.join(root, "goLiveBypass", "index.tsx"), "utf8");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "goLiveBypass", "manifest.json"), "utf8"));
 const installer = fs.readFileSync(path.join(root, "installer", "GoLiveBypass-Installer.ps1"), "utf8");
 
@@ -55,6 +56,15 @@ for (const marker of [
   "source_cached="
 ]) {
   assert(recovery.includes(marker), `broadcaster observability missing ${marker}`);
+}
+
+for (const marker of [
+  "broadcasterRecoveryStillOwned",
+  "demandDropLogged",
+  "demanda caiu mas a fonte broadcaster continua ativa; mantendo recuperacao",
+  "stream.sourceCached !== true"
+]) {
+  assert(recovery.includes(marker), `friend broadcaster regression missing ${marker}`);
 }
 
 const diagStart = recovery.indexOf("function diagnoseMissingBroadcasterStats");
