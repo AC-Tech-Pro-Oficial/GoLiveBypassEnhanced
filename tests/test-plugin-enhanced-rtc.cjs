@@ -40,6 +40,31 @@ for (const marker of [
   assert(recovery.includes(marker), `RTC controller missing ${marker}`);
 }
 
+for (const marker of [
+  "sourceCached",
+  "sourceHa",
+  "roleHint"
+]) {
+  assert(shim.includes(marker), `RTC shim diagnostics missing ${marker}`);
+}
+
+for (const marker of [
+  "DIAGNOSTIC_THROTTLE_MS",
+  "diagnoseMissingBroadcasterStats",
+  "diag broadcaster",
+  "source_cached="
+]) {
+  assert(recovery.includes(marker), `broadcaster observability missing ${marker}`);
+}
+
+const diagStart = recovery.indexOf("function diagnoseMissingBroadcasterStats");
+const diagEnd = recovery.indexOf("function detect(", diagStart);
+assert(diagStart >= 0 && diagEnd > diagStart);
+const diagBlock = recovery.slice(diagStart, diagEnd);
+for (const forbidden of ["streamUserId", "userId", "sourceReplay.args"]) {
+  assert(!diagBlock.includes(forbidden), `diagnostic must not expose private value ${forbidden}`);
+}
+
 for (const forbidden of ["__goliveMidiaFechar", ".reload(", "closeAllConnections"]) {
   assert(!recovery.includes(forbidden), `RTC controller must not use destructive action ${forbidden}`);
 }
