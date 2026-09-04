@@ -24,10 +24,13 @@ describe('release downloads', () => {
     expect(downloads.plugin).toContain('/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/tree/')
   })
 
-  it('exposes the migration-aware one-click Windows installer', () => {
+  it('exposes the migration-aware immutable Windows bootstrap', () => {
     expect(downloads.installerEnhancedWindows).toContain('/installer/Install-Enhanced.ps1')
-    expect(terminalCommands.windows.plugin.tui).toContain('Install-Enhanced.ps1')
-    expect(terminalCommands.windows.plugin.tui).toContain('| iex')
+    expect(terminalCommands.windows.plugin.tui).toContain('api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/')
+    expect(terminalCommands.windows.plugin.tui).toContain('GOLIVE_ENHANCED_REF')
+    expect(terminalCommands.windows.plugin.tui).toContain("+$r.sha+'/installer/Install-Enhanced.ps1'")
+    expect(terminalCommands.windows.plugin.tui).toContain('iex $s')
+    expect(terminalCommands.windows.plugin.direct).toContain('GOLIVE_ENHANCED_REF')
     expect(terminalCommands.windows.plugin.direct).toContain('-Mod Equicord')
   })
 
