@@ -100,13 +100,27 @@ function githubReleases(): Promise<ReleaseCandidata[]> {
 // e o request do Node nao segue redirecionamento sozinho. Sem isto o download do Windows falhava
 // em toda tentativa: o app achava a versao nova e nunca conseguia baixar.
 const MAX_REDIRECTS = 5;
+const MAX_UPDATE_BYTES = 250 * 1024 * 1024;
+const RELEASE_DOWNLOAD_HOSTS = new Set([
+  "github.com",
+  "release-assets.githubusercontent.com",
+  "objects.githubusercontent.com",
+  "github-releases.githubusercontent.com",
+]);
+
+function isTrustedReleaseUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && RELEASE_DOWNLOAD_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
 
 function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<void> {
   return new Promise((resolve, reject) => {
-    // So https: um redirecionamento para http rebaixaria a conexao em silencio, e o que vem por
-    // ela substitui o executavel em uso.
-    if (!url.startsWith("https://")) {
-      return reject(new Error("recusando destino que nao e https: " + url));
+    if (!isTrustedReleaseUrl(url)) {
+      return reject(new Error("recusando host de download fora do GitHub: " + url));
     }
 
     const req = request(url, { headers: { "User-Agent": "GoLiveBypass" } }, (res) => {
@@ -115,7 +129,11 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
       if (statusCode !== undefined && statusCode >= 300 && statusCode < 400 && headers.location) {
         res.resume();
         if (hops <= 0) return reject(new Error("redirecionamentos demais"));
-        return downloadFile(new URL(headers.location, url).toString(), dest, hops - 1).then(resolve, reject);
+        const next = new URL(headers.location, url).toString();
+        if (!isTrustedReleaseUrl(next)) {
+          return reject(new Error("redirecionamento de update saiu dos hosts confiaveis do GitHub"));
+        }
+        return downloadFile(next, dest, hops - 1).then(resolve, reject);
       }
 
       if (statusCode !== 200) {
@@ -123,15 +141,44 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
         return reject(new Error("download falhou: HTTP " + statusCode));
       }
 
+      const declared = Number(headers["content-length"] ?? 0);
+      if (Number.isFinite(declared) && declared > MAX_UPDATE_BYTES) {
+        res.resume();
+        return reject(new Error("update excede o limite de tamanho"));
+      }
+
       const out = createWriteStream(dest);
-      res.pipe(out);
+      let received = 0;
+      let settled = false;
+
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        res.destroy();
+        out.destroy();
+        void rm(dest, { force: true }).finally(() => reject(error));
+      };
+
+      res.on("data", (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > MAX_UPDATE_BYTES) {
+          fail(new Error("update excede o limite de tamanho durante o download"));
+        }
+      });
+      res.on("error", (error) => fail(error));
+      out.on("error", (error) => fail(error));
       out.on("finish", () => {
+        if (settled) return;
+        settled = true;
         out.close();
         resolve();
       });
-      out.on("error", reject);
+      res.pipe(out);
     });
+
     req.on("error", reject);
+    // Timeout de inatividade, nao prazo total: conexao lenta pode continuar desde que avance.
+    req.setTimeout(30_000, () => req.destroy(new Error("timeout no download do update")));
     req.end();
   });
 }
@@ -141,22 +188,20 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
 // graca pelo electron-updater. Sem isto, um arquivo truncado no meio do caminho viraria o
 // executavel em uso.
 function digestMatches(file: string, digest: string | null): boolean {
-  if (digest === null) {
-    console.warn("[updater] anexo sem digest na API; nao vou instalar sem conferir.");
+  if (digest === null || !/^sha256:[0-9a-fA-F]{64}$/.test(digest)) {
+    console.warn("[updater] release sem digest SHA-256 valido; recusando update.");
     return false;
   }
 
-  const [algo, esperado] = digest.split(":");
-  if (algo === undefined || esperado === undefined) return false;
-
+  const esperado = digest.slice("sha256:".length).toLowerCase();
   try {
-    const obtido = createHash(algo).update(readFileSync(file)).digest("hex");
+    const obtido = createHash("sha256").update(readFileSync(file)).digest("hex");
     if (obtido === esperado) return true;
 
-    console.error(`[updater] ${algo} nao confere: esperado ${esperado}, obtido ${obtido}`);
+    console.error(`[updater] sha256 nao confere: esperado ${esperado}, obtido ${obtido}`);
     return false;
   } catch (error) {
-    console.error("[updater] falhei ao conferir o digest:", error);
+    console.error("[updater] falhei ao conferir SHA-256:", error);
     return false;
   }
 }
