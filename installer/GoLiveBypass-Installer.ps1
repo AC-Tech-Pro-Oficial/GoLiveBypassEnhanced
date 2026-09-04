@@ -1284,7 +1284,10 @@ function Install-Mod($choice) {
         return $target
     }
 
-    if (Test-Tool 'git') {
+    $preferArchive = $env:GOLIVE_PREFER_SOURCE_ARCHIVE -eq '1'
+    if ($preferArchive) {
+        Write-Step 'Source archive oficial solicitado; pulando git clone.'
+    } elseif (Test-Tool 'git') {
         Write-Step "git clone $($info.Git)"
         & git clone --depth 1 $info.Git $target | Out-Host
         if ($LASTEXITCODE -eq 0 -and (Test-ModCheckout $target)) { return $target }
