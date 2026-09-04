@@ -10,7 +10,7 @@ Feito por um desenvolvedor brasileiro, o GoLiveBypass **devolve o Go Live e a c�
 > **Enhanced beta:** este fork está testando a arquitetura recomendada **Discord + Vencord/Equicord + userplugin enhanced + Tor local**. Ela preserva mods/plugins existentes, migra instalações antigas e **nunca cai silenciosamente para listas públicas de proxies**. Enquanto o fork ainda não tem uma release binária própria, o caminho recomendado no Windows é o instalador de um comando:
 >
 > ```powershell
-> powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
+> powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $b='enhanced/rtc-viewer-recovery-v1'; $u='https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/'+[Uri]::EscapeDataString($b); $r=irm $u -Headers @{'User-Agent'='GoLiveBypassEnhanced-Installer'}; if([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$'){throw 'GitHub nao devolveu um commit valido'}; $env:GOLIVE_ENHANCED_REF=[string]$r.sha; $s=irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s"
 > ```
 >
 > Os executáveis das releases de `bezumiya/GoLiveBypass` são o **upstream/legado** e não contêm necessariamente as correções Enhanced desta branch.
