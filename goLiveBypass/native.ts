@@ -8,13 +8,11 @@ import { NativeSettings, RendererSettings } from "@main/settings";
 import { spawn } from "child_process";
 import { app, IpcMainInvokeEvent, session } from "electron";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { request } from "https";
 import { AddressInfo, connect, createServer, Server, Socket } from "net";
 import { dirname, join } from "path";
 import { connect as connectTls } from "tls";
 import { rtcRecoveryStatus, startRtcRecovery, stopRtcRecovery } from "./rtcRecovery";
 
-const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
 const DISCORD_HOST = "discord.com";
 
 // O trace da Cloudflare (~200 bytes) confirma tunel, TLS valido e pais de saida numa conexao
@@ -39,17 +37,12 @@ function isGatewayHost(host: string): boolean {
     return host === "discord.gg" || host.endsWith(ROUTE_SUFFIX);
 }
 
-const MAX_LIST_BYTES = 1024 * 1024;
 const PROBE_TIMEOUT_MS = 6000;
 
 // Prazo curto para as checagens no caminho de abertura: cada segundo aqui sai do orcamento
 // que segura o gateway a espera de uma saida.
 const WARM_PROBE_TIMEOUT_MS = 2500;
 
-const PARALLEL_PROBES = 12;
-const MAX_CANDIDATES = 48;
-const MIN_UPTIME = 90;
-const MAX_LISTED_TIMEOUT = 1500;
 
 // Portas SOCKS de clientes Tor, em ordem de preferencia: 9060 e a porta dedicada que o
 // GoLiveBypass usa (GUI e instaladores), 9052 e a porta comum de um Tor configurado a mao
@@ -70,12 +63,8 @@ const TOR_PORT_TIMEOUT_MS = 400;
 // pronto.
 const TOR_RELAY_TIMEOUT_MS = 30_000;
 
-const POOL_SIZE = 5;
-const POOL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-// De quanto em quanto tempo as saidas do pote sao reconferidas com a sessao ja aberta. Trinta
-// segundos e curto o bastante para a reserva estar quente quando o gateway reconectar, e longo
-// o bastante para nao virar carga na saida gratuita, que costuma limitar conexoes.
+// Batimento leve para a saida confiavel ativa.
 const HEARTBEAT_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 4000;
 
@@ -85,18 +74,14 @@ const HEARTBEAT_TIMEOUT_MS = 4000;
 // protegido pelo TOR_RELAY_TIMEOUT_MS.
 const TOR_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_TIMEOUT_MS * 4;
 
-// Quantos batimentos seguidos uma saida pode errar antes de sair do pote. Cortar no primeiro
-// seria cruel com saida gratuita congestionada, que erra um e volta; nunca cortar deixaria o
-// pote cheio de endereco morto, que e o mesmo que nao ter reserva nenhuma.
+// Proxy personalizado: duas falhas seguidas antes de tentar a mesma configuracao novamente.
 const MAX_MISSED_BEATS = 2;
 
 // Abaixo disto o batimento vai atras de reservas novas. Uma so nao e reserva: e a proxima a
 // morrer.
-const MIN_LIVE_RESERVES = 2;
 
 // Trava entre buscas de fundo: sem ela, um pote que nao consegue encher viraria uma varredura
 // inteira da lista gratuita a cada trinta segundos, pela sessao toda.
-const HUNT_COOLDOWN_MS = 3 * 60_000;
 
 const MAX_LOG_LINES = 400;
 const MAX_LOG_BYTES = 256 * 1024;
@@ -114,20 +99,12 @@ const TOR_STARTUP_STALL_MS = TOR_STARTUP_WAIT_MS + 5_000;
 const RELAY_TUNNEL_TIMEOUT_MS = 2500;
 const RELAY_DIRECT_TIMEOUT_MS = 8000;
 
-const INTERCEPTING_PORTS = new Set([4145]);
 
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
 const PROXY_RULES_RE = /^(socks5|https?):\/\/(?:(.+)@)?([a-z0-9.-]{1,253}):(\d{1,5})(?:-(\d{1,5}))?$/;
 
 export type Scope = "login" | "gateway" | "off";
-
-interface PoolEntry {
-    proxy: string;
-    country: string;
-    ms: number;
-    at: number;
-}
 
 // A pasta e a mesma que o modo standalone usa. Quem experimentou os dois acha um arquivo so,
 // em vez de descobrir depois que estava lendo o registro do outro.
@@ -327,39 +304,6 @@ function routesLogin() {
     return pluginSettings()?.sessionRouting === "login";
 }
 
-function readPool(): PoolEntry[] {
-    let stored: unknown;
-    try {
-        stored = NativeSettings.plain.plugins?.GoLiveBypass?.pool;
-    } catch {
-        return [];
-    }
-
-    if (!Array.isArray(stored)) return [];
-
-    return stored.filter((entry): entry is PoolEntry => {
-        if (typeof entry !== "object" || entry === null) return false;
-
-        const { proxy, country, ms, at } = entry as Partial<PoolEntry>;
-        return typeof proxy === "string" && parseProxy(proxy) !== null
-            && typeof country === "string" && typeof ms === "number"
-            && typeof at === "number" && Date.now() - at < POOL_MAX_AGE_MS;
-    });
-}
-
-// Duas instancias do Discord dividem este arquivo; gravar pode falhar por disputa. Perder o
-// pote custa uma busca a mais no proximo boot -- deixar a excecao subir custava o processo.
-function writePool(entries: PoolEntry[]) {
-    try {
-        NativeSettings.store.plugins.GoLiveBypass ??= {};
-        NativeSettings.store.plugins.GoLiveBypass.pool = entries
-            .sort((a, b) => a.ms - b.ms)
-            .slice(0, POOL_SIZE);
-    } catch {
-        // sem pote guardado, o proximo boot procura de novo
-    }
-}
-
 // ------------------------------------------------------------------ falar com uma saida
 
 function readReply(socket: Socket, size: (buffer: Buffer) => number, done: (reply: Buffer | null) => void) {
@@ -509,28 +453,6 @@ function openTunnel(proxy: string, host: string, port: number, timeoutMs = PROBE
 // Abre o mesmo destino por varias saidas ao mesmo tempo e fica com a primeira que responder.
 // Quem chega depois e fechado na hora: tunel aberto e esquecido segura uma conexao do outro
 // lado, e saida gratuita costuma ter poucas.
-function firstTunnel(candidates: string[], host: string, port: number, timeoutMs: number): Promise<{ proxy: string; socket: Socket; } | null> {
-    return new Promise(resolve => {
-        let pending = candidates.length;
-        if (pending === 0) return resolve(null);
-
-        let settled = false;
-
-        for (const candidate of candidates) {
-            openTunnel(candidate, host, port, timeoutMs).then(socket => {
-                if (socket !== null && !settled) {
-                    settled = true;
-                    resolve({ proxy: candidate, socket });
-                    return;
-                }
-
-                socket?.destroy();
-                if (--pending === 0 && !settled) resolve(null);
-            });
-        }
-    });
-}
-
 function readOverTls(socket: Socket, host: string, path: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<string | null> {
     return new Promise(resolve => {
         let body = "";
@@ -573,46 +495,6 @@ function listening(port: number, timeoutMs: number): Promise<boolean> {
     });
 }
 
-function downloadText(url: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const req = request(url, res => {
-            if (res.statusCode !== 200) {
-                res.resume();
-                reject(new Error("Unexpected response status"));
-                return;
-            }
-
-            const chunks: Buffer[] = [];
-            let size = 0;
-            let settled = false;
-
-            res.on("data", (chunk: Buffer) => {
-                if (settled) return;
-
-                size += chunk.length;
-                if (size > MAX_LIST_BYTES) {
-                    settled = true;
-                    res.destroy();
-                    reject(new Error("Response too large"));
-                    return;
-                }
-
-                chunks.push(chunk);
-            });
-
-            res.on("end", () => {
-                if (settled) return;
-                settled = true;
-                resolve(Buffer.concat(chunks).toString("utf8"));
-            });
-        });
-
-        req.on("error", reject);
-        req.setTimeout(15_000, () => req.destroy(new Error("Request timed out")));
-        req.end();
-    });
-}
-
 // ------------------------------------------------------------------ provar uma saida
 
 // O trace da Cloudflare prova que a saida chega na internet, nao que alcanca o Discord --
@@ -650,33 +532,6 @@ async function measure(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
     if (!(await reachesGateway(proxy, timeoutMs))) return null;
 
     return { proxy, country: country[1].toUpperCase(), ip: ip?.[1] ?? "", ms: Date.now() - started };
-}
-
-// Todo o lote anda junto e a primeira que responder bem ganha -- testar candidata por
-// candidata podia somar um minuto sozinho, bem no caminho em que o gateway ja esta conectando.
-function firstUsable(candidates: string[], excluded: Set<string>, timeoutMs: number): Promise<PoolEntry | null> {
-    return new Promise(resolve => {
-        let pending = candidates.length;
-        if (pending === 0) return resolve(null);
-
-        let settled = false;
-
-        // candidates.map(measure) pareceria igual mas nao e: map passa (item, indice, array),
-        // e o indice cairia em timeoutMs, dando zero ms para a candidata numero zero.
-        for (const candidate of candidates) {
-            measure(candidate, timeoutMs).then(result => {
-                if (!settled && result !== null && !excluded.has(result.country)) {
-                    settled = true;
-                    log(`${safeProxy(result.proxy)} passou: ${result.ms}ms, saida em ${result.country}`);
-                    resolve({ proxy: result.proxy, country: result.country, ms: result.ms, at: Date.now() });
-                    return;
-                }
-
-                if (result !== null && excluded.has(result.country)) log(`${safeProxy(result.proxy)} recusada: saida em ${result.country}`);
-                if (--pending === 0 && !settled) resolve(null);
-            });
-        }
-    });
 }
 
 // Prazo curto para o handshake TLS puro ate o gateway -- e so isso que decide se a saida
@@ -748,77 +603,6 @@ async function torExit(excluded: Set<string>, timeoutMs: number): Promise<string
     }
 
     return null;
-}
-
-function rankFreeProxies(body: string, excluded: Set<string>) {
-    const data: unknown = JSON.parse(body);
-    const { proxies } = data as { proxies?: unknown; };
-    if (!Array.isArray(proxies)) return [];
-
-    const usable: { proxy: string; uptime: number; timeout: number; }[] = [];
-
-    for (const item of proxies) {
-        if (typeof item !== "object" || item === null) continue;
-
-        const entry = item as {
-            proxy?: unknown;
-            alive?: unknown;
-            uptime?: unknown;
-            timeout?: unknown;
-            ip_data?: { countryCode?: unknown; };
-        };
-
-        if (typeof entry.proxy !== "string" || entry.alive !== true) continue;
-
-        const parsed = parseProxy(entry.proxy);
-        // A porta 4145 e quase toda de intermediario que responde por qualquer destino sem
-        // encaminhar nada. Ela reprova no teste, mas so depois de gastar o prazo.
-        if (parsed === null || INTERCEPTING_PORTS.has(parsed.port)) continue;
-
-        const uptime = typeof entry.uptime === "number" ? entry.uptime : 0;
-        const timeout = typeof entry.timeout === "number" ? entry.timeout : MAX_LISTED_TIMEOUT;
-        if (uptime < MIN_UPTIME || timeout > MAX_LISTED_TIMEOUT) continue;
-
-        const country = typeof entry.ip_data?.countryCode === "string" ? entry.ip_data.countryCode.toUpperCase() : "";
-        if (excluded.has(country)) continue;
-
-        usable.push({ proxy: entry.proxy, uptime, timeout });
-    }
-
-    return usable
-        .sort((a, b) => b.uptime - a.uptime || a.timeout - b.timeout)
-        .slice(0, MAX_CANDIDATES)
-        .map(entry => entry.proxy);
-}
-
-async function freeExit(excluded: Set<string>, want: number): Promise<PoolEntry[]> {
-    let candidates: string[];
-    try {
-        candidates = rankFreeProxies(await downloadText(FREE_PROXY_API), excluded);
-    } catch {
-        return [];
-    }
-
-    log(`${candidates.length} candidatas depois do ranqueamento`);
-
-    const found: PoolEntry[] = [];
-
-    for (let i = 0; i < candidates.length && found.length < want; i += PARALLEL_PROBES) {
-        const winner = await firstUsable(candidates.slice(i, i + PARALLEL_PROBES), excluded, PROBE_TIMEOUT_MS);
-        if (winner !== null) found.push(winner);
-    }
-
-    return found;
-}
-
-// Reabastecer o pote e uma escolha nova podem correr ao mesmo tempo; duas buscas paralelas
-// disputam a mesma banda e dobram o tempo ate a primeira saida ficar pronta, que e exatamente
-// a janela em que o gateway conecta sem protecao. Quem chegar depois espera a que ja corre.
-let hunting: Promise<PoolEntry[]> | null = null;
-
-function sharedFreeExit(excluded: Set<string>, want: number) {
-    hunting ??= freeExit(excluded, want).finally(() => { hunting = null; });
-    return hunting;
 }
 
 // ------------------------------------------------------------------ escolher a saida
@@ -947,28 +731,12 @@ async function autoExit(excluded: Set<string>) {
     settleExit(null);
 }
 
-// A busca cara acontece com a sessao ja aberta, para o proximo boot ter opcao pronta --
-// diferenca entre abrir em dois segundos e esperar meio minuto por uma lista.
-async function refillPool(excluded: Set<string>, keep: PoolEntry) {
-    try {
-        const found = await sharedFreeExit(excluded, POOL_SIZE);
-        writePool([keep, ...found.filter(entry => entry.proxy !== keep.proxy)]);
-        log(`pote guardado com ${Math.min(found.length + 1, POOL_SIZE)} saida(s)`);
-    } catch {
-        writePool([keep]);
-    }
-}
-
 // ------------------------------------------------------------------ manter reserva viva
 
-// Saida gratuita nao avisa que morreu: ela para de encaminhar, e quem descobre e a conexao que
-// estava passando por ela. No meio de uma transmissao isso custa a sessao inteira -- o gateway
-// reconecta, e se reconectar direto o servidor reavalia a conta e o video cai. O batimento
-// existe para que, quando isso acontecer, ja haja no pote uma reserva testada ha trinta
-// segundos para assumir na hora, em vez de a busca comecar com o Discord ja reconectando.
+// O batimento observa apenas a saida confiavel ativa. Tor recebe tratamento conservador
+// durante rotacao de circuito; proxy personalizado so e reavaliado sem buscar terceiros.
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let beating = false;
-let lastHunt = 0;
 
 const missed = new Map<string, number>();
 
