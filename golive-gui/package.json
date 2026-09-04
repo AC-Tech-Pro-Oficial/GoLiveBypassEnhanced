@@ -70,11 +70,13 @@
         }
       ],
       "icon": "build/icon.png",
-      "identity": null,
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "category": "public.app-category.utilities",
-      "artifactName": "${productName}.${ext}"
+      "artifactName": "${productName}.${ext}",
+      "notarize": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist"
     },
     "dmg": {
       "artifactName": "${productName}.${ext}"
