@@ -19,7 +19,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Uninstall', 'Restore', 'CheckUpdate', 'Update', 'TestTor')]
+    [ValidateSet('Menu', 'Install', 'Uninstall', 'Restore', 'CheckUpdate', 'Update', 'TestTor', 'TestPortableNode')]
     [string] $Mode = 'Menu',
 
     [ValidateSet('Equicord', 'Vencord')]
@@ -1091,39 +1091,172 @@ function Install-Pnpm {
     }
 }
 
+function Add-UserPathEntry([string]$entry) {
+    if (-not $entry) { return }
+    $env:Path = "$entry;$env:Path"
+
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $parts = @()
+    if ($userPath) { $parts = @($userPath -split ';' | Where-Object { $_ }) }
+    if (-not ($parts | Where-Object { $_.TrimEnd('\\') -ieq $entry.TrimEnd('\\') })) {
+        $newUserPath = if ($userPath) { "$entry;$userPath" } else { $entry }
+        [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+    }
+}
+
+function Install-PortableNode {
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -match '(?i)ARM64') { 'win-arm64' } else { 'win-x64' }
+    $toolRoot = Join-Path (Get-EffectiveLocalApp) 'GoLiveBypass\Toolchain'
+    $marker = Join-Path $toolRoot 'node-current-path.txt'
+
+    if (Test-Path -LiteralPath $marker) {
+        try {
+            $existing = (Get-Content -LiteralPath $marker -Raw -Encoding UTF8).Trim()
+            if ($existing -and (Test-Path -LiteralPath (Join-Path $existing 'node.exe'))) {
+                Add-UserPathEntry $existing
+                if (Test-Tool 'node') {
+                    Write-Ok "Node portatil reaproveitado: $(& node --version)"
+                    return
+                }
+            }
+        } catch { }
+    }
+
+    Write-Step 'Resolvendo a versao LTS atual do Node.js pelo indice oficial'
+    try {
+        $indexText = (Invoke-WebRequest -UseBasicParsing -Uri 'https://nodejs.org/dist/index.json' -Headers @{ 'User-Agent' = 'GoLiveBypassEnhanced' }).Content
+        $releases = $indexText | ConvertFrom-Json
+    } catch {
+        throw "Nao consegui consultar o indice oficial do Node.js: $($_.Exception.Message)"
+    }
+
+    $token = $arch + '-zip'
+    $release = @($releases | Where-Object { $_.lts -and $_.files -contains $token } | Select-Object -First 1)
+    if ($release.Count -eq 0 -or -not $release[0].version) {
+        throw "O indice do Node.js nao trouxe uma versao LTS com $token."
+    }
+    $version = [string]$release[0].version
+    $zipName = "node-$version-$arch.zip"
+    $baseUrl = "https://nodejs.org/dist/$version"
+
+    Write-Step "Baixando Node.js LTS $version ($arch) sem instalador/admin"
+    $temp = Join-Path ([IO.Path]::GetTempPath()) "GoLiveBypass-node-$PID"
+    Remove-CaminhoSilencioso $temp
+    New-Item -ItemType Directory -Path $temp -Force | Out-Null
+    $zip = Join-Path $temp $zipName
+
+    try {
+        $sums = (Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/SHASUMS256.txt" -Headers @{ 'User-Agent' = 'GoLiveBypassEnhanced' }).Content
+        $line = @($sums -split '\r?\n' | Where-Object { $_ -match ('\s+' + [regex]::Escape($zipName) + '$') } | Select-Object -First 1)
+        if ($line.Count -eq 0) { throw "SHASUMS256.txt nao contem $zipName" }
+        $expected = (($line[0].Trim() -split '\s+')[0]).ToLowerInvariant()
+
+        Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$zipName" -OutFile $zip -Headers @{ 'User-Agent' = 'GoLiveBypassEnhanced' }
+        $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "SHA-256 do Node.js nao confere: esperado $expected, obtido $actual"
+        }
+        Write-Ok 'SHA-256 oficial do Node.js confere'
+
+        $extract = Join-Path $temp 'extract'
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+        $source = Join-Path $extract "node-$version-$arch"
+        if (-not (Test-Path -LiteralPath (Join-Path $source 'node.exe'))) {
+            throw 'O ZIP oficial do Node.js nao trouxe node.exe no caminho esperado.'
+        }
+
+        New-Item -ItemType Directory -Path $toolRoot -Force | Out-Null
+        $dest = Join-Path $toolRoot "node-$version-$arch"
+        Remove-CaminhoSilencioso $dest
+        Move-Item -LiteralPath $source -Destination $dest -Force
+        Save-Text $marker $dest
+        Add-UserPathEntry $dest
+
+        if (-not (Test-Tool 'node') -or -not (Test-Tool 'npm')) {
+            throw 'Node portatil foi extraido, mas node/npm nao ficaram acessiveis.'
+        }
+        Write-Ok "Node portatil pronto: $(& node --version) / npm $(& npm --version)"
+    } finally {
+        Remove-CaminhoSilencioso $temp
+    }
+}
+
+function Install-ModFromArchive($choice, $target) {
+    $info = $Mods[$choice]
+    $repoSlug = ([string]$info.Git) -replace '^https://github\.com/', ''
+    if (-not $repoSlug -or $repoSlug -notmatch '^[^/]+/[^/]+$') {
+        throw "Repositorio invalido para archive fallback: $($info.Git)"
+    }
+
+    Write-Step "Git nao esta disponivel; baixando $($info.Label) como source archive oficial"
+    $headers = @{ 'User-Agent' = 'GoLiveBypassEnhanced'; 'Accept' = 'application/vnd.github+json' }
+    $commit = $null
+    try {
+        $meta = (Invoke-WebRequest -UseBasicParsing -Uri "https://api.github.com/repos/$repoSlug/commits/main" -Headers $headers).Content | ConvertFrom-Json
+        if ($meta.sha -match '^[0-9a-fA-F]{40}$') { $commit = [string]$meta.sha }
+    } catch { }
+
+    $ref = if ($commit) { $commit } else { 'refs/heads/main' }
+    $archiveUrl = if ($commit) {
+        "https://github.com/$repoSlug/archive/$commit.zip"
+    } else {
+        "https://github.com/$repoSlug/archive/refs/heads/main.zip"
+    }
+
+    $temp = Join-Path ([IO.Path]::GetTempPath()) "GoLiveBypass-mod-$PID"
+    Remove-CaminhoSilencioso $temp
+    New-Item -ItemType Directory -Path $temp -Force | Out-Null
+    $zip = Join-Path $temp 'source.zip'
+    $extract = Join-Path $temp 'extract'
+
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $zip -Headers @{ 'User-Agent' = 'GoLiveBypassEnhanced' }
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+        $source = Get-ChildItem -LiteralPath $extract -Directory -ErrorAction Stop | Select-Object -First 1
+        if (-not $source -or -not (Test-ModCheckout $source.FullName)) {
+            throw 'O source archive nao parece um checkout valido do mod.'
+        }
+
+        if (Test-Path -LiteralPath $target) {
+            throw "$target apareceu durante o download do source archive; nao vou sobrescrever."
+        }
+        Move-Item -LiteralPath $source.FullName -Destination $target -Force
+        if ($commit) { Save-Text (Join-Path $target '.golive-source-commit') $commit }
+        Write-Ok "$($info.Label) extraido de source archive$(if ($commit) { " @ $($commit.Substring(0, 12))" } else { '' })."
+    } finally {
+        Remove-CaminhoSilencioso $temp
+    }
+}
 function Install-Toolchain($needGit) {
-    $missing = @()
-    if ($needGit -and -not (Test-Tool 'git')) { $missing += 'git' }
-    if (-not (Test-Tool 'node')) { $missing += 'node' }
+    $nodeMissing = -not (Test-Tool 'node')
 
-    if ($missing.Count -gt 0) {
-        Write-Warn "Faltando no seu PATH: $($missing -join ', ')"
+    if ($nodeMissing) {
+        Write-Warn 'Node.js nao esta no PATH.'
 
-        if (-not (Test-Tool 'winget')) {
-            throw "Instale $($missing -join ' e ') manualmente e rode de novo."
+        $usedWinget = $false
+        if (Test-Tool 'winget') {
+            if (Confirm-Action 'Instalar Node.js LTS agora com o winget?') {
+                Write-Step 'winget install OpenJS.NodeJS.LTS'
+                & winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent | Out-Host
+                $usedWinget = $true
+                Update-PathFromEnvironment
+            }
         }
 
-        if (-not (Confirm-Action 'Instalar agora com o winget?')) {
-            throw "Instale $($missing -join ' e ') e rode de novo."
-        }
-
-        foreach ($tool in $missing) {
-            $id = if ($tool -eq 'git') { 'Git.Git' } else { 'OpenJS.NodeJS.LTS' }
-            Write-Step "winget install $id"
-            & winget install --id $id --accept-source-agreements --accept-package-agreements --silent | Out-Host
-        }
-
-        Update-PathFromEnvironment
-        $stillMissing = @()
-        if ($needGit -and -not (Test-Tool 'git')) { $stillMissing += 'git' }
-        if (-not (Test-Tool 'node')) { $stillMissing += 'node' }
-        if ($stillMissing.Count -gt 0) {
-            throw "O winget instalou $($stillMissing -join ', '), mas o executavel ainda nao apareceu no PATH desta sessao. Reinicie o Windows uma vez e rode o mesmo instalador novamente."
+        # Winget ausente, recusado, falhou ou pede reboot: usa ZIP oficial verificado no perfil.
+        if (-not (Test-Tool 'node')) {
+            if ($usedWinget) { Write-Warn 'Node do winget ainda nao apareceu; usando fallback portatil.' }
+            Install-PortableNode
         }
     }
 
-    if (-not (Test-Pnpm)) { Install-Pnpm }
+    if (-not (Test-Tool 'node')) { throw 'Nao consegui deixar o Node.js funcionando.' }
 
+    if ($needGit -and -not (Test-Tool 'git')) {
+        Write-Step 'Git nao encontrado; o mod sera obtido por source archive oficial do GitHub.'
+    }
+
+    if (-not (Test-Pnpm)) { Install-Pnpm }
     Write-Ok "pnpm $script:PnpmVersion"
 }
 
@@ -1140,7 +1273,8 @@ function Install-Mod($choice) {
     Write-Host ''
     if (-not (Confirm-Action 'Pode seguir?')) { throw 'Cancelado.' }
 
-    Install-Toolchain $true
+    # Git nao e requisito para compilar; se faltar, usamos source archive oficial.
+    Install-Toolchain $false
 
     if (Test-Path -LiteralPath $target) {
         if (-not (Test-ModCheckout $target)) {
@@ -1150,10 +1284,17 @@ function Install-Mod($choice) {
         return $target
     }
 
-    Write-Step "git clone $($info.Git)"
-    & git clone --depth 1 $info.Git $target | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'git clone falhou' }
+    if (Test-Tool 'git') {
+        Write-Step "git clone $($info.Git)"
+        & git clone --depth 1 $info.Git $target | Out-Host
+        if ($LASTEXITCODE -eq 0 -and (Test-ModCheckout $target)) { return $target }
 
+        Write-Warn 'git clone falhou; tentando source archive oficial.'
+        Remove-CaminhoSilencioso $target
+    }
+
+    Install-ModFromArchive $choice $target
+    if (-not (Test-ModCheckout $target)) { throw 'Source archive foi extraido, mas o checkout final e invalido.' }
     return $target
 }
 
@@ -2752,6 +2893,10 @@ try {
         'TestTor'     {
             if (-not (Install-Tor)) { throw 'Teste Tor falhou: sem tunel TLS ate gateway.discord.gg.' }
             Write-Ok 'Teste Tor: SOCKS5 + TLS ate gateway.discord.gg funcionando.'
+        }
+        'TestPortableNode' {
+            Install-PortableNode
+            Write-Ok "Teste Node portatil: $(& node --version) / npm $(& npm --version)"
         }
         default       { Show-MainMenu }
     }
