@@ -97,8 +97,15 @@ assert(
   "legacy visible Tor startup must migrate safely"
 );
 
-assert(oneClick.includes("KINGCIR: Rei dos Doentes"),
-  "one-click installer must show the requested KINGCIR signature");
+for (const line of [
+  "########################",
+  "#                      #",
+  "#       KINGCIR        #"
+]) {
+  assert(oneClick.includes(line), `one-click installer must contain approved KINGCIR square line: ${line}`);
+}
+assert(!oneClick.includes("KINGCIR: Rei dos Doentes"),
+  "old KINGCIR subtitle must not remain in the splash");
 assert(oneClick.includes("Start-Sleep -Seconds 3"),
   "KINGCIR signature must remain visible for three seconds before installation");
 
