@@ -87,7 +87,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # Tor embutido: mesma versao, mesmos hashes e mesma porta da GUI
 # (golive-gui/electron/main.ts). A porta dedicada 9060 nao conflita com um Tor
 # do sistema (9050) nem do Tor Browser (9150).
-TOR_BUNDLE_VERSION="13.5"
+TOR_BUNDLE_VERSION="15.0.21"
 TOR_PORT="9060"
 TOR_BASE="$INSTALL_DIR/Tor"
 TOR_EXE="$TOR_BASE/tor/tor"
@@ -99,8 +99,8 @@ TOR_TORRC="$TOR_BASE/torrc"
 # em golive-gui/electron/main.ts.
 TOR_LIBDIR="$TOR_BASE/tor"
 TOR_TARBALL="tor-expert-bundle-linux-x86_64-$TOR_BUNDLE_VERSION.tar.gz"
-TOR_URL="https://archive.torproject.org/tor-package-archive/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
-TOR_SHA256="147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d"
+TOR_URL="https://dist.torproject.org/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
+TOR_SHA256="40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11"
 TOR_SERVICE="golivebypass-tor.service"
 
 MODE="install"
