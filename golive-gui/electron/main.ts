@@ -2370,9 +2370,8 @@ function saveTorAddr(addr: string) {
   updateSharedSettings({ torAddr: addr });
 }
 
-// Modo de rede escolhido (persistido no settings.json junto da proxy): "auto" | "tor" | "free".
-// "auto" com proxy preenchida = personalizado (o bypass usa a proxy do campo). O PADRAO e
-// "tor": o app baixa e usa o Tor sempre, para nunca cair no IP brasileiro.
+// Modo de rede escolhido: "tor" ou "auto" com proxy preenchida (personalizado).
+// Valores "free" de versoes antigas migram para Tor; enhanced nao usa listas publicas.
 function saveNetMode(mode: string) {
   updateSharedSettings({ routeMode: mode });
 }
@@ -2380,15 +2379,11 @@ function saveNetMode(mode: string) {
 function readNetMode(): string {
   try {
     const file = path.join(settingsDir(), "settings.json");
-    // Padrao "tor". Saida gratuita e instavel por natureza -- morre no meio da sessao, tem RTT
-    // alto e obriga o pool a ficar trocando -- enquanto o Tor entrega uma rota que fica de pe.
-    // O custo aparece so na primeira vez (o pacote de 22MB e o bootstrap), e o modo agora so e
-    // liberado depois de um tunel provado, entao o Discord nao nasce apontando para uma porta
-    // que ainda nao serve.
     if (!fs.existsSync(file)) return "tor";
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
     const m = typeof data.routeMode === "string" ? data.routeMode : "";
-    if (m === "tor" || m === "free" || m === "auto") return m;
+    if (m === "auto" && typeof data.proxy === "string" && data.proxy.trim() !== "") return "auto";
+    // Inclui migracao de "free", "auto" vazio e qualquer valor desconhecido.
     return "tor";
   } catch {
     return "tor";
@@ -2474,7 +2469,7 @@ ipcMain.handle("set-update-channel", (_event, canal: unknown) => {
 ipcMain.handle("get-net-mode", () => readNetMode());
 ipcMain.handle("set-net-mode", (_event, mode: unknown) => {
   // A UI manda "auto" para o modo Personalizado (o campo de proxy define a saida).
-  const m = typeof mode === "string" && ["auto", "tor", "free"].includes(mode) ? mode : "tor";
+  const m = typeof mode === "string" && ["auto", "tor"].includes(mode) ? mode : "tor";
   saveNetMode(m);
   // No modo tor so reescrevo a injecao com o Tor de pe: apontar o runtime pra uma
   // porta morta faria o gateway segurar (recusa direta) ate o Tor subir.
