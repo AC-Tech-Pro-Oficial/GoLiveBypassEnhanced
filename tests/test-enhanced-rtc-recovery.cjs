@@ -107,6 +107,9 @@ async function broadcasterRecoveryContract() {
   assert(!encoded.includes("screen-secret-id"), "desktop source id must never leave preload closure");
   assert(!encoded.includes("local-secret"), "user ids must never leave preload closure");
   assert.equal(summary.connections[0].stats.role, "broadcaster", "broadcaster role must be explicit");
+  assert.equal(summary.connections[0].sourceCached, true,
+    "selected broadcaster source must be exposed only as a sanitized cached/not-cached bit");
+  assert.equal(summary.connections[0].roleHint, "broadcaster");
 
   const level1 = await sandbox.window.__goliveVoiceRecuperar(1);
   assert.equal(level1.ok, true);
@@ -201,6 +204,42 @@ function detectorContract() {
   assert.equal(detect({ ...base, demanda: { ...base.demanda, active: false } }), null, "no viewer demand means no recovery");
 }
 
+function friendBroadcasterDemandDropContract() {
+  const helperCode = [
+    extractFunction("streamNativaAtiva"),
+    extractFunction("geracaoNativa"),
+    extractFunction("broadcasterRecoveryStillOwned"),
+    "return broadcasterRecoveryStillOwned;",
+  ].join("\n");
+  const stillOwned = new Function(helperCode)();
+
+  const stream = {
+    id: 2,
+    kind: "stream",
+    destroyed: false,
+    sourceCached: true,
+    stats: {
+      statsOk: true,
+      role: "broadcaster",
+      inputFrameRate: 30,
+      encodeFrameRate: 0,
+      framesEncoded: 0,
+    },
+  };
+  const ctx = { voice: { instanceId: 1234, connections: [stream] } };
+  const pending = {
+    papel: "broadcaster",
+    geracao: "1234:2",
+  };
+
+  assert.equal(stillOwned(ctx, pending), true,
+    "friend log: demand loss must not cancel while the same broadcaster source is still cached");
+  assert.equal(stillOwned({ voice: { ...ctx.voice, connections: [{ ...stream, sourceCached: false }] } }, pending), false,
+    "voluntary clearDesktopSource must make broadcaster recovery cancellable");
+  assert.equal(stillOwned({ voice: { ...ctx.voice, connections: [{ ...stream, id: 3 }] } }, pending), false,
+    "a different stream generation must not inherit the previous recovery");
+}
+
 function staticSafetyContract() {
   const recoveryStart = source.indexOf("window.__goliveVoiceRecuperar = function");
   const recoveryEnd = source.indexOf("installNativeHook();", recoveryStart);
@@ -210,12 +249,17 @@ function staticSafetyContract() {
   const start = source.indexOf("function iniciarRecuperacaoNativa(");
   const end = source.indexOf("function acompanharRecuperacaoNativa(", start);
   assert(!source.slice(start, end).includes("__goliveMidiaFechar"), "native RTC recovery must not close discord.media");
+  assert(source.includes("demanda caiu mas a fonte broadcaster continua ativa; mantendo recuperacao"),
+    "friend-log regression: broadcaster demand loss with cached source must keep L1->L2 recovery alive");
+  assert(source.includes("sourceCached: !!rec.sourceReplay"),
+    "standalone summary must expose only sanitized source ownership state");
 }
 
 (async () => {
   await broadcasterRecoveryContract();
   await viewerRecoveryContract();
   detectorContract();
+  friendBroadcasterDemandDropContract();
   staticSafetyContract();
   console.log("Enhanced RTC recovery: all regression contracts passed.");
 })().catch(error => {
