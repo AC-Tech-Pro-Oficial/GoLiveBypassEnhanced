@@ -24,7 +24,7 @@ import { request } from "https";
 import { attemptReplace, cleanupOldExe, OLD_SUFFIX, spawnWindowsUpdateHelper } from "./updater-replace";
 import { escolherRelease, type Canal, type ReleaseCandidata } from "./updater-channel";
 
-const REPO = "bezumiya/GoLiveBypass";
+const REPO = "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced";
 // O artifactName leva a versao (GoLiveBypass-1.1.5.exe): o AppImageLauncher e
 // outros integradores nao sobrescrevem o arquivo quando o nome muda por versao.
 const EXE_PREFIX = "GoLiveBypass-";
@@ -380,7 +380,7 @@ export async function checkWindowsUpdate(
         title: "Falha na atualização",
         message: `Não foi possível instalar o GoLiveBypass ${latest}.`,
         detail:
-          "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/bezumiya/GoLiveBypass/releases.",
+          "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/releases.",
         buttons: ["OK"],
       };
       if (win) dialog.showMessageBoxSync(win, aviso);
