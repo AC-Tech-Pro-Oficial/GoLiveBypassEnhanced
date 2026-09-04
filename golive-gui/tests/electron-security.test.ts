@@ -5,6 +5,7 @@ import path from "path";
 describe("Electron renderer security boundary", () => {
   const main = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
   const preload = fs.readFileSync(path.resolve(process.cwd(), "electron/preload.ts"), "utf8");
+  const renderer = fs.readFileSync(path.resolve(process.cwd(), "src/main.ts"), "utf8");
 
   it("disables Node integration and enables context isolation in every BrowserWindow", () => {
     expect(main).not.toContain("nodeIntegration: true");
@@ -35,5 +36,11 @@ describe("Electron renderer security boundary", () => {
   it("validates bug-report issue URLs before opening the system browser", () => {
     expect(main).not.toContain("shell.openExternal(posted.issueUrl)");
     expect(main).toContain("openTrustedExternal(posted.issueUrl)");
+  });
+
+  it("does not inject API-returned issue URLs through innerHTML", () => {
+    expect(renderer).not.toContain('bugSuccessLink.innerHTML = `<a href="');
+    expect(renderer).toContain("issue.hostname === 'github.com'");
+    expect(renderer).toContain("document.createElement('a')");
   });
 });
