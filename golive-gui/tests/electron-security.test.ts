@@ -73,4 +73,17 @@ describe("Electron renderer security boundary", () => {
     expect(pkg.build.publish.repo).toBe("GoLiveBypassEnhanced");
   });
 
+
+  it("uses a restrictive renderer Content Security Policy without inline executable code", () => {
+    for (const page of ["index.html", "logs.html"]) {
+      const html = fs.readFileSync(path.resolve(process.cwd(), page), "utf8");
+      expect(html).toContain('http-equiv="Content-Security-Policy"');
+      expect(html).toContain("script-src 'self'");
+      expect(html).toContain("object-src 'none'");
+      expect(html).toContain("frame-src 'none'");
+      expect(html).not.toContain("script-src 'self' 'unsafe-inline'");
+      expect(html).toContain('<script src="./theme-init.js"></script>');
+    }
+  });
+
 });
