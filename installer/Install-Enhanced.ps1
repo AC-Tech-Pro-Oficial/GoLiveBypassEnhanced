@@ -288,6 +288,164 @@ function Verify-SettingsPreserved($snapshot) {
 
     $afterNames = @($json.plugins.PSObject.Properties.Name)
     foreach ($name in $snapshot.PluginNames) {
+        # Aliases antigos do proprio GoLiveBypass sao removidos de proposito para impedir
+        # duas implementacoes concorrentes. Todo outro plugin do usuario precisa sobreviver.
+        if ($name -ne 'GoLiveBypass' -and $name -match '(?i)^GoLiveBypass(?:Enhanced|Legacy|Standalone)?
+
+    $glb = $json.plugins.GoLiveBypass
+    if (-not $glb -or $glb.enabled -ne $true) {
+        throw 'GoLiveBypass nao ficou ativado no mod.'
+    }
+    if ($glb.proxy -ne 'socks5://127.0.0.1:9060') {
+        throw "GoLiveBypass nao ficou preso ao Tor local (proxy=$($glb.proxy))."
+    }
+}
+
+function Verify-ModInjection([string]$name) {
+    $ok = $false
+
+    foreach ($target in Get-DiscordResources) {
+        $asar = Join-Path $target.Resources 'app.asar'
+        $standaloneIndex = Join-Path $asar 'index.js'
+
+        if ((Test-Path -LiteralPath $asar -PathType Container) -and
+            (Test-Path -LiteralPath $standaloneIndex -PathType Leaf)) {
+            $text = [IO.File]::ReadAllText($standaloneIndex)
+            if ($text.Contains('golivebypass.js')) {
+                throw "$($target.Name) ainda esta usando a injecao standalone."
+            }
+        }
+
+        $injected = Get-InjectedPath $target.Resources
+        if (-not $injected -or $injected -notmatch "(?i)$name") { continue }
+
+        $root = Split-Path -Parent (Split-Path -Parent $injected)
+        if (-not (Test-ModCheckout $root)) { continue }
+
+        $plugin = Join-Path $root 'src\userplugins\goLiveBypass'
+        foreach ($needed in @('index.tsx', 'native.ts', 'rtcRecovery.ts', 'rtcShim.ts', 'manifest.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $plugin $needed))) {
+                throw "O build do $name nao recebeu $needed."
+            }
+        }
+
+        $manifest = Get-Content -LiteralPath (Join-Path $plugin 'manifest.json') -Raw | ConvertFrom-Json
+        if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') {
+            throw 'O plugin instalado aponta o updater para uma origem incorreta.'
+        }
+
+        $ok = $true
+    }
+
+    if (-not $ok) {
+        throw "Nao consegui confirmar a reinjecao do $name com o plugin enhanced."
+    }
+}
+
+function Try-RepairModInjection([string]$name) {
+    $root = Find-ModCheckout $name
+    if (-not $root) { return }
+
+    try {
+        Stop-Discord
+        Push-Location -LiteralPath $root
+        try {
+            foreach ($target in Get-DiscordResources) {
+                $loc = Split-Path -Parent (Split-Path -Parent $target.Resources)
+                & pnpm run inject -- --location $loc
+                if ($LASTEXITCODE -ne 0) { & pnpm inject }
+            }
+        } finally {
+            Pop-Location
+        }
+
+        Write-Host "  [OK] $name reinjetado durante o rollback." -ForegroundColor Green
+    } catch {
+        Write-Host "  [!] Nao consegui confirmar a reinjecao do $($name): $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+Write-Host ''
+Write-Host '  GoLiveBypassEnhanced' -ForegroundColor Magenta
+Write-Host '  Vencord/Equicord preservado + Tor validado + RTC recovery' -ForegroundColor DarkGray
+Write-Host ''
+
+$selected = Detect-Mod
+Write-Host "  [*] Mod escolhido: $selected" -ForegroundColor Cyan
+
+$snapshot = Backup-ModSettings $selected
+$work = Join-Path ([IO.Path]::GetTempPath()) 'GoLiveBypassEnhanced-oneclick'
+New-Item -ItemType Directory -Path $work -Force | Out-Null
+$installer = Join-Path $work 'GoLiveBypass-Installer.ps1'
+
+try {
+    # A restauracao/migracao de standalone agora e feita pelo instalador canonico,
+    # que consegue registrar a causa e normalizar settings/native state na mesma transacao.
+    Write-Host '  [*] Inventariando instalacoes anteriores no instalador canonico...' -ForegroundColor Cyan
+
+    Write-Host '  [*] Baixando o instalador enhanced do userplugin...' -ForegroundColor Cyan
+    Invoke-WebRequest -UseBasicParsing -Uri "$RepoRaw/installer/GoLiveBypass-Installer.ps1" -OutFile $installer
+    if ((Get-Item -LiteralPath $installer).Length -lt 50000) {
+        throw 'Download do instalador veio incompleto.'
+    }
+
+    $installerText = [IO.File]::ReadAllText($installer)
+    foreach ($required in @(
+        'goLiveBypass/rtcRecovery.ts',
+        'goLiveBypass/rtcShim.ts',
+        'Test-TorGatewayTunnel',
+        'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced'
+    )) {
+        if (-not $installerText.Contains($required)) {
+            throw "Instalador baixado nao contem o contrato enhanced esperado: $required"
+        }
+    }
+
+    Write-Host "  [*] Instalando dependencias, $selected, plugin enhanced e Tor..." -ForegroundColor Cyan
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Mode Install -Mod $selected -Tor -Yes
+    if ($LASTEXITCODE -ne 0) {
+        throw "O instalador do userplugin terminou com codigo $LASTEXITCODE."
+    }
+
+    Verify-SettingsPreserved $snapshot
+    Verify-ModInjection $selected
+
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $run = (Get-ItemProperty -Path $runKey -Name 'GoLiveBypassTor' -ErrorAction Stop).GoLiveBypassTor
+    if ($run -notmatch '(?i)wscript\.exe' -or $run -notmatch '(?i)GoLiveBypassTor\.vbs') {
+        throw "A inicializacao persistente do Tor nao ficou invisivel: $run"
+    }
+
+    Write-Host ''
+    Write-Host '  [OK] Instalacao enhanced concluida.' -ForegroundColor Green
+    Write-Host "  [OK] $selected e os plugins/configuracoes preexistentes foram preservados." -ForegroundColor Green
+    Write-Host '  [OK] GoLiveBypass roda como userplugin, nao como substituto do mod.' -ForegroundColor Green
+    Write-Host '  [OK] Tor passou SOCKS5 + TLS ate gateway.discord.gg.' -ForegroundColor Green
+    Write-Host '  [OK] Tor inicia invisivel nos proximos logons.' -ForegroundColor Green
+    Write-Host ''
+
+    Start-Discord
+} catch {
+    Write-Host ''
+    Write-Host "  [X] Instalacao abortada: $($_.Exception.Message)" -ForegroundColor Red
+
+    try {
+        Stop-Discord
+        Restore-ModSettings $snapshot
+        Write-Host '  [OK] Configuracoes anteriores do mod restauradas do backup.' -ForegroundColor Green
+    } catch {
+        Write-Host "  [!] Falha ao restaurar settings.json: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    Try-RepairModInjection $selected
+    try { Start-Discord } catch { }
+    throw
+} finally {
+    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+) {
+            continue
+        }
         if ($afterNames -notcontains $name) {
             throw "O plugin preexistente '$name' sumiu das configuracoes."
         }
@@ -380,7 +538,9 @@ New-Item -ItemType Directory -Path $work -Force | Out-Null
 $installer = Join-Path $work 'GoLiveBypass-Installer.ps1'
 
 try {
-    Restore-AccidentalStandalone
+    # A restauracao/migracao de standalone agora e feita pelo instalador canonico,
+    # que consegue registrar a causa e normalizar settings/native state na mesma transacao.
+    Write-Host '  [*] Inventariando instalacoes anteriores no instalador canonico...' -ForegroundColor Cyan
 
     Write-Host '  [*] Baixando o instalador enhanced do userplugin...' -ForegroundColor Cyan
     Invoke-WebRequest -UseBasicParsing -Uri "$RepoRaw/installer/GoLiveBypass-Installer.ps1" -OutFile $installer
