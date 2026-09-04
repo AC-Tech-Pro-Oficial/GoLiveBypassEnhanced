@@ -254,6 +254,7 @@ export function installEnhancedRtcShim() {
             optionShape: shape(options, 0, new WeakSet()),
             conn: conn,
             sourceReplay: null,
+            sourceAt: 0,
             replayingSource: false,
             recoveryClearingSource: false,
             lastRole: 'unknown',
@@ -267,6 +268,7 @@ export function installEnhancedRtcShim() {
                 conn.destroy = function () {
                     rec.destroyedAt = Date.now();
                     rec.sourceReplay = null;
+                    rec.sourceAt = 0;
                     return originalDestroy.apply(this, arguments);
                 };
             }
@@ -280,6 +282,7 @@ export function installEnhancedRtcShim() {
                     conn[name] = function () {
                         if (!rec.replayingSource) {
                             rec.sourceReplay = { name: name, args: Array.prototype.slice.call(arguments) };
+                            rec.sourceAt = Date.now();
                         }
                         return original.apply(this, arguments);
                     };
@@ -289,7 +292,10 @@ export function installEnhancedRtcShim() {
                 var originalClear = conn.clearDesktopSource;
                 if (typeof originalClear === 'function') {
                     conn.clearDesktopSource = function () {
-                        if (!rec.recoveryClearingSource) rec.sourceReplay = null;
+                        if (!rec.recoveryClearingSource) {
+                            rec.sourceReplay = null;
+                            rec.sourceAt = 0;
+                        }
                         return originalClear.apply(this, arguments);
                     };
                 }
@@ -483,6 +489,9 @@ export function installEnhancedRtcShim() {
                     createdHa: now - rec.createdAt,
                     destroyed: rec.destroyedAt > 0,
                     optionShape: rec.optionShape,
+                    roleHint: connectionRoleHint(rec),
+                    sourceCached: !!rec.sourceReplay,
+                    sourceHa: rec.sourceReplay && rec.sourceAt > 0 ? now - rec.sourceAt : -1,
                     stats: sampled,
                 };
             });
