@@ -288,9 +288,18 @@ function Verify-SettingsPreserved($snapshot) {
 
     $afterNames = @($json.plugins.PSObject.Properties.Name)
     foreach ($name in $snapshot.PluginNames) {
-        # Aliases antigos do proprio GoLiveBypass sao removidos de proposito para impedir
-        # duas implementacoes concorrentes. Todo outro plugin do usuario precisa sobreviver.
-        if ($name -ne 'GoLiveBypass' -and $name -match '(?i)^GoLiveBypass(?:Enhanced|Legacy|Standalone)?
+        # Aliases antigos do proprio GoLiveBypass sao removidos de proposito.
+        $legacyAlias = $name -ne 'GoLiveBypass' -and (
+            $name -eq 'GoLiveBypassEnhanced' -or
+            $name -eq 'GoLiveBypassLegacy' -or
+            $name -eq 'GoLiveBypassStandalone'
+        )
+        if ($legacyAlias) { continue }
+
+        if ($afterNames -notcontains $name) {
+            throw "O plugin preexistente '$name' sumiu das configuracoes."
+        }
+    }
 
     $glb = $json.plugins.GoLiveBypass
     if (-not $glb -or $glb.enabled -ne $true) {
@@ -300,7 +309,6 @@ function Verify-SettingsPreserved($snapshot) {
         throw "GoLiveBypass nao ficou preso ao Tor local (proxy=$($glb.proxy))."
     }
 }
-
 function Verify-ModInjection([string]$name) {
     $ok = $false
 
