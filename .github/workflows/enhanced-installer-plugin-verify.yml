@@ -142,6 +142,7 @@ jobs:
             "$env:SystemRoot\System32\WindowsPowerShell\v1.0"
           ) -join ';'
           $env:Path = $barePath
+          $env:GOLIVE_PREFER_SOURCE_ARCHIVE = '1'
 
           if (Get-Command git -ErrorAction SilentlyContinue) { throw 'Git still visible in bare PATH.' }
           if (Get-Command node -ErrorAction SilentlyContinue) { throw 'Node still visible in bare PATH.' }
