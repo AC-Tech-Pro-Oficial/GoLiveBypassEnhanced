@@ -108,6 +108,17 @@ function Read-InjectionText([string]$resources) {
     return ''
 }
 
+function Read-BackupInjectionText([string]$resources) {
+    try {
+        $backup = Join-Path $resources '_app.asar'
+        if (-not (Test-Path -LiteralPath $backup -PathType Leaf)) { return '' }
+        $item = Get-Item -LiteralPath $backup
+        if ($item.Length -gt 65536) { return '' }
+        return [IO.File]::ReadAllText($backup)
+    } catch { }
+    return ''
+}
+
 function Get-InjectedPath([string]$resources) {
     $text = Read-InjectionText $resources
     if (-not $text) { return $null }
@@ -163,6 +174,14 @@ function Detect-Mod {
         $text = Read-InjectionText $target.Resources
         if ($text -match '(?i)equicord') { $scores.Equicord += 1000 }
         if ($text -match '(?i)vencord') { $scores.Vencord += 1000 }
+
+        # Se um standalone antigo estiver na frente, _app.asar normalmente e o stub
+        # do Vencord/Equicord que ele substituiu. Use isso antes de timestamps.
+        if ($text -match '(?i)golivebypass\.js') {
+            $backupText = Read-BackupInjectionText $target.Resources
+            if ($backupText -match '(?i)equicord') { $scores.Equicord += 1200 }
+            if ($backupText -match '(?i)vencord') { $scores.Vencord += 1200 }
+        }
     }
 
     foreach ($name in @('Equicord', 'Vencord')) {
