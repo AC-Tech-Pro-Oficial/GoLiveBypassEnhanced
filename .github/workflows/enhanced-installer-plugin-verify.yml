@@ -25,6 +25,10 @@ jobs:
       - name: Test bug-report API
         working-directory: api
         run: go test ./...
+      - name: Parse POSIX installers
+        run: |
+          sh -n installer/golivebypass-installer.sh
+          sh -n standalone/golivebypass-standalone.sh
 
   gui-security-and-build:
     runs-on: ubuntu-latest
@@ -100,6 +104,7 @@ jobs:
       - name: Installer and RTC contracts
         run: |
           node tests/test-windows-enhanced-installer.cjs
+          node tests/test-no-distributed-report-secrets.cjs
           node tests/test-plugin-enhanced-rtc.cjs
           node tests/test-enhanced-routing-policy.cjs
           node tests/test-enhanced-rtc-recovery.cjs
