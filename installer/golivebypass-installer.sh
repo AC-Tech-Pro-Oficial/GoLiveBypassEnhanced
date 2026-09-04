@@ -243,7 +243,8 @@ report_error() {
         printf '  %s[i]%s Relatorio nao enviado.\n' "$C_DIM" "$C_OFF" >&2
         return 0
         ;;
-    esac desc=""
+    esac
+    local desc=""
     # INSTALL_DIR nao eh setado neste script (era de uma versao antiga da GUI). O log
     # do bypass fica em ${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/golivebypass.log,
     # o mesmo que a GUI e o standalone usam. Fallback para o path do log se existir.
