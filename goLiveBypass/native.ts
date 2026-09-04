@@ -868,16 +868,13 @@ function currentExit(): Promise<string | null> {
 function dropExit(dead: string, excluded?: Set<string>) {
     if (exit !== dead) return;
 
-    log(`${safeProxy(dead)} parou de entregar, tirando do pote e procurando outra`);
-    writePool(readPool().filter(entry => entry.proxy !== dead));
+    log(`${safeProxy(dead)} parou de entregar; tentando novamente somente Tor/proxy configurada`);
     missed.delete(dead);
     exit = null;
 
-    // Volta a segurar conexao nova enquanto a busca corre. Sem isto, toda conexao de gateway
-    // que chegasse durante a troca sairia direta na hora -- e a reconexao logo depois de uma
-    // saida morrer e justamente a que decide se a transmissao sobrevive. O then fecha a corrida
-    // de a busca em curso ja ter passado pelo settleExit: sem ele os que esperam so sairiam
-    // pelo prazo, doze segundos parados.
+    // Nao existe fallback para lista publica no enhanced. Enquanto a saida confiavel
+    // reaparece, conexoes novas aguardam o mesmo seletor e, ao fim do prazo, o gateway
+    // pode seguir direto para manter o Discord utilizavel (login continua fail-closed).
     exitSettled = false;
     void chooseExit(excluded).then(() => { if (!exitSettled) settleExit(exit); });
 }
@@ -940,31 +937,14 @@ async function pickExit(excluded: Set<string>) {
 }
 
 async function autoExit(excluded: Set<string>) {
-    const pool = readPool();
-    if (pool.length > 0) {
-        const warm = await firstUsable(pool.map(entry => entry.proxy), excluded, WARM_PROBE_TIMEOUT_MS);
-        if (warm !== null) {
-            log(`saida guardada revalidada em ${warm.ms}ms: ${safeProxy(warm.proxy)}`);
-            settleExit(warm.proxy);
-
-            // Solta sem esperar: o pote so serve para o proximo boot, e prender a escolha ate
-            // encher deixaria a sessao atual esperando uma lista inteira a toa.
-            refillPool(excluded, warm).catch(() => { });
-            return;
-        }
-
-        log("as saidas guardadas morreram, procurando outra");
-    }
-
+    // Enhanced trust model: campo vazio significa "Tor local", nunca "ache uma proxy
+    // publica para mim". Isto torna install, plugin e GUI coerentes e impede que estado
+    // legado de pool transforme uma falha do Tor em trafego por um terceiro desconhecido.
     const tor = await torExit(excluded, PROBE_TIMEOUT_MS);
     if (tor !== null) return settleExit(tor);
 
-    log(`procurando uma saida nova, o gateway fica segurado por ate ${Math.round(STALL_BUDGET_MS / 1000)}s`);
-    const [first] = await sharedFreeExit(excluded, 1);
-    log(first === undefined ? "nenhuma saida passou nos testes" : `saida escolhida: ${safeProxy(first.proxy)}`);
-
-    settleExit(first?.proxy ?? null);
-    if (first !== undefined) writePool([first]);
+    log("nenhum Tor local confiavel respondeu; nenhuma proxy publica sera consultada ou usada");
+    settleExit(null);
 }
 
 // A busca cara acontece com a sessao ja aberta, para o proximo boot ter opcao pronta --
@@ -1028,88 +1008,31 @@ async function beat() {
 // mais uma conexao simultanea numa saida que talvez nao aceite duas.
 async function checkPool() {
     const active = exit;
+    if (active === null) return;
 
-    // Saida Tor: o batimento e so INFORMATIVO -- nunca troca nem descarta (ver comentario de
-    // TOR_HEARTBEAT_TIMEOUT_MS). Sem esta excecao, uma falha de probe durante a construcao de
-    // um circuito novo (a cada ~10min) contava como "perdeu o batimento" e o codigo abaixo
-    // trocava para uma reserva gratuita (ou descartava sem reserva) -- trocando de saida ou
-    // reconectando o gateway a toa, exatamente o bug do issue #122 do standalone. A morte REAL
-    // do Tor aparece no trafego vivo (serveRequest, protegido pelo TOR_RELAY_TIMEOUT_MS bem
-    // mais largo) e vira dropExit ali. O pote de gratuitas fica parado neste ciclo -- sem
-    // problema, ele so importa se a pessoa sair do Tor.
-    if (active !== null && isTorProxy(active)) {
+    // Tor pode demorar durante rotacao de circuito. Um probe curto falhando e apenas
+    // informativo: o trafego vivo usa o prazo Tor mais largo e decide a morte real.
+    if (isTorProxy(active)) {
         const ok = await reachesGateway(active, TOR_HEARTBEAT_TIMEOUT_MS);
         if (!ok) log(`batimento do Tor (${safeProxy(active)}) falhou -- circuito reconstruindo? mantendo a saida`);
         return;
     }
 
-    const stored = readPool();
-
-    // A ativa entra na rodada mesmo estando fora do pote: proxy do campo e Tor local nunca sao
-    // guardados, e sao exatamente os que a pessoa mais sente quando caem.
-    const targets = [...new Set([...(active === null ? [] : [active]), ...stored.map(entry => entry.proxy)])];
-    if (targets.length === 0) return huntReserves(0);
-
-    const beats = await Promise.all(targets.map(async proxy => ({ proxy, ok: await reachesGateway(proxy, HEARTBEAT_TIMEOUT_MS) })));
-
-    const dead = new Set<string>();
-    for (const { proxy, ok } of beats) {
-        if (ok) {
-            missed.delete(proxy);
-            continue;
-        }
-
-        const count = (missed.get(proxy) ?? 0) + 1;
-        missed.set(proxy, count);
-        if (count >= MAX_MISSED_BEATS) dead.add(proxy);
+    // Proxy personalizado e explicitamente confiado pelo usuario. Sem reservas publicas,
+    // duas falhas consecutivas apenas fazem o seletor tentar ESSA configuracao novamente.
+    const ok = await reachesGateway(active, HEARTBEAT_TIMEOUT_MS);
+    if (ok) {
+        missed.delete(active);
+        return;
     }
 
-    if (dead.size > 0) {
-        const survivors = stored.filter(entry => !dead.has(entry.proxy));
-        if (survivors.length !== stored.length) {
-            log(`fora do pote: ${[...dead].map(safeProxy).join(", ")} (sem resposta em ${MAX_MISSED_BEATS} batimentos)`);
-            writePool(survivors);
-        }
+    const count = (missed.get(active) ?? 0) + 1;
+    missed.set(active, count);
+    if (count < MAX_MISSED_BEATS) return;
 
-        for (const proxy of dead) missed.delete(proxy);
-    }
-
-    const live = beats.filter(entry => entry.ok).map(entry => entry.proxy);
-
-    // A ativa e trocada no primeiro erro, nao no segundo: trocar nao custa nada -- socket que ja
-    // esta de pe continua no tunel antigo, so conexao nova nasce pela reserva -- e a proxima
-    // conexao do gateway pode ser a reconexao que decide a transmissao.
-    if (active !== null && !live.includes(active)) {
-        const reserve = live.find(proxy => proxy !== active);
-        if (reserve === undefined) {
-            log(`${safeProxy(active)} perdeu o batimento e nao ha reserva viva`);
-            dropExit(active);
-        } else {
-            log(`${safeProxy(active)} perdeu o batimento, assumindo a reserva ${safeProxy(reserve)}`);
-            exit = reserve;
-        }
-    }
-
-    huntReserves(live.filter(proxy => proxy !== exit).length);
-}
-
-// A busca cara nunca acontece dentro do batimento: ela e solta em segundo plano e o pote so
-// muda quando ela volta, entao um batimento continua custando o mesmo com o pote vazio.
-function huntReserves(liveReserves: number) {
-    if (liveReserves >= MIN_LIVE_RESERVES) return;
-    if (Date.now() - lastHunt < HUNT_COOLDOWN_MS) return;
-
-    lastHunt = Date.now();
-    log(`o pote esta com ${liveReserves} reserva(s) viva(s), procurando mais em segundo plano`);
-
-    sharedFreeExit(excludedCountries(), POOL_SIZE).then(found => {
-        const known = new Set(readPool().map(entry => entry.proxy));
-        const fresh = found.filter(entry => !known.has(entry.proxy));
-        if (fresh.length === 0) return;
-
-        writePool([...readPool(), ...fresh]);
-        log(`${fresh.length} reserva(s) nova(s) no pote`);
-    }).catch(() => { });
+    missed.delete(active);
+    log(`${safeProxy(active)} perdeu ${MAX_MISSED_BEATS} batimentos; nenhuma reserva publica sera usada`);
+    dropExit(active);
 }
 
 // ------------------------------------------------------------------ o roteador local
@@ -1229,25 +1152,8 @@ async function serveRequest(client: Socket, request: Buffer | null) {
         const prazoAtiva = isTorProxy(through) ? TOR_RELAY_TIMEOUT_MS : RELAY_TUNNEL_TIMEOUT_MS;
         upstream = await openTunnel(through, target.host, target.port, prazoAtiva);
 
-        // Trocar para uma reserva ja testada custa uma conexao; esperar a proxima abertura do
-        // Discord custa a sessao inteira sem bypass. As reservas correm juntas em vez de uma
-        // por vez: com 2,5s de prazo cada, a fila somava mais de dez segundos com o gateway
-        // reconectando, tempo de sobra para o Chromium desistir do roteador.
-        if (upstream === null) {
-            const won = await firstTunnel(
-                readPool().map(entry => entry.proxy).filter(proxy => proxy !== through),
-                target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS
-            );
-
-            if (won !== null) {
-                log(`${safeProxy(through)} falhou, usando a reserva ${safeProxy(won.proxy)}`);
-                writePool(readPool().filter(entry => entry.proxy !== through));
-                missed.delete(through);
-                exit = won.proxy;
-                upstream = won.socket;
-            }
-        }
-
+        // Enhanced nao troca silenciosamente para reservas publicas. Se a saida
+        // escolhida falhar, o seletor tenta apenas Tor/proxy configurada.
         if (upstream === null) {
             dropExit(through);
             upstream = isLoginHost ? null : await openDirect(target.host, target.port, RELAY_DIRECT_TIMEOUT_MS);
@@ -1463,21 +1369,20 @@ async function enableOnce() {
 // Versoes anteriores guardavam uma saida so, em verifiedProxy. Aproveitar ela como semente do
 // pote poupa uma busca inteira no primeiro boot depois da atualizacao.
 function migrateLegacyPool() {
-    const stored: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.verifiedProxy;
-    if (typeof stored !== "object" || stored === null) return;
-
-    const { proxy, at } = stored as { proxy?: unknown; at?: unknown; };
-    if (typeof proxy === "string" && parseProxy(proxy) !== null && typeof at === "number"
-        && Date.now() - at < POOL_MAX_AGE_MS && readPool().length === 0) {
-        writePool([{ proxy, country: "?", ms: 0, at }]);
-        log("saida guardada pela versao anterior aproveitada no pote");
-    }
-
+    // Versoes antigas persistiam proxies publicas em pool/verifiedProxy. Elas nao fazem
+    // parte do enhanced: apaga somente chaves do proprio GoLiveBypass para que uma atualizacao
+    // nunca possa reutilizar silenciosamente uma saida de terceiro.
     try {
-        if (NativeSettings.store.plugins.GoLiveBypass)
-            delete NativeSettings.store.plugins.GoLiveBypass.verifiedProxy;
+        const store = NativeSettings.store.plugins.GoLiveBypass;
+        if (!store) return;
+
+        const hadLegacy = Array.isArray((store as any).pool) || (store as any).verifiedProxy !== undefined;
+        delete (store as any).pool;
+        delete (store as any).verifiedProxy;
+        if (hadLegacy) log("estado legado de proxies publicas removido; enhanced usa somente Tor/proxy configurada");
     } catch {
-        // sobra inofensiva: a leitura acima e a unica que conhece a chave antiga
+        // Falha de persistencia nao deve derrubar o processo principal. Os caminhos ativos
+        // abaixo nunca leem o pool legado, portanto ele fica inerte mesmo se nao puder apagar.
     }
 }
 
@@ -1556,11 +1461,16 @@ export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountrie
     // Se a saida no ar ainda responde, foi corrida: o gateway nasceu antes dela e saiu direto.
     // Recarregar conserta sem reinstalar a rota.
     let through = exit;
-    if (through !== null && await measure(through, PROBE_TIMEOUT_MS) === null) {
+    const throughOk = through === null
+        ? false
+        : isTorProxy(through)
+            ? await torReachable(through, TOR_HEARTBEAT_TIMEOUT_MS)
+            : await measure(through, PROBE_TIMEOUT_MS) !== null;
+    if (through !== null && !throughOk) {
         log(`${safeProxy(through)} parou de responder no meio da sessao`);
         dropExit(through, excluded);
 
-        // Le de volta em vez de assumir null: o trafego vivo pode ja ter achado outra saida.
+        // Le de volta em vez de assumir null: o seletor pode ja ter recuperado o Tor/proxy.
         through = exit;
     }
 
