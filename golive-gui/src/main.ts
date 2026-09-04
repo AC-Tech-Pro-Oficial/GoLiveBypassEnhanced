@@ -160,6 +160,32 @@ const settingsClose = document.getElementById('settingsClose') as HTMLButtonElem
 
 let currentState = 'INACTIVE';
 
+function appendConflictText(text: string, strong = false) {
+  const node = strong ? document.createElement('strong') : document.createTextNode(text);
+  if (strong) node.textContent = text;
+  conflictBodyText.append(node);
+}
+
+function renderConflictBody(friendly: string, isProtected: boolean) {
+  conflictBodyText.replaceChildren();
+  if (isProtected) {
+    appendConflictText('Sobrescrever este Discord ');
+    appendConflictText(`apaga o ${friendly}`, true);
+    appendConflictText(' e os outros plugins dele ate voce reinstalar tudo. Use o ');
+    appendConflictText('plugin', true);
+    appendConflictText(' do GoLiveBypass para conviver com o mod.');
+    return;
+  }
+
+  appendConflictText('Detectamos o cliente paralelo ');
+  appendConflictText(friendly, true);
+  appendConflictText('. Como esse cliente nao roda plugins de Vencord/Equicord, sobrescrever o app.asar dele nao perde nada - mas o ');
+  appendConflictText(friendly);
+  appendConflictText(' deixa de existir como tal (vira um Discord com bypass). Para manter o mod embutido do ');
+  appendConflictText(friendly);
+  appendConflictText(', o caminho recomendado tambem e o plugin.');
+}
+
 // ---------------------------------------------------------------------------
 // Toast de aviso — canto superior direito. Persistente: so fecha quando o
 // usuario clica no "x" (sem auto-close). Reaparece ao ativar o bypass.
@@ -288,20 +314,9 @@ async function updateStatus() {
         toggleBtn.classList.add('overwrite');
       }
       statusCard.hidden = false;
-      // Conflict card: texto especifico por mod
+      // Conflict card: texto especifico por mod, montado sem HTML dinamico.
       conflictTitleText.textContent = `${friendly} detectado`;
-      if (isProtected) {
-        conflictBodyText.innerHTML =
-          `Sobrescrever este Discord <strong>apaga o ${friendly}</strong> e os outros plugins ` +
-          `dele ate voce reinstalar tudo. Use o <strong>plugin</strong> do GoLiveBypass ` +
-          `para conviver com o mod.`;
-      } else {
-        conflictBodyText.innerHTML =
-          `Detectamos o cliente paralelo <strong>${friendly}</strong>. Como esse cliente ` +
-          `nao roda plugins de Vencord/Equicord, sobrescrever o app.asar dele nao perde ` +
-          `nada - mas o ${friendly} deixa de existir como tal (vira um Discord com bypass). ` +
-          `Para manter o mod embutido do ${friendly}, o caminho recomendado tambem e o plugin.`;
-      }
+      renderConflictBody(friendly, isProtected);
       conflictCard.hidden = false;
     } else if (status === 'NOT_FOUND') {
       statusText.innerText = 'Discord não encontrado';
@@ -760,7 +775,7 @@ function openBugDialog() {
   if (bugForm) bugForm.hidden = false;
   if (bugSkeleton) bugSkeleton.hidden = true;
   if (bugSuccess) bugSuccess.hidden = true;
-  if (bugSuccessLink) bugSuccessLink.innerHTML = '';
+  if (bugSuccessLink) bugSuccessLink.replaceChildren();
   if (bugDialogTitle) bugDialogTitle.textContent = 'Reportar bug';
   const hint = document.querySelector('.bug-dialog__hint') as HTMLElement | null;
   if (hint) hint.hidden = false;
