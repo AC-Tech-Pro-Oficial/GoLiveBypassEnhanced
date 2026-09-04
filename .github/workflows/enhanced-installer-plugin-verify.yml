@@ -84,6 +84,12 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Portable Node checksum/extraction smoke test
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode TestPortableNode -Yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Diff hygiene
         shell: bash
         run: git diff --check origin/main...HEAD
@@ -102,10 +108,24 @@ jobs:
           if (Test-Path (Join-Path $env:USERPROFILE 'Equicord')) { throw 'Runner unexpectedly already has Equicord checkout.' }
           if (Test-Path (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor\tor.exe')) { throw 'Runner unexpectedly already has managed Tor.' }
 
-      - name: Install from zero through the public one-liner
+      - name: Install from zero with no Git Node pnpm or winget in PATH
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
+          $barePath = @(
+            "$env:SystemRoot\System32",
+            "$env:SystemRoot",
+            "$env:SystemRoot\System32\Wbem",
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          ) -join ';'
+          $env:Path = $barePath
+
+          if (Get-Command git -ErrorAction SilentlyContinue) { throw 'Git still visible in bare PATH.' }
+          if (Get-Command node -ErrorAction SilentlyContinue) { throw 'Node still visible in bare PATH.' }
+          if (Get-Command pnpm -ErrorAction SilentlyContinue) { throw 'pnpm still visible in bare PATH.' }
+          if (Get-Command winget -ErrorAction SilentlyContinue) { throw 'winget still visible in bare PATH.' }
+
+          $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $ps -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify clean bootstrap result
@@ -118,6 +138,14 @@ jobs:
 
           $equicord = Join-Path $env:USERPROFILE 'Equicord'
           if (-not (Test-Path (Join-Path $equicord 'package.json'))) { throw 'Equicord checkout missing.' }
+          if (-not (Test-Path (Join-Path $equicord '.golive-source-commit'))) {
+            throw 'Gitless source-archive marker missing; clean test did not exercise archive fallback.'
+          }
+
+          $nodeMarker = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Toolchain\node-current-path.txt'
+          if (-not (Test-Path $nodeMarker)) { throw 'Portable Node marker missing.' }
+          $portableNode = (Get-Content $nodeMarker -Raw).Trim()
+          if (-not (Test-Path (Join-Path $portableNode 'node.exe'))) { throw 'Portable node.exe missing.' }
 
           $plugin = Join-Path $equicord 'src\userplugins\goLiveBypass'
           foreach ($file in @('index.tsx','native.ts','rtcRecovery.ts','rtcShim.ts','manifest.json')) {
