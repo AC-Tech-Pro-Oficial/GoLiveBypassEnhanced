@@ -27,6 +27,7 @@ const LEVEL2_WAIT_MS = 30_000;
 const ACTION_COOLDOWN_MS = 30_000;
 const MAX_ATTEMPTS = 2;
 const ATTEMPT_WINDOW_MS = 30 * 60_000;
+const DIAGNOSTIC_THROTTLE_MS = 30_000;
 
 const PRELOAD_ID = "golive-enhanced-rtc";
 let preloadPath: string | null = null;
@@ -39,6 +40,7 @@ let attempts: number[] = [];
 let lastActionAt = 0;
 let blockedGeneration = "";
 let blockedAt = 0;
+let lastDiagnosticAt = 0;
 
 type Role = "broadcaster" | "viewer" | "unknown";
 type Signal = "transmissor-video-parado" | "viewer-video-parado";
@@ -169,6 +171,27 @@ function generation(voice: any, stream: any) {
     return String(voice?.instanceId ?? "legacy") + ":" + String(stream?.id ?? "none");
 }
 
+function diagnoseMissingBroadcasterStats(ctx: VoiceContext, now: number) {
+    if (now - lastDiagnosticAt < DIAGNOSTIC_THROTTLE_MS) return;
+
+    const voice = ctx?.voice;
+    if (!voice || voice.demandKnown !== true || voice.demandActive !== true) return;
+
+    const stream = activeStream(voice);
+    if (!stream || stream.destroyed === true || stream.createdHa < STREAM_WARMUP_MS) return;
+    if (stream.sourceCached !== true && stream.roleHint !== "broadcaster") return;
+
+    const stats = stream.stats;
+    if (stats?.statsOk === true) return;
+
+    const reason = typeof stats?.reason === "string" ? stats.reason : "sem-stats";
+    const sourceHa = typeof stream.sourceHa === "number" ? Math.round(stream.sourceHa) : -1;
+    const createdHa = typeof stream.createdHa === "number" ? Math.round(stream.createdHa) : -1;
+
+    lastDiagnosticAt = now;
+    log(`diag broadcaster | source_cached=${stream.sourceCached === true ? "sim" : "nao"} source_ha=${sourceHa}ms stream_ha=${createdHa}ms stats=${reason}`);
+}
+
 function detect(ctx: VoiceContext): Signal | null {
     const voice = ctx?.voice;
     if (!voice || voice.installed !== true || voice.voiceHooked !== true) return null;
@@ -294,6 +317,7 @@ async function tick() {
 
         const now = Date.now();
         pruneAttempts(now);
+        diagnoseMissingBroadcasterStats(ctx, now);
 
         if (blockedAt > 0) {
             const stream = activeStream(ctx.voice);
@@ -375,6 +399,7 @@ export function stopRtcRecovery() {
     pending = null;
     activeWebContents = null;
     ticking = false;
+    lastDiagnosticAt = 0;
     unregisterPreload();
     log("controlador parado");
     logger = null;
