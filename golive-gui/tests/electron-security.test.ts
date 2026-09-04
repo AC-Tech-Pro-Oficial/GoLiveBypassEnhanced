@@ -63,4 +63,14 @@ describe("Electron renderer security boundary", () => {
     expect(block).toContain('return "tor"');
   });
 
+
+  it("updates and publishes only from the enhanced fork", () => {
+    const updater = fs.readFileSync(path.resolve(process.cwd(), "electron/updater.ts"), "utf8");
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "package.json"), "utf8"));
+    expect(updater).toContain('const REPO = "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced"');
+    expect(updater).not.toContain('const REPO = "bezumiya/GoLiveBypass"');
+    expect(pkg.build.publish.owner).toBe("AC-Tech-Pro-Oficial");
+    expect(pkg.build.publish.repo).toBe("GoLiveBypassEnhanced");
+  });
+
 });
