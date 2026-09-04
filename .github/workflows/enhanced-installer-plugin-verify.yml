@@ -253,6 +253,91 @@ jobs:
           Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 
+  existing-vencord-migration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install baseline Vencord stack
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode Install -Mod Vencord -Tor -Yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+      - name: Poison only old GoLiveBypass Vencord state
+        shell: powershell
+        run: |
+          $vencord = Join-Path $env:USERPROFILE 'Vencord'
+          if (-not (Test-Path (Join-Path $vencord 'package.json'))) { throw 'Vencord checkout missing.' }
+
+          $plugin = Join-Path $vencord 'src\userplugins\goLiveBypass'
+          Set-Content -LiteralPath (Join-Path $plugin 'legacy-vencord.ts') -Value 'export const oldVencord = true;' -Encoding UTF8
+          $manifestFile = Join-Path $plugin 'manifest.json'
+          $manifest = Get-Content $manifestFile -Raw | ConvertFrom-Json
+          $manifest.updater.id = 'bezumiya/GoLiveBypass'
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestFile -Encoding UTF8
+
+          $settingsFile = Join-Path $env:APPDATA 'Vencord\settings\settings.json'
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          $settings.plugins.GoLiveBypass.proxy = 'socks5://127.0.0.1:9050'
+          $settings.plugins.GoLiveBypass.sessionRouting = 'login'
+          $settings.plugins.GoLiveBypass.voiceRegion = 'old-invalid-region'
+          $settings.plugins.GoLiveBypass.streamRegion = 'old-invalid-region'
+          $settings.plugins | Add-Member -NotePropertyName KeepMePlugin -NotePropertyValue ([pscustomobject]@{ enabled = $true; keep = 'yes' }) -Force
+          $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsFile -Encoding UTF8
+
+          $nativeFile = Join-Path $env:APPDATA 'Vencord\settings\native-settings.json'
+          $native = if (Test-Path $nativeFile) { Get-Content $nativeFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+          if (-not $native.PSObject.Properties['plugins']) {
+            $native | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{}) -Force
+          }
+          $native.plugins | Add-Member -NotePropertyName KeepMeNative -NotePropertyValue ([pscustomobject]@{ keep = 'yes' }) -Force
+          $native.plugins | Add-Member -NotePropertyName GoLiveBypass -NotePropertyValue ([pscustomobject]@{
+            bootPending = $true
+            lastKnownProxy = 'socks5://127.0.0.1:9050'
+          }) -Force
+          New-Item -ItemType Directory -Path (Split-Path -Parent $nativeFile) -Force | Out-Null
+          $native | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $nativeFile -Encoding UTF8
+
+      - name: Auto-detect and migrate Vencord through public one-liner
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify Vencord was preserved and normalized
+        shell: powershell
+        run: |
+          $vencord = Join-Path $env:USERPROFILE 'Vencord'
+          $plugin = Join-Path $vencord 'src\userplugins\goLiveBypass'
+          if (Test-Path (Join-Path $plugin 'legacy-vencord.ts')) { throw 'Stale Vencord GoLive source survived.' }
+          $manifest = Get-Content (Join-Path $plugin 'manifest.json') -Raw | ConvertFrom-Json
+          if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') { throw 'Enhanced manifest missing after Vencord migration.' }
+
+          $settings = Get-Content (Join-Path $env:APPDATA 'Vencord\settings\settings.json') -Raw | ConvertFrom-Json
+          $glb = $settings.plugins.GoLiveBypass
+          if ($glb.proxy -ne 'socks5://127.0.0.1:9060') { throw 'Vencord migration did not repin Tor.' }
+          if ($glb.sessionRouting -ne 'gateway') { throw 'Vencord routing not normalized.' }
+          if ([string]$glb.voiceRegion -ne '' -or [string]$glb.streamRegion -ne '') { throw 'Vencord regions not reset.' }
+          if (-not $settings.plugins.KeepMePlugin -or $settings.plugins.KeepMePlugin.keep -ne 'yes') { throw 'Unrelated Vencord plugin settings were lost.' }
+
+          $native = Get-Content (Join-Path $env:APPDATA 'Vencord\settings\native-settings.json') -Raw | ConvertFrom-Json
+          if ($native.plugins.PSObject.Properties['GoLiveBypass']) { throw 'Old Vencord native GoLive state survived.' }
+          if (-not $native.plugins.KeepMeNative -or $native.plugins.KeepMeNative.keep -ne 'yes') { throw 'Unrelated Vencord native state was lost.' }
+
+          $resources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $resources) { throw 'Discord resources missing.' }
+          $appAsar = Join-Path $resources.FullName 'app.asar'
+          $bytes = [IO.File]::ReadAllBytes($appAsar)
+          $take = [Math]::Min(65536, $bytes.Length)
+          $stub = [Text.Encoding]::UTF8.GetString($bytes, 0, $take)
+          if ($stub -notmatch '(?i)Vencord') { throw 'Public one-liner did not preserve/detect Vencord.' }
+
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+
   mod-build:
     strategy:
       fail-fast: false
