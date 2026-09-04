@@ -9,6 +9,10 @@ import (
 const (
 	MaxTitleLen       = 200
 	MaxDescriptionLen = 8 * 1024
+	MaxMetaEntries    = 32
+	MaxMetaKeyLen     = 64
+	MaxMetaValueLen   = 512
+	MaxMetaBytes      = 8 * 1024
 	// O GitHub recusa issues com body > 64KB (limite da API REST). O body montado
 	// aqui (meta + descricao + log) precisa caber — corta-se o LOG por ultimo,
 	// preservando meta e descricao que sao o diagnostico essencial.
@@ -24,7 +28,7 @@ type Report struct {
 }
 
 func (r *Report) Validate(maxLogBytes int64) error {
-	r.Title = strings.TrimSpace(r.Title)
+	r.Title = neutralizeMentions(strings.TrimSpace(r.Title))
 	switch {
 	case r.Title == "":
 		return fmt.Errorf("title e obrigatorio")
@@ -33,6 +37,25 @@ func (r *Report) Validate(maxLogBytes int64) error {
 	}
 	if len(r.Description) > MaxDescriptionLen {
 		return fmt.Errorf("description deve ter no maximo %d caracteres", MaxDescriptionLen)
+	}
+	if len(r.Meta) > MaxMetaEntries {
+		return fmt.Errorf("meta deve ter no maximo %d entradas", MaxMetaEntries)
+	}
+	metaBytes := 0
+	for k, v := range r.Meta {
+		if strings.TrimSpace(k) == "" {
+			return fmt.Errorf("meta nao aceita chave vazia")
+		}
+		if len(k) > MaxMetaKeyLen {
+			return fmt.Errorf("chave de meta deve ter no maximo %d caracteres", MaxMetaKeyLen)
+		}
+		if len(v) > MaxMetaValueLen {
+			return fmt.Errorf("valor de meta deve ter no maximo %d caracteres", MaxMetaValueLen)
+		}
+		metaBytes += len(k) + len(v)
+		if metaBytes > MaxMetaBytes {
+			return fmt.Errorf("meta deve ter no maximo %d bytes", MaxMetaBytes)
+		}
 	}
 	if int64(len(r.Log)) > maxLogBytes {
 		r.Log = r.Log[:maxLogBytes]
@@ -59,7 +82,7 @@ func BuildIssueBody(r Report) string {
 
 	if d := strings.TrimSpace(r.Description); d != "" {
 		b.WriteString("**Descrição:**\n\n")
-		b.WriteString(d)
+		b.WriteString(neutralizeMentions(d))
 		b.WriteString("\n\n")
 	}
 
@@ -103,5 +126,12 @@ func BuildIssueBody(r Report) string {
 }
 
 func tableCell(s string) string {
-	return strings.NewReplacer("|", "\\|", "\n", " ").Replace(s)
+	return strings.NewReplacer("|", "\\|", "\n", " ").Replace(neutralizeMentions(s))
+}
+
+// Relatos sao publicados por uma conta/bot do projeto. Um payload arbitrario nao deve
+// conseguir gerar notificacoes para usuarios/organizacoes do GitHub por meio de @mentions.
+// O zero-width space preserva a leitura humana sem criar uma mention clicavel/notificavel.
+func neutralizeMentions(s string) string {
+	return strings.ReplaceAll(s, "@", "@\u200b")
 }
