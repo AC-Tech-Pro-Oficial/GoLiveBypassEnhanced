@@ -499,10 +499,8 @@ abrindo | win32 x64 | electron 42.7.1 | chrome 148.0.7778.280
 configuracao | proxy automatico | roteamento gateway | regiao de call automatica | paises fora BR
 roteador local de pe na porta 51234
 rota aplicada: gateway.discord.gg, remote-auth-gateway.discord.gg pelo roteador local, o resto em DIRECT
-25 candidatas depois do ranqueamento
-socks5://... recusada: saida em BR
-socks5://... passou: 1535ms, saida em DE
-saida escolhida: socks5://...
+Tor local encontrado em socks5://127.0.0.1:9060
+saida confiavel respondeu e entregou gateway.discord.gg
 sessao aberta | atribuicao do video guard: null
   o cliente aceita video? supports true | supportsInApp true | desktop true
 o servidor liberou video nesta sessao, gateway por socks5://...
@@ -512,27 +510,20 @@ A linha que importa é `atribuicao do video guard: null`. **`null` significa que
 
 ## Reportar um bug (GUI)
 
-O app gráfico tem um botão **Reportar bug** no rodapé. Ele abre um diálogo onde você descreve o problema e envia um pacote de diagnóstico que vira uma issue no GitHub — sem precisar copiar logs na mão.
+O app gráfico tem um botão **Reportar bug**. O relato pode virar uma issue pública no repositório Enhanced sem você precisar copiar logs manualmente.
 
 **O que é enviado:**
-- **Resumo e descrição** que você digita (até 200 e 8 KB).
-- **Logs da sessão** — cauda do `gui.log`, do `golivebypass.log` (do Discord injetado) e o ring buffer em memória — cortados para 256 KB, mantendo o fim (o mais recente importa mais).
-- **Metadados técnicos** — versão do app, plataforma, modo de roteamento (Tor/personalizado), status do bypass, se o Tor embutido está ativo e em qual porta, uptime.
+- **Resumo e descrição** que você digita (até 200 caracteres e 8 KB).
+- **Logs da sessão**, quando você autoriza: caudas do `gui.log`/`golivebypass.log` e ring buffer, com limite local e limite adicional no servidor.
+- **Metadados técnicos limitados**, como versão, plataforma, modo de rota, status do bypass e estado do Tor.
 
-Depois do envio o app mostra o link da **issue criada** (ex.: `https://github.com/bezumiya/GoLiveBypass/issues/123`). Se preferir, abra direto em `https://github.com/bezumiya/GoLiveBypass/issues`.
+A issue é criada em `AC-Tech-Pro-Oficial/GoLiveBypassEnhanced`; o app mostra o link depois do envio.
 
-**Privacidade — o que NUNCA sai da sua máquina:**
-Sua proxy personalizada (`socks5://usuario:senha@host:porta`) é tratada como segredo. Antes de enviar, o app passa o pacote por três camadas:
+**Privacidade:** a proxy personalizada (`socks5://usuario:senha@host:porta`) é tratada como segredo. O cliente aplica redação por padrões conhecidos, remove ocorrências literais dos segredos configurados e faz uma varredura final: se um segredo conhecido sobreviver, o report é bloqueado localmente. Hosts técnicos do Discord e informações não-secretas de diagnóstico podem aparecer porque são necessários para investigar rota/RTC.
 
-- **L1 — padrões conhecidos:** credenciais embutidas em URL (`usuario:***@host`), cabeçalhos `authorization`, tokens do Discord (`mfa.*`) e query string do gateway.
-- **L2 — segredos literais:** qualquer ocorrência exata de usuário, senha, `host:porta` e da URL inteira configurada em `settings.json` vira `<proxy-pessoal>` — mesmo fora de um padrão.
-- **L3 — varredura final:** se algum segredo sobreviveu, **nada é enviado** e o app avisa “proxy apareceu nos logs”. O token da API (`api.skyplaceia.com`) também sai por L2 e trava em L3 se ficar.
+**Modelo de segurança da API:** não existe mais um “segredo do cliente” embutido no aplicativo. Um bearer token distribuído em um binário desktop seria extraível e não autenticaria usuários de verdade. O endpoint `POST https://api.skyplaceia.com/bugs/v1/reports` é deliberadamente público e protegido no servidor por limites de corpo/metadados, neutralização de `@mentions`, rate limit de **3 reports/min por IP** e bloqueio padrão de **600 s** ao exceder a janela. O PAT que cria issues no GitHub fica somente no servidor.
 
-Hosts do Discord (`gateway.discord.gg`) e do país de saída podem aparecer — são necessários para diagnosticar rota e latência. Senha e `host:porta` da sua proxy nunca.
-
-**Operação:** o botão chama `POST https://api.skyplaceia.com/bugs/v1/reports` com `Authorization: Bearer <token>` embutido no app (escopo: só criar issue, com rate limit). Rate limit: **1 issue/min por IP** — o 2º envio no mesmo minuto recebe `429` e bloqueia o IP por **300s** (`Retry-After` + `GET /v1/block-status` informam o tempo restante; a GUI mostra a mensagem de bloqueio com contagem regressiva). O corpo é limitado a 512 KB; o campo `log` é cortado em 256 KB. Logs locais nunca excedem 2 MB por arquivo nem 128 KB em memória.
-
-Sem GUI, compartilhe o arquivo de [O registro](#o-registro-o-que-o-plugin-anotou) manualmente numa issue.
+Sem GUI, compartilhe o arquivo de [O registro](#o-registro-o-que-o-plugin-anotou) manualmente numa issue do fork Enhanced.
 
 ---
 
@@ -560,7 +551,7 @@ Ou seja, o fluxo do GoLiveBypass — **o gateway nasce atrás da proxy e fica ne
 
 **Ressalvas honestas:**
 
-- Se a saída morrer no meio da sessão, o batimento de 30 em 30 segundos costuma perceber antes da sua transmissão e já troca por uma reserva viva — a reconexão do gateway nasce atrás dela e a liberação sobrevive. Só quando *nenhuma* reserva responde é que a conexão cai para a direta, e aí a próxima entrada em canal de voz volta a ser avaliada como BR: o bypass procura outra saída, o plugin detecta o bloqueio na próxima abertura de sessão e recarrega sozinho. Um **Ctrl+R** resolve na hora se você não quiser esperar.
+- Se a saída confiável morrer no meio da sessão, o batimento detecta a falha e tenta novamente **somente Tor local ou a proxy personalizada que você escolheu**. O Enhanced não troca para listas públicas/reservas desconhecidas. Se a saída confiável não voltar dentro do orçamento, o gateway pode seguir direto para manter o Discord utilizável; nessa situação o bypass pode deixar de valer até a rota confiável se recuperar/reconectar.
 - Isso depende de comportamento atual do Discord, que pode mudar a qualquer momento.
 - Usar proxy/VPN para contornar a restrição pode violar os Termos de Serviço do Discord. Risco de punição à conta é baixo, mas existe — considere usar uma conta secundária.
 
@@ -606,9 +597,9 @@ O momento ainda importa, mas a corrida mudou de lado: quem espera é o socket do
 
 - **Quem decide o fallback é o roteador, não o Chromium.** A regra PAC não tem alternativa do tipo `PROXY;DIRECT`: se a saída falha, a conexão cai para a direta *dentro* do roteador, com registro. Um proxy morto nunca deixa o Discord preso na tela de abertura — e nunca faz o Chromium desistir da regra em silêncio.
 - **Orçamento de espera por conexão**: o gateway aguarda uma saída por no máximo 12s; estourado, sai direto. Só o socket do gateway espera — a abertura do app nunca é segurada.
-- **Reservas mantidas vivas (batimento)**: até 5 saídas ficam guardadas num pote em `native-settings.json`, sob `pool`. A cada **30 segundos**, com a sessão já aberta, a saída ativa e todas as reservas são reconferidas com um túnel de verdade até o gateway do Discord. Quem erra o batimento perde a vez na hora: a ativa é trocada por uma reserva **testada há 30 segundos** no primeiro erro, e sai do pote no segundo erro seguido (um erro solto costuma ser congestionamento, não morte). Quando sobra menos de uma reserva viva de folga, o pote é reabastecido em segundo plano — sem trocar a saída ativa, que é o IP que o servidor já aceitou nesta sessão.
-- **Reservas correndo juntas, não em fila**: quando a saída ativa não entrega uma conexão, todas as reservas são tentadas **ao mesmo tempo** e a primeira que responder leva. Em fila, com 2,5s de prazo cada, a troca podia somar mais de dez segundos — tempo de sobra para o Chromium desistir do roteador.
-- **Reutilizar só depois de testar de novo**: no boot, as saídas guardadas são revalidadas (orçamento de 2,5s) antes de valerem. Descobrir uma do zero leva de 8 a 23 segundos; o que causava o travamento antigo era reaplicar uma proxy morta às cegas, e isso não acontece mais.
+- **Batimento da saída confiável**: a cada 30 segundos o runtime verifica a saída ativa. Tor recebe tolerância maior durante rotação de circuitos; uma proxy personalizada precisa falhar repetidamente antes de ser descartada/retestada.
+- **Sem reservas públicas**: não existe pote de proxies públicas no Enhanced. Uma falha nunca autoriza automaticamente um terceiro desconhecido a carregar o gateway/login.
+- **Recuperação conservadora**: conexões novas tentam apenas a saída explicitamente confiada. Login configurado para passar pela proxy falha fechado; gateway tem um fallback direto limitado para evitar transformar uma falha de Tor em Discord eternamente preso na abertura.
 - **A regra de proxy do sistema é respeitada**: se ela varia por host (proxy corporativo ou PAC de verdade), o plugin se recusa a ligar o roteador em vez de atropelar a política da rede.
 
 ## Dependências: o que baixar e como instalar
@@ -811,11 +802,10 @@ Isso gera a pasta `dist/` com o Vencord modificado já incluindo o plugin.
 
 ```
 goLiveBypass/
-├── index.tsx                      # renderer: patches do video guard e do stream, seletor de região,
-│                                  #   override do RTCRegionStore, veredito da sessão, eventos de fluxo
-└── native.ts                      # processo principal: roteador SOCKS local em 127.0.0.1, PAC por host,
-                                   #   escolha da saída com teste TLS real, pote de reservas, registro,
-                                   #   nova tentativa com recarga
+├── index.tsx                      # renderer: patches do video guard/stream, regiões e diagnóstico
+├── native.ts                      # processo principal: roteador SOCKS local, PAC, Tor/proxy confiável e logs
+├── rtcShim.ts                     # instrumentação privada discord_voice/decoder/encoder, sem IDs em logs
+└── rtcRecovery.ts                 # detector + escada conservadora de recuperação broadcaster/viewer
 
 installer/
 ├── GoLiveBypass-Installer.bat     # Windows: dois cliques, libera a execução e chama o .ps1
