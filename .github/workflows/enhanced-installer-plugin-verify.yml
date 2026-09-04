@@ -37,22 +37,39 @@ jobs:
   tor-metadata:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve current Tor expert bundle checksums
+      - uses: actions/checkout@v4
+
+      - name: Verify current Tor expert bundle checksums
         shell: bash
         run: |
           set -euo pipefail
           base='https://dist.torproject.org/torbrowser/15.0.21'
-          curl -fsS "$base/sha256sums-unsigned-build.txt" -o sha256sums.txt
-          for name in \
-            tor-expert-bundle-windows-x86_64-15.0.21.tar.gz \
-            tor-expert-bundle-linux-x86_64-15.0.21.tar.gz \
-            tor-expert-bundle-macos-aarch64-15.0.21.tar.gz \
-            tor-expert-bundle-macos-x86_64-15.0.21.tar.gz
-          do
-            line="$(grep "  $name$" sha256sums.txt)"
-            test -n "$line"
-            echo "TOR_SHA_LINE=$line"
-          done
+          curl -fsS "$base/sha256sums-signed-build.txt" -o sha256sums.txt
+
+          win='tor-expert-bundle-windows-x86_64-15.0.21.tar.gz'
+          linux='tor-expert-bundle-linux-x86_64-15.0.21.tar.gz'
+          mac_arm='tor-expert-bundle-macos-aarch64-15.0.21.tar.gz'
+          mac_x64='tor-expert-bundle-macos-x86_64-15.0.21.tar.gz'
+
+          win_sha="$(awk -v n="$win" '$2 == n { print $1 }' sha256sums.txt)"
+          linux_sha="$(awk -v n="$linux" '$2 == n { print $1 }' sha256sums.txt)"
+          mac_arm_sha="$(awk -v n="$mac_arm" '$2 == n { print $1 }' sha256sums.txt)"
+          mac_x64_sha="$(awk -v n="$mac_x64" '$2 == n { print $1 }' sha256sums.txt)"
+
+          test "$win_sha" = 'f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490'
+          test "$linux_sha" = '40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11'
+          test "$mac_arm_sha" = '83dec16412c1d97b91af603229481dd29f578e1485620ecffd9ac4aabcf6fb46'
+          test "$mac_x64_sha" = '7e21f5dab4c627e2ff8e894b2039fa49bdd78d12b025f96893d4d6238c6577e4'
+
+          grep -Fq 'TOR_BUNDLE_VERSION="15.0.21"' standalone/golivebypass-standalone.sh
+          grep -Fq "$linux_sha" standalone/golivebypass-standalone.sh
+          grep -Fq 'TOR_BUNDLE_VERSION="15.0.21"' installer/golivebypass-installer.sh
+          grep -Fq "$linux_sha" installer/golivebypass-installer.sh
+          grep -Fq "$win_sha" installer/GoLiveBypass-Installer.ps1
+          grep -Fq "$win_sha" golive-gui/electron/main.ts
+          grep -Fq "$linux_sha" golive-gui/electron/main.ts
+          grep -Fq "$mac_arm_sha" golive-gui/electron/main.ts
+          grep -Fq "$mac_x64_sha" golive-gui/electron/main.ts
 
   windows-contracts:
     runs-on: windows-latest
