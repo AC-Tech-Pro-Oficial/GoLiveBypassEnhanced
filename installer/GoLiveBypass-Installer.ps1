@@ -1862,13 +1862,10 @@ function Invoke-Install($root) {
 
     Write-Host ''
     Write-Ok 'Pronto. O plugin ja vem ativado, nao precisa mexer em nada.'
-    if ($proxy) {
-        # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
-        # deu certo.
-        Write-Host "  Proxy: $(Hide-ProxySecret $proxy)" -ForegroundColor DarkGray
-    } else {
-        Write-Host '  Proxy: gratuita, escolhida e testada sozinha a cada abertura' -ForegroundColor DarkGray
-    }
+    if (-not $proxy) { throw 'Instalacao terminou sem uma saida confiavel configurada.' }
+    # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
+    # deu certo.
+    Write-Host "  Saida confiavel: $(Hide-ProxySecret $proxy)" -ForegroundColor DarkGray
     Write-Host '  Entre numa call e use Go Live ou a camera.' -ForegroundColor DarkGray
     if ($script:ExternalBypassConflict) {
         Write-Warn 'Nao abra o Discord por outro launcher de Go Live/proxy ao mesmo tempo; abra o Discord normalmente.'
@@ -2541,25 +2538,20 @@ function Select-Proxy {
     if (Test-TuiInteractive) {
         $tui = Tui-Menu 'Como o bypass vai sair para fora do Brasil?' @(
             'Tor automatico (recomendado, baixa e sobe sozinho)',
-            'Proxy minha (socks5://host:porta)',
-            'Proxy publica gratuita (somente se voce escolher explicitamente)'
+            'Proxy minha (socks5://host:porta)'
         )
-        switch ($tui) {
-            2 {
-                $manual = (Tui-Input 'Endereco da proxy').Trim()
-                if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
-                    throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
-                }
-                return $manual
+        if ($tui -eq 2) {
+            $manual = (Tui-Input 'Endereco da proxy').Trim()
+            if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
+                throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
             }
-            3 { return '' }
-            default {
-                if (-not (Install-Tor)) {
-                    throw 'Tor nao conseguiu abrir um tunel TLS ate gateway.discord.gg. Nao vou cair para proxy publica.'
-                }
-                return "socks5://127.0.0.1:$TorPort"
-            }
+            return $manual
         }
+
+        if (-not (Install-Tor)) {
+            throw 'Tor nao conseguiu abrir um tunel TLS ate gateway.discord.gg. Nao vou usar uma proxy publica.'
+        }
+        return "socks5://127.0.0.1:$TorPort"
     }
 
     Write-Host ''
@@ -2569,8 +2561,8 @@ function Select-Proxy {
     Write-Host '        Baixa, valida SOCKS+TLS e deixa o daemon invisivel.' -ForegroundColor DarkGray
     Write-Host '    [2] Proxy minha' -ForegroundColor Cyan
     Write-Host '        socks5://host:porta ou https://host:porta' -ForegroundColor DarkGray
-    Write-Host '    [3] Proxy publica gratuita (opt-in)' -ForegroundColor Yellow
-    Write-Host '        So use se voce aceitar confiar em uma saida publica.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  O Enhanced nunca escolhe proxy publica por conta propria.' -ForegroundColor DarkGray
     Write-Host ''
 
     switch (Read-Escolha '  Escolha') {
@@ -2582,10 +2574,9 @@ function Select-Proxy {
             }
             return $manual
         }
-        '3' { return '' }
         default {
             if (-not (Install-Tor)) {
-                throw 'Tor nao conseguiu abrir um tunel TLS ate gateway.discord.gg. Nao vou cair para proxy publica.'
+                throw 'Tor nao conseguiu abrir um tunel TLS ate gateway.discord.gg. Nao vou usar uma proxy publica.'
             }
             return "socks5://127.0.0.1:$TorPort"
         }
