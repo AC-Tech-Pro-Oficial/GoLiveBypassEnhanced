@@ -165,6 +165,31 @@ assert(pluginInstaller.includes("GOLIVE_ENHANCED_REF") &&
        pluginInstaller.includes("^[0-9a-fA-F]{40}$"),
   "canonical installer must consume the pinned enhanced commit when provided");
 
+function occurrences(source, needle) {
+  return source.split(needle).length - 1;
+}
+for (const [source, label, markers] of [
+  [oneClick, "one-click wrapper", [
+    "function Show-KingcirSignature",
+    "function Detect-Mod",
+    "$installer = Join-Path $work 'GoLiveBypass-Installer.ps1'"
+  ]],
+  [pluginInstaller, "canonical installer", [
+    "$PluginDirName = 'goLiveBypass'",
+    "function Install-Tor",
+    "function Copy-Plugin",
+    "switch ($Mode)"
+  ]]
+]) {
+  for (const marker of markers) {
+    assert.strictEqual(
+      occurrences(source, marker),
+      1,
+      `${label} must contain exactly one ${marker} (duplicate script body detected)`
+    );
+  }
+}
+
 for (const marker of [
   "Restore-KnownGoLiveStandaloneInjections",
   "Test-KnownGoLiveStandaloneInjection",
