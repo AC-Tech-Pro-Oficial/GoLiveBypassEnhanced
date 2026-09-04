@@ -9,7 +9,31 @@ concurrency:
   group: enhanced-installer-plugin-verify-${{ github.ref }}
   cancel-in-progress: true
 
+
 jobs:
+  gui-security-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: golive-gui/package-lock.json
+
+      - name: Install GUI dependencies
+        working-directory: golive-gui
+        run: npm ci
+
+      - name: GUI tests
+        working-directory: golive-gui
+        run: npm test
+
+      - name: GUI TypeScript and Vite compile
+        working-directory: golive-gui
+        run: npm run compile
+
   tor-metadata:
     runs-on: ubuntu-latest
     steps:
