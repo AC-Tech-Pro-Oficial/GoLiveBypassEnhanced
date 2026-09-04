@@ -89,6 +89,10 @@ $TorUrls = @{
     }
 }
 $script:LastTorProbe = 'nao executado'
+$script:MigrationResetCritical = $false
+$script:MigrationReasons = [System.Collections.Generic.List[string]]::new()
+$script:MigrationBackupRoot = $null
+$script:ExternalBypassConflict = $false
 
 function Write-Step($text) { Write-Host "  [*] $text" -ForegroundColor DarkGray }
 function Write-Ok($text) { Write-Host "  [OK] $text" -ForegroundColor Green }
@@ -1167,16 +1171,224 @@ function Stop-Discord {
     throw 'O Discord nao fechou. Feche pelo icone na bandeja e rode de novo.'
 }
 
+function Add-MigrationReason([string]$reason) {
+    if (-not $reason) { return }
+    if (-not $script:MigrationReasons.Contains($reason)) {
+        $script:MigrationReasons.Add($reason)
+    }
+    $script:MigrationResetCritical = $true
+}
+
+function Get-MigrationBackupRoot {
+    if ($script:MigrationBackupRoot) { return $script:MigrationBackupRoot }
+
+    $root = Join-Path (Get-EffectiveLocalApp) "GoLiveBypass\backups\migration-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $script:MigrationBackupRoot = $root
+    return $root
+}
+
+function Backup-MigrationPath([string]$path, [string]$label) {
+    if (-not $path -or -not (Test-Path -LiteralPath $path)) { return $null }
+
+    $safe = ($label -replace '[^A-Za-z0-9._-]', '_')
+    $dest = Join-Path (Get-MigrationBackupRoot) $safe
+    $n = 1
+    while (Test-Path -LiteralPath $dest) {
+        $dest = Join-Path (Get-MigrationBackupRoot) "$safe-$n"
+        $n++
+    }
+
+    Copy-Item -LiteralPath $path -Destination $dest -Recurse -Force
+    return $dest
+}
+
+function Read-GoLiveInjectionContent([string]$resources) {
+    if (-not $resources) { return '' }
+    $parts = @()
+
+    try {
+        $asar = Join-Path $resources 'app.asar'
+        $index = Join-Path $asar 'index.js'
+        if (Test-Path -LiteralPath $index -PathType Leaf) {
+            $parts += [IO.File]::ReadAllText($index)
+        } elseif (Test-Path -LiteralPath $asar -PathType Leaf) {
+            $item = Get-Item -LiteralPath $asar
+            if ($item.Length -le 65536) {
+                $parts += [IO.File]::ReadAllText($asar)
+            }
+        }
+
+        $legacy = Join-Path $resources 'app\index.js'
+        if (Test-Path -LiteralPath $legacy -PathType Leaf) {
+            $parts += [IO.File]::ReadAllText($legacy)
+        }
+    } catch { }
+
+    return ($parts -join [Environment]::NewLine)
+}
+
+function Test-KnownGoLiveStandaloneInjection([string]$resources) {
+    if (-not $resources) { return $false }
+    $backup = Join-Path $resources '_app.asar'
+    if (-not (Test-Path -LiteralPath $backup)) { return $false }
+
+    $text = Read-GoLiveInjectionContent $resources
+    if (-not $text) { return $false }
+
+    return $text -match '(?i)golivebypass\.js'
+}
+
+function Restore-KnownGoLiveStandaloneInjections {
+    $found = @()
+    foreach ($resources in @(Get-DiscordResources)) {
+        if (Test-KnownGoLiveStandaloneInjection $resources) {
+            $found += [string]$resources
+        }
+    }
+    if ($found.Count -eq 0) { return }
+
+    Stop-Discord
+    foreach ($resources in $found) {
+        $asar = Join-Path $resources 'app.asar'
+        $backup = Join-Path $resources '_app.asar'
+
+        Write-Step "Removendo injecao standalone antiga em $resources"
+        [void](Backup-MigrationPath $asar 'standalone-app.asar')
+        Remove-CaminhoSilencioso $asar
+        Rename-Item -LiteralPath $backup -NewName 'app.asar' -Force
+        Write-Ok 'Backup original do Discord/mod restaurado.'
+    }
+
+    Add-MigrationReason 'injecao standalone antiga'
+}
+
+function Get-ModNativeSettingsFile($root) {
+    $settings = Get-ModSettingsFile $root
+    return (Join-Path (Split-Path -Parent $settings) 'native-settings.json')
+}
+
+function Reset-GoLiveNativeState($root) {
+    $file = Get-ModNativeSettingsFile $root
+    if (-not (Test-Path -LiteralPath $file)) { return }
+
+    $json = $null
+    try {
+        $json = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "O native-settings.json do mod esta corrompido; nao vou apagar configuracoes de outros plugins. Arquivo: $file"
+    }
+    if (-not $json -or -not $json.PSObject.Properties['plugins'] -or -not $json.plugins) { return }
+    if (-not $json.plugins.PSObject.Properties['GoLiveBypass']) { return }
+
+    $backup = Backup-MigrationPath $file "$(Get-CheckoutMod $root)-native-settings.json"
+    $json.plugins.PSObject.Properties.Remove('GoLiveBypass')
+    Save-Text $file ($json | ConvertTo-Json -Depth 20)
+
+    Write-Step "Estado nativo antigo do GoLiveBypass limpo (backup: $backup)"
+    Add-MigrationReason 'estado nativo/cache de roteamento antigo'
+}
+
+function Test-EnhancedPluginSource($root) {
+    $target = Join-Path $root "src\userplugins\$PluginDirName"
+    $manifest = Join-Path $target 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifest)) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $target 'rtcRecovery.ts'))) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $target 'rtcShim.ts'))) { return $false }
+
+    try {
+        $m = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        return $m.updater.id -eq 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced'
+    } catch {
+        return $false
+    }
+}
+
+function Remove-DuplicateGoLiveUserplugins($root) {
+    $userplugins = Join-Path $root 'src\userplugins'
+    if (-not (Test-Path -LiteralPath $userplugins)) { return }
+
+    $canonical = Join-Path $userplugins $PluginDirName
+    foreach ($dir in Get-ChildItem -LiteralPath $userplugins -Directory -Force -ErrorAction SilentlyContinue) {
+        if ($dir.FullName -eq $canonical) { continue }
+        if ($dir.Name.StartsWith('.')) { continue }
+
+        $looksLikeGoLive = $dir.Name -match '(?i)golive.*bypass'
+        $manifest = Join-Path $dir.FullName 'manifest.json'
+        if (-not $looksLikeGoLive -and (Test-Path -LiteralPath $manifest)) {
+            try {
+                $m = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+                $looksLikeGoLive = $m.updater.id -in @(
+                    'bezumiya/GoLiveBypass',
+                    'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced'
+                )
+            } catch { }
+        }
+
+        if (-not $looksLikeGoLive) { continue }
+
+        $backup = Backup-MigrationPath $dir.FullName "duplicate-$($dir.Name)"
+        Remove-CaminhoSilencioso $dir.FullName
+        Write-Step "Copia conflitante do GoLiveBypass removida de userplugins (backup: $backup)"
+        Add-MigrationReason "userplugin duplicado: $($dir.Name)"
+    }
+}
+
+function Check-ExternalBypassLaunchers {
+    $processes = @(Get-Process -Name 'DiscordGoLiveBypass' -ErrorAction SilentlyContinue)
+    if ($processes.Count -gt 0) {
+        Write-Warn 'Detectei DiscordGoLiveBypass.exe rodando em paralelo; ele tambem altera a rota do Discord.'
+        $processes | Stop-Process -Force -ErrorAction SilentlyContinue
+        Write-Step 'O processo externo foi fechado para esta instalacao; nao foi desinstalado.'
+        $script:ExternalBypassConflict = $true
+    }
+
+    try {
+        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $props = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -like 'PS*' -or -not ($p.Value -is [string])) { continue }
+            if ([string]$p.Value -match '(?i)DiscordGoLiveBypass') {
+                Write-Warn "Existe um launcher externo de bypass no inicio do Windows ($($p.Name)). Nao o removi."
+                $script:ExternalBypassConflict = $true
+            }
+        }
+    } catch { }
+}
+
+function Invoke-GoLiveCompatibilityMigration($root) {
+    if (-not $root) { return }
+
+    Remove-DuplicateGoLiveUserplugins $root
+
+    $target = Join-Path $root "src\userplugins\$PluginDirName"
+    if ((Test-Path -LiteralPath $target) -and -not (Test-EnhancedPluginSource $root)) {
+        Add-MigrationReason 'plugin GoLiveBypass antigo ou de outra origem'
+    }
+
+    if ($Tor) {
+        Reset-GoLiveNativeState $root
+    }
+
+    if ($script:MigrationReasons.Count -gt 0) {
+        Write-Warn "Migracao de instalacao anterior: $($script:MigrationReasons -join '; ')"
+    }
+}
+
 function Copy-Plugin($root) {
     if (-not $root) { throw 'Caminho do checkout invalido para copiar o plugin.' }
     $target = Join-Path $root "src\userplugins\$PluginDirName"
     Write-Step "Instalando o plugin em $target"
 
-    if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
-
-    # versoes antigas usavam index.ts; deixar os dois quebra o build
-    $stale = Join-Path $target 'index.ts'
-    if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
+    # Substituicao transacional da pasta inteira: versoes antigas deixaram index.ts,
+    # helpers e shims obsoletos que o TypeScript continuava compilando mesmo depois de
+    # os arquivos atuais serem copiados por cima.
+    if (Test-Path -LiteralPath $target) {
+        $backup = Backup-MigrationPath $target "$(Get-CheckoutMod $root)-goLiveBypass-source"
+        Remove-CaminhoSilencioso $target
+        Write-Step "Fonte anterior arquivado em $backup"
+    }
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
 
     foreach ($file in $PluginFiles) {
         $leaf = Split-Path -Leaf $file
