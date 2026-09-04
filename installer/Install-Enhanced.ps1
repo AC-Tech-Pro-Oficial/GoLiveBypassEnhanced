@@ -20,6 +20,26 @@ $ErrorActionPreference = 'Stop'
 $RepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1'
 $DiscordNames = @('Discord', 'DiscordPTB', 'DiscordCanary')
 
+function Show-KingcirSignature {
+    $art = @'
+                 .-=========-.
+                /             \
+               /   .-------.   \
+              /___/_________\___\
+                 / /     \ \
+                /_/       \_\
+
+      KINGCIR: Rei dos Doentes
+'@
+    Write-Host ''
+    Write-Host $art -ForegroundColor Magenta
+    Write-Host '      GoLiveBypassEnhanced installer' -ForegroundColor DarkGray
+    Write-Host ''
+    Start-Sleep -Seconds 3
+}
+
+Show-KingcirSignature
+
 function Get-EffectiveLocalApp {
     if ($env:LOCALAPPDATA -and (Test-Path -LiteralPath $env:LOCALAPPDATA)) { return $env:LOCALAPPDATA }
     try {
