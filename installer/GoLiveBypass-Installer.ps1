@@ -1425,6 +1425,75 @@ function Build-Mod($root) {
     }
 }
 
+function Assert-EnhancedBuildMarkers($root) {
+    $dist = Join-Path $root 'dist'
+    if (-not (Test-Path -LiteralPath $dist)) {
+        throw 'O build terminou sem criar a pasta dist.'
+    }
+
+    $files = @(Get-ChildItem -LiteralPath $dist -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in @('.js', '.cjs', '.mjs') })
+    if ($files.Count -eq 0) {
+        throw 'O build terminou sem bundles JavaScript em dist.'
+    }
+
+    foreach ($marker in @('viewer-video-parado', 'rtc.enhanced.status')) {
+        $found = $false
+        foreach ($file in $files) {
+            try {
+                if (Select-String -LiteralPath $file.FullName -Pattern $marker -SimpleMatch -Quiet) {
+                    $found = $true
+                    break
+                }
+            } catch { }
+        }
+        if (-not $found) {
+            throw "O build nao contem o marcador enhanced '$marker'; recusando injetar um bundle possivelmente antigo."
+        }
+    }
+
+    Write-Ok 'Build confirmado com RTC recovery enhanced.'
+}
+
+function Assert-EnhancedInstallState($root, $targets, $proxy) {
+    $plugin = Join-Path $root "src\userplugins\$PluginDirName"
+    foreach ($required in @('index.tsx', 'native.ts', 'rtcRecovery.ts', 'rtcShim.ts', 'manifest.json')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $plugin $required))) {
+            throw "Plugin enhanced incompleto depois do build: falta $required."
+        }
+    }
+
+    $manifest = Get-Content -LiteralPath (Join-Path $plugin 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') {
+        throw 'O plugin final nao aponta para o updater enhanced.'
+    }
+
+    foreach ($target in @($targets | Where-Object { $_.Tipo -eq 'O' })) {
+        if (Test-KnownGoLiveStandaloneInjection $target.Resources) {
+            throw "Ainda existe uma injecao standalone do GoLiveBypass em $($target.Resources)."
+        }
+
+        $injected = Get-InjectedPath $target.Resources
+        if (-not $injected -or -not $injected.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "O Discord $($target.Flavour) nao aponta para o checkout selecionado depois da injecao."
+        }
+    }
+
+    $settingsFile = Get-ModSettingsFile $root
+    $settings = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $glb = $settings.plugins.GoLiveBypass
+    if (-not $glb -or $glb.enabled -ne $true) { throw 'GoLiveBypass nao ficou habilitado.' }
+    if ($glb.proxy -ne $proxy) { throw "Proxy final diferente do esperado: $($glb.proxy)" }
+
+    if ($script:MigrationResetCritical) {
+        if ($glb.sessionRouting -ne 'gateway') { throw 'Migracao nao normalizou sessionRouting para gateway.' }
+        if ([string]$glb.voiceRegion -ne '') { throw 'Migracao nao normalizou voiceRegion para Automatic.' }
+        if ([string]$glb.streamRegion -ne '') { throw 'Migracao nao normalizou streamRegion para Automatic.' }
+    }
+
+    Write-Ok 'Layout final validado: mod + plugin enhanced + configuracao coerente.'
+}
+
 function Invoke-Injection($root, $targets) {
     if (-not $root) { throw 'Caminho do checkout invalido para injetar o mod.' }
     Push-Location -LiteralPath $root
@@ -1485,10 +1554,11 @@ function Start-Discord {
 }
 
 function Invoke-Install($root) {
-    # Em maquina limpa, instale o cliente oficial ANTES de gastar tempo clonando/buildando
-    # o mod. Nao redistribuimos um Discord alterado: baixamos do proprio Discord, conferimos
-    # Authenticode e so entao injetamos o mod/plugin localmente.
+    # Primeiro neutraliza concorrencia conhecida e restaura qualquer standalone antigo
+    # identificavel antes que pnpm inject decida qual app.asar deve guardar como original.
+    Check-ExternalBypassLaunchers
     Ensure-DiscordPatchTarget
+    Restore-KnownGoLiveStandaloneInjections
 
     $root = Select-Target $root
 
@@ -1507,8 +1577,15 @@ function Invoke-Install($root) {
     $permanent = Select-Persistence
 
     Install-Toolchain $false
+
+    # Discord precisa estar fechado antes de limpar native/settings: aberto, o mod pode
+    # regravar o estado antigo da memoria por cima da migracao.
+    Stop-Discord
+    Invoke-GoLiveCompatibilityMigration $root
+
     Copy-Plugin $root
     Build-Mod $root
+    Assert-EnhancedBuildMarkers $root
 
     $targets = @(Select-InjectionTargets @(Get-PatchTargets))
     $oficiais = @($targets | Where-Object { $_.Tipo -eq 'O' })
@@ -1531,6 +1608,7 @@ function Invoke-Install($root) {
     # Com o Discord fechado: aberto, ele regrava o settings.json a partir da memoria e
     # apaga o que escrevemos aqui.
     Set-PluginSettings $root $proxy
+    Assert-EnhancedInstallState $root $targets $proxy
 
     Start-Discord
 
@@ -1544,6 +1622,9 @@ function Invoke-Install($root) {
         Write-Host '  Proxy: gratuita, escolhida e testada sozinha a cada abertura' -ForegroundColor DarkGray
     }
     Write-Host '  Entre numa call e use Go Live ou a camera.' -ForegroundColor DarkGray
+    if ($script:ExternalBypassConflict) {
+        Write-Warn 'Nao abra o Discord por outro launcher de Go Live/proxy ao mesmo tempo; abra o Discord normalmente.'
+    }
 
     if (-not $permanent) {
         if ($weInjected) {
@@ -1614,14 +1695,10 @@ function Set-PluginSettings($root, $proxy) {
         try { $settings = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { $settings = 'ilegivel' }
     }
 
-    # Nunca reescrever por cima de um arquivo que nao deu para ler: isso apagaria todos os
-    # plugins da pessoa. Melhor guardar uma copia e deixar ela ativar o plugin na mao.
     if ($settings -is [string]) {
         $backup = "$file.bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
         Copy-Item -LiteralPath $file -Destination $backup -Force
-        Write-Warn "Nao consegui ler $file, entao nao mexi nele. Copia em $backup"
-        Write-Warn 'Ative o GoLiveBypass na mao em Configuracoes > Plugins.'
-        return
+        throw "Nao consegui ler $file. Nao vou sobrescrever configuracoes de outros plugins. Backup: $backup"
     }
 
     if ($null -eq $settings) { $settings = [pscustomobject]@{} }
@@ -1630,29 +1707,57 @@ function Set-PluginSettings($root, $proxy) {
         $settings | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{}) -Force
     }
 
+    # Remove aliases conhecidos/legados que poderiam deixar duas implementacoes do mesmo
+    # bypass habilitadas ao mesmo tempo. Nao toca em nenhum outro plugin.
+    foreach ($prop in @($settings.plugins.PSObject.Properties)) {
+        if ($prop.Name -eq 'GoLiveBypass') { continue }
+        if ($prop.Name -match '(?i)^GoLiveBypass(?:Enhanced|Legacy|Standalone)?$') {
+            $settings.plugins.PSObject.Properties.Remove($prop.Name)
+            Add-MigrationReason "entrada de settings conflitante: $($prop.Name)"
+        }
+    }
+
     $existing = $settings.plugins.PSObject.Properties['GoLiveBypass']
-    $plugin = if ($existing) { $existing.Value } else { [pscustomobject]@{} }
+    $plugin = if ($existing -and $existing.Value) { $existing.Value } else { [pscustomobject]@{} }
 
     $plugin | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
     $plugin | Add-Member -NotePropertyName proxy -NotePropertyValue $proxy -Force
-    if (-not $plugin.PSObject.Properties['excludedCountries']) {
+
+    if ($script:MigrationResetCritical) {
+        # Instalacao antiga/desconhecida: volta para a combinacao mais conservadora. Uma
+        # streamRegion velha/inexistente e um dos poucos settings capazes de afetar a
+        # negociacao de screen share mesmo quando o gateway ja foi liberado.
+        $plugin | Add-Member -NotePropertyName sessionRouting -NotePropertyValue 'gateway' -Force
+        $plugin | Add-Member -NotePropertyName voiceRegion -NotePropertyValue '' -Force
+        $plugin | Add-Member -NotePropertyName streamRegion -NotePropertyValue '' -Force
         $plugin | Add-Member -NotePropertyName excludedCountries -NotePropertyValue 'BR' -Force
+        Write-Step 'Configuracao critica antiga normalizada (gateway only; regioes Automatic).'
+    } else {
+        if (-not $plugin.PSObject.Properties['sessionRouting']) {
+            $plugin | Add-Member -NotePropertyName sessionRouting -NotePropertyValue 'gateway' -Force
+        }
+        if (-not $plugin.PSObject.Properties['voiceRegion']) {
+            $plugin | Add-Member -NotePropertyName voiceRegion -NotePropertyValue '' -Force
+        }
+        if (-not $plugin.PSObject.Properties['streamRegion']) {
+            $plugin | Add-Member -NotePropertyName streamRegion -NotePropertyValue '' -Force
+        }
+        if (-not $plugin.PSObject.Properties['excludedCountries']) {
+            $plugin | Add-Member -NotePropertyName excludedCountries -NotePropertyValue 'BR' -Force
+        }
     }
 
     $settings.plugins | Add-Member -NotePropertyName GoLiveBypass -NotePropertyValue $plugin -Force
-
-    Save-Text $file ($settings | ConvertTo-Json -Depth 10)
+    Save-Text $file ($settings | ConvertTo-Json -Depth 20)
 
     $written = $null
     try { $written = (Get-Content -LiteralPath $file -Raw | ConvertFrom-Json).plugins.GoLiveBypass } catch { }
-    if ($written -and $written.enabled) {
-        Write-Step "Plugin ativado em $file"
-    } else {
-        Write-Warn "Nao consegui confirmar a escrita em $file"
-        Write-Host '  Ative o GoLiveBypass na mao em Configuracoes > Plugins.' -ForegroundColor DarkGray
+    if (-not $written -or $written.enabled -ne $true) {
+        throw "Nao consegui confirmar GoLiveBypass habilitado em $file"
     }
-}
 
+    Write-Step "Plugin ativado em $file"
+}
 function Show-Status($root) {
     $discord = (Get-DiscordResources).Count
     $mod = Get-InstalledMod
