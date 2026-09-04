@@ -4,7 +4,7 @@ import {
   extrairSegredosDaProxy,
   l1Padroes, // eslint-disable-line
 } from "../electron/redact";
-import { redigir, segredosRemanescentes } from "../electron/redact";
+import { redigir, redigirLiterais, segredosRemanescentes } from "../electron/redact";
 
 const segredos = extrairSegredosDaProxy("socks5://maria:s3nha@proxy.maria.com.br:1080");
 
@@ -79,5 +79,18 @@ describe("cortarDoFim", () => {
     const cortado = cortarDoFim(texto, 1024);
     expect(cortado.startsWith("[...] linha")).toBe(true);
     expect(cortado.endsWith(linhas[linhas.length - 1])).toBe(true);
+  });
+});
+
+
+describe("redacao de caminhos locais", () => {
+  it("remove o caminho do perfil sem confundir com proxy", () => {
+    const texto = redigirLiterais(
+      "log em C:\\Users\\MBCJ\\AppData\\Local\\GoLiveBypass\\gui.log",
+      ["C:\\Users\\MBCJ"],
+      "<caminho-local>",
+    );
+    expect(texto).toBe("log em <caminho-local>\\AppData\\Local\\GoLiveBypass\\gui.log");
+    expect(texto).not.toContain("MBCJ");
   });
 });
