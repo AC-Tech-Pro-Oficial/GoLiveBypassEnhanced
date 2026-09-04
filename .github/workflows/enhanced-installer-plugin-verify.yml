@@ -86,6 +86,7 @@ jobs:
         run: |
           node tests/test-windows-enhanced-installer.cjs
           node tests/test-plugin-enhanced-rtc.cjs
+          node tests/test-enhanced-routing-policy.cjs
           node tests/test-enhanced-rtc-recovery.cjs
           node tests/test-native-rtc-recovery.cjs
           node tests/test-gateway-zumbi-revive.cjs
