@@ -62,14 +62,22 @@ export function extrairSegredosDaProxy(proxySalva: string): SegredosConhecidos {
   return segredos.filter((s) => s.length >= 3);
 }
 
-export function l2Segredos(texto: string, segredos: SegredosConhecidos): string {
+export function redigirLiterais(
+  texto: string,
+  valores: SegredosConhecidos,
+  marcador = "<dado-sensivel>",
+): string {
   let out = texto;
-  for (const s of segredos) {
+  for (const s of valores) {
     if (s.length < 3) continue;
-    // split/join em vez de replace com regex: segredo pode conter metacaracteres
-    out = out.split(s).join("<proxy-pessoal>");
+    // split/join em vez de replace com regex: o valor pode conter metacaracteres.
+    out = out.split(s).join(marcador);
   }
   return out;
+}
+
+export function l2Segredos(texto: string, segredos: SegredosConhecidos): string {
+  return redigirLiterais(texto, segredos, "<proxy-pessoal>");
 }
 
 export function redigir(texto: string, segredos: SegredosConhecidos, tokenApi?: string): string {
