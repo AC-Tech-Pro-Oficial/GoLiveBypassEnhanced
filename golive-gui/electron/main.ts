@@ -3034,11 +3034,10 @@ handleUi("get-diagnostic", (_event, payload: unknown) => {
   };
 });
 
-function readBugReportConfig(): { baseUrl: string; token: string } | null {
-  // Prioridade: settings.json da pasta compartilhada, depois env do processo.
-  // Sem os dois, o botao cai no form do GitHub (sem segredo embutido no binario).
+function readBugReportConfig(): { baseUrl: string } | null {
+  // A API de reports e publica e protegida por limites/rate limit no servidor.
+  // O antigo token compartilhado era extraivel do app e nao e mais usado.
   let url = (process.env.GOLIVE_BUG_API_URL || "").trim().replace(/\/$/, "");
-  let token = (process.env.GOLIVE_BUG_API_TOKEN || "").trim();
   try {
     const file = path.join(settingsDir(), "settings.json");
     if (fs.existsSync(file)) {
@@ -3046,19 +3045,21 @@ function readBugReportConfig(): { baseUrl: string; token: string } | null {
       if (typeof data.bugReportApiUrl === "string" && data.bugReportApiUrl.trim()) {
         url = data.bugReportApiUrl.trim().replace(/\/$/, "");
       }
-      if (typeof data.bugReportToken === "string" && data.bugReportToken.trim()) {
-        token = data.bugReportToken.trim();
-      }
     }
   } catch {
     /* ignore */
   }
-  if (!url || !token) return null;
-  return { baseUrl: url, token };
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return { baseUrl: url };
 }
-
 async function postBugReportToApi(
-  cfg: { baseUrl: string; token: string },
+  cfg: { baseUrl: string },
   title: string,
   description: string,
   status: string,
@@ -3082,7 +3083,6 @@ async function postBugReportToApi(
     const res = await fetch(endpoint, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${cfg.token}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
