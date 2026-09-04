@@ -510,12 +510,13 @@ try {
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
-) { return $inherited.ToLowerInvariant() }
+) {
+        return $inherited.ToLowerInvariant()
+    }
 
     $encoded = [Uri]::EscapeDataString($RepoBranch)
-    $uri = "https://api.github.com/repos/$RepoOwner/$RepoName/commits/$encoded"
     try {
-        $commit = Invoke-RestMethod -UseBasicParsing -Uri $uri -Headers @{
+        $commit = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$RepoOwner/$RepoName/commits/$encoded" -Headers @{
             'User-Agent' = 'GoLiveBypassEnhanced-Installer'
             'Accept' = 'application/vnd.github+json'
         } -TimeoutSec 20
