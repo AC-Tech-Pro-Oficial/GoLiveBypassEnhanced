@@ -18,6 +18,13 @@ describe("Electron renderer security boundary", () => {
     expect(preload).not.toContain("(window as any).api =");
   });
 
+  it("does not expose raw IPC event objects through notification callbacks", () => {
+    expect(preload).not.toContain("ipcRenderer.on('refresh-startup', callback)");
+    expect(preload).not.toContain("ipcRenderer.on('refresh-auto-update', callback)");
+    expect(preload).not.toContain("ipcRenderer.on('refresh-status', callback)");
+    expect(preload).toContain("ipcRenderer.on('refresh-startup', () => callback())");
+  });
+
   it("allows only the external hosts intentionally used by the UI", () => {
     expect(main).toContain('new Set(["github.com", "discord.gg"])');
     expect(main).toContain("function isTrustedExternalUrl");
