@@ -22,9 +22,6 @@ import {
 
 const BUG_API_URL = "https://api.skyplaceia.com/bugs/v1/reports";
 const BUG_BLOCK_STATUS_URL = "https://api.skyplaceia.com/bugs/v1/block-status";
-// Token compartilhado da API de bugs. Extraivel por design (app distribuido);
-// o escopo dele e so criar issue num repo publico, com rate limit por IP.
-const BUG_API_TOKEN = "c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511";
 
 const LOG_TAIL_BYTES = 96 * 1024; // cauda do gui.log / golivebypass.log
 // Teto total do bloco de log montado — abaixo dos 256KB que o servidor aceita
@@ -108,8 +105,7 @@ function installsDaSessao(dir: string): string[] {
 // Monta o bloco de log completo (ring buffer da GUI + caudas de arquivo), ja redigido.
 export function montarLog(
   dadosRaiz: string,
-  segredos: SegredosConhecidos,
-  tokenApi: string,
+  segredos: SegredosConhecidos
 ): string {
   const partes: string[] = [];
 
@@ -162,7 +158,7 @@ export function montarLog(
     }
   }
 
-  return redigir(partes.join("\n"), segredos, tokenApi);
+  return redigir(partes.join("\n"), segredos);
 }
 
 // Metadados tecnicos: diagnostico sem identificar a pessoa nem expor a saida escolhida.
@@ -225,7 +221,7 @@ export async function submitBugReport(
   const corpo: { title: string; description: string; log?: string; meta: Record<string, string> } = {
     title,
     description: redigirLiterais(
-      redigir(description, segredos, BUG_API_TOKEN),
+      redigir(description, segredos),
       caminhosLocais,
       "<caminho-local>",
     ),
@@ -238,7 +234,7 @@ export async function submitBugReport(
   };
   if (payload.includeLogs) {
     corpo.log = cortarDoFim(
-      redigirLiterais(montarLog(home, segredos, BUG_API_TOKEN), caminhosLocais, "<caminho-local>"),
+      redigirLiterais(montarLog(home, segredos), caminhosLocais, "<caminho-local>"),
       LOG_TOTAL_MAX,
     );
   }
@@ -247,7 +243,7 @@ export async function submitBugReport(
   if (payload.includeLogs) {
     const textoCompleto = JSON.stringify(corpo);
     const remanescentes = [
-      ...segredosRemanescentes(textoCompleto, segredos, BUG_API_TOKEN),
+      ...segredosRemanescentes(textoCompleto, segredos),
       ...caminhosLocais.filter(v => textoCompleto.includes(v)),
     ];
     if (remanescentes.length > 0) {
@@ -278,7 +274,6 @@ export async function submitBugReport(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${BUG_API_TOKEN}`,
       },
       body: JSON.stringify(corpo),
       signal: AbortSignal.timeout(15_000),
@@ -300,8 +295,7 @@ export async function submitBugReport(
         error: `Voce esta bloqueado por enviar reports em excesso. Tente de novo em ${retryAfter}s.`,
       };
     }
-    if (res.status === 401) return { ok: false, error: "Autenticacao recusada pelo servidor." };
-    if (res.status === 413) return { ok: false, error: "Report grande demais. Tente anexar menos logs." };
+        if (res.status === 413) return { ok: false, error: "Report grande demais. Tente anexar menos logs." };
 
     logger.error("report", "servidor recusou", { status: res.status });
     return { ok: false, error: `O servidor recusou o report (HTTP ${res.status}).` };
@@ -324,7 +318,7 @@ async function consultarBlockStatus(): Promise<{ blocked: boolean; retryAfter: n
   try {
     const res = await fetch(BUG_BLOCK_STATUS_URL, {
       method: "GET",
-      headers: { Authorization: `Bearer ${BUG_API_TOKEN}` },
+      headers: {},
       signal: AbortSignal.timeout(5_000),
     });
     if (res.status !== 200) return { blocked: false, retryAfter: 0 };
