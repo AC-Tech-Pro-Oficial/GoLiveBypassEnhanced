@@ -168,7 +168,7 @@ jobs:
           if (Get-Command winget -ErrorAction SilentlyContinue) { throw 'winget still visible in bare PATH.' }
 
           $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-          & $ps -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
+          & $ps -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $b='enhanced/rtc-viewer-recovery-v1'; $u='https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/'+[Uri]::EscapeDataString($b); $r=irm $u -Headers @{'User-Agent'='GoLiveBypassEnhanced-Installer'}; if([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$'){throw 'GitHub did not return a valid commit'}; $env:GOLIVE_ENHANCED_REF=[string]$r.sha; $s=irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify clean bootstrap result
@@ -275,7 +275,7 @@ jobs:
       - name: Migrate broken legacy install through public one-liner
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $b='enhanced/rtc-viewer-recovery-v1'; $u='https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/'+[Uri]::EscapeDataString($b); $r=irm $u -Headers @{'User-Agent'='GoLiveBypassEnhanced-Installer'}; if([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$'){throw 'GitHub did not return a valid commit'}; $env:GOLIVE_ENHANCED_REF=[string]$r.sha; $s=irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify legacy migration result
@@ -378,7 +378,7 @@ jobs:
       - name: Auto-detect and migrate Vencord through public one-liner
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $b='enhanced/rtc-viewer-recovery-v1'; $u='https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/'+[Uri]::EscapeDataString($b); $r=irm $u -Headers @{'User-Agent'='GoLiveBypassEnhanced-Installer'}; if([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$'){throw 'GitHub did not return a valid commit'}; $env:GOLIVE_ENHANCED_REF=[string]$r.sha; $s=irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify Vencord was preserved and normalized
