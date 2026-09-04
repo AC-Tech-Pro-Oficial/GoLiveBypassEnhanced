@@ -5,6 +5,10 @@ on:
     branches:
       - enhanced/rtc-viewer-recovery-v1
 
+concurrency:
+  group: enhanced-installer-plugin-verify-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tor-metadata:
     runs-on: ubuntu-latest
