@@ -157,7 +157,7 @@ const settings = definePluginSettings({
     },
     proxy: {
         type: OptionType.STRING,
-        description: "Proxy that carries the gateway connection, like socks5://127.0.0.1:9050 for Tor. Add a login as socks5://user:password@host:port when your proxy needs one. Leave empty and a free proxy is picked and tested for you, which means a stranger carries your login.",
+        description: "Trusted proxy that carries the gateway connection. Leave empty to auto-detect local Tor (recommended), or enter your own SOCKS5/HTTP proxy such as socks5://user:password@host:port. Enhanced never falls back to public proxy lists.",
         default: "",
         // Aceita usuario e senha antes do @. O trecho e casado com ganancia para a senha poder
         // conter @ e :, que e comum em credencial gerada por provedor.
