@@ -9,6 +9,7 @@ type CommandPair = {
 }
 
 const installerWindows = githubRawUrl('installer/GoLiveBypass-Installer.ps1')
+const enhancedWindows = githubRawUrl('installer/Install-Enhanced.ps1')
 const installerLinux = githubRawUrl('installer/golivebypass-installer.sh')
 const standaloneWindows = githubRawUrl('standalone/GoLiveBypass-Standalone.ps1')
 const standaloneLinux = githubRawUrl('standalone/golivebypass-standalone.sh')
@@ -21,9 +22,9 @@ const standaloneLinuxDirect = String.raw`tmp="$(mktemp -d "${posixTempPrefix}/go
 export const terminalCommands: Record<CommandPlatform, { plugin: CommandPair; standalone: CommandPair }> = {
   windows: {
     plugin: {
-      tui: String.raw`irm ${installerWindows} -OutFile $env:TEMP\glb-installer.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb-installer.ps1"`,
-      direct: String.raw`irm ${installerWindows} -OutFile $env:TEMP\glb-installer.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb-installer.ps1" -Mode Install -Mod Equicord -Yes`,
-      directNote: 'O comando direto usa Equicord. Troque por Vencord se esse for o seu mod.',
+      tui: String.raw`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm '${enhancedWindows}' | iex"`,
+      direct: String.raw`irm ${enhancedWindows} -OutFile $env:TEMP\glb-enhanced.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb-enhanced.ps1" -Mod Equicord`,
+      directNote: 'O primeiro comando detecta Vencord/Equicord e migra automaticamente. O direto força Equicord.',
     },
     standalone: {
       tui: String.raw`irm ${standaloneWindows} -OutFile $env:TEMP\glb-standalone.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb-standalone.ps1"`,
