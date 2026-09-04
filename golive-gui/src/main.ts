@@ -831,11 +831,22 @@ bugSubmit?.addEventListener('click', async () => {
       if (hint) hint.hidden = true;
       if (bugDialogTitle) bugDialogTitle.textContent = 'Obrigado!';
       if (bugSuccessLink) {
+        bugSuccessLink.replaceChildren();
         if (r.issueUrl) {
-          const n = r.issueNumber ? ` #${r.issueNumber}` : '';
-          bugSuccessLink.innerHTML = `<a href="${r.issueUrl}" target="_blank" rel="noopener">Ver issue${n} no GitHub →</a>`;
-        } else {
-          bugSuccessLink.textContent = '';
+          try {
+            const issue = new URL(r.issueUrl);
+            if (issue.protocol === 'https:' && issue.hostname === 'github.com') {
+              const n = r.issueNumber ? ` #${r.issueNumber}` : '';
+              const link = document.createElement('a');
+              link.href = issue.toString();
+              link.target = '_blank';
+              link.rel = 'noopener';
+              link.textContent = `Ver issue${n} no GitHub →`;
+              bugSuccessLink.append(link);
+            }
+          } catch {
+            // URL invalida vinda da API: o report continua enviado, apenas nao cria link.
+          }
         }
       }
       setBugStatus('', null);
