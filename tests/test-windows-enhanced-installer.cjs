@@ -128,17 +128,25 @@ assert(
   "legacy visible Tor startup must migrate safely"
 );
 
-for (const line of [
-  "########################",
-  "#                      #",
-  "#       KINGCIR        #"
+for (const marker of [
+  "[Console]::WindowWidth",
+  "[Console]::WindowHeight",
+  "[Console]::IsOutputRedirected",
+  "$middleRow",
+  "$visibleLabel",
+  "'#' * $width",
+  "Clear-Host"
 ]) {
-  assert(oneClick.includes(line), `one-click installer must contain approved KINGCIR square line: ${line}`);
+  assert(oneClick.includes(marker), `full-terminal KINGCIR splash missing ${marker}`);
 }
+assert(oneClick.includes("$label = 'KINGCIR'"),
+  "KINGCIR label must remain centered in the dynamic splash");
 assert(!oneClick.includes("KINGCIR: Rei dos Doentes"),
   "old KINGCIR subtitle must not remain in the splash");
-assert(oneClick.includes("Start-Sleep -Seconds 3"),
-  "KINGCIR signature must remain visible for three seconds before installation");
+assert(oneClick.includes("Start-Sleep -Seconds 2"),
+  "KINGCIR signature must remain visible for two seconds before installation");
+assert(!oneClick.includes("Start-Sleep -Seconds 3"),
+  "old three-second KINGCIR delay must not remain");
 
 assert(
   oneClick.includes("GoLiveBypass-Installer.ps1") &&
