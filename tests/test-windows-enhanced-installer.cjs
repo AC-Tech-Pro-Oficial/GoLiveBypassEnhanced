@@ -136,6 +136,13 @@ assert(pluginInstaller.includes("sessionRouting -NotePropertyValue 'gateway'") &
   "legacy installs must normalize routing and forced-region settings");
 assert(pluginInstaller.includes("DiscordGoLiveBypass"),
   "installer should detect the known external DiscordGoLiveBypass launcher conflict");
+assert(pluginInstaller.includes("external-bypass-run-entry.txt") &&
+       pluginInstaller.includes("Remove-ItemProperty -Path $runKey -Name $p.Name"),
+  "known conflicting launcher autostart must be backed up and disabled");
+assert(oneClick.includes("Read-BackupInjectionText") &&
+       oneClick.includes("$scores.Equicord += 1200") &&
+       oneClick.includes("$scores.Vencord += 1200"),
+  "wrapper must recover the pre-standalone active mod identity from _app.asar");
 assert(
   oneClick.includes("Restore-AccidentalStandalone"),
   "one-click path must repair machines affected by the old standalone command"
