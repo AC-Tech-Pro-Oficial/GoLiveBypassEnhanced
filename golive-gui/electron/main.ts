@@ -8,6 +8,7 @@ import {
   Tray,
   shell,
   clipboard,
+  session,
 } from "electron";
 import path, { dirname } from "path";
 import { fileURLToPath } from "url";
@@ -258,6 +259,7 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
     },
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
@@ -555,6 +557,12 @@ if (!gotLock) {
   app.on("second-instance", () => showWindow());
 
   app.whenReady().then(() => {
+    // A GUI local nao precisa de nenhuma permissao web privilegiada. Negar no nivel da
+    // session evita que uma futura regressao no renderer consiga pedir camera, microfone,
+    // geolocalizacao, USB, MIDI, notificacoes etc. O Discord e outro processo/session.
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.defaultSession.setPermissionCheckHandler(() => false);
+
     // Logger proprio: arquivo + ring buffer, captura console do main process.
     // O gui.log mora em <settingsDir>/logs/ — pasta estavel, sobrevive a updates.
     try {
