@@ -231,6 +231,10 @@
                 aria-live="polite"
               ></small>
             </div>
+            <small class="proxy-privacy-note">
+              Se você usar usuário/senha, essa URL fica salva localmente nas configurações do app/mod.
+              Ela é removida dos relatórios de bug, mas não é guardada em um cofre do Windows/macOS.
+            </small>
             <details class="vps-guide">
               <summary>Como montar uma VPS (saída estável)</summary>
               <ol>
@@ -389,7 +393,7 @@
           <div class="bug-dialog__backdrop" id="bugBackdrop"></div>
           <div class="bug-dialog__panel" role="document">
             <h2 id="bugDialogTitle" class="bug-dialog__title">Reportar bug</h2>
-            <p class="bug-dialog__hint">Descreva o problema. Logs da sessão são incluídos automaticamente — sua proxy é removida antes de enviar.</p>
+            <p class="bug-dialog__hint">Descreva o problema. O envio cria uma <strong>issue pública no GitHub</strong>. Logs da sessão vêm marcados por padrão; credenciais/proxy são redigidas antes do envio e você pode desmarcar os logs.</p>
             <div id="bugForm">
               <label class="bug-field">
                 <span>Resumo *</span>
