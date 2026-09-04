@@ -21,17 +21,55 @@ $RepoRaw = 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEn
 $DiscordNames = @('Discord', 'DiscordPTB', 'DiscordCanary')
 
 function Show-KingcirSignature {
-    $art = @'
-########################
-#                      #
-#       KINGCIR        #
-#                      #
-########################
-'@
-    Write-Host ''
-    Write-Host $art -ForegroundColor Magenta
-    Write-Host ''
-    Start-Sleep -Seconds 3
+    $fallbackWidth = 24
+    $fallbackHeight = 5
+    $width = $fallbackWidth
+    $height = $fallbackHeight
+    $interactiveViewport = $false
+
+    try {
+        # Em um console real, usa a area visivel inteira. Em pipe/CI/host sem viewport,
+        # Console.WindowWidth/Height pode lançar ou devolver valores estranhos; nesse caso
+        # o splash compacto continua funcionando sem poluir centenas de linhas de log.
+        if (-not [Console]::IsOutputRedirected) {
+            $candidateWidth = [Console]::WindowWidth
+            $candidateHeight = [Console]::WindowHeight
+            if ($candidateWidth -ge 12 -and $candidateHeight -ge 5) {
+                $width = $candidateWidth
+                $height = $candidateHeight
+                $interactiveViewport = $true
+            }
+        }
+    } catch { }
+
+    $label = 'KINGCIR'
+    $innerWidth = [Math]::Max(1, $width - 2)
+    $labelWidth = [Math]::Min($label.Length, $innerWidth)
+    $visibleLabel = $label.Substring(0, $labelWidth)
+    $left = [Math]::Floor(($innerWidth - $visibleLabel.Length) / 2)
+    $right = $innerWidth - $visibleLabel.Length - $left
+    $middleRow = [Math]::Floor(($height - 1) / 2)
+
+    if ($interactiveViewport) {
+        try { Clear-Host } catch { }
+    }
+
+    for ($row = 0; $row -lt $height; $row++) {
+        if ($row -eq 0 -or $row -eq ($height - 1)) {
+            $line = '#' * $width
+        } elseif ($row -eq $middleRow) {
+            $line = '#' + (' ' * $left) + $visibleLabel + (' ' * $right) + '#'
+        } else {
+            $line = '#' + (' ' * $innerWidth) + '#'
+        }
+        Write-Host $line -ForegroundColor Magenta
+    }
+
+    Start-Sleep -Seconds 2
+
+    if ($interactiveViewport) {
+        try { Clear-Host } catch { }
+    }
 }
 
 Show-KingcirSignature
