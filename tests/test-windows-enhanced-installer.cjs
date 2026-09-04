@@ -91,6 +91,17 @@ assert(
   pluginInstaller.includes("SHA-256 oficial do Node.js confere"),
   "missing winget/Node must use a checksum-verified user-local Node fallback"
 );
+for (const marker of [
+  ".golive-source-commit",
+  "VENCORD_HASH",
+  "VENCORD_REMOTE",
+  "EQUICORD_HASH",
+  "EQUICORD_REMOTE",
+  "Vendicated/Vencord",
+  "Equicord/Equicord"
+]) {
+  assert(pluginInstaller.includes(marker), `archive build metadata fallback missing ${marker}`);
+}
 assert(
   !pluginInstaller.includes("if ($Yes) { return '' }"),
   "-Yes must never silently select public proxies"
