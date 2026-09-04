@@ -135,4 +135,15 @@ console.log("Vencord/Equicord enhanced RTC parity contract: OK");
 
   assert(index.includes("Enhanced never falls back to public proxy lists."),
     "plugin settings must state the enhanced trust policy");
+
+  for (const removed of [
+    "FREE_PROXY_API",
+    "rankFreeProxies(",
+    "sharedFreeExit(",
+    "function readPool(",
+    "function writePool(",
+    "function firstTunnel("
+  ]) {
+    assert(!native.includes(removed), `public proxy subsystem must be absent from enhanced plugin: ${removed}`);
+  }
 })();
