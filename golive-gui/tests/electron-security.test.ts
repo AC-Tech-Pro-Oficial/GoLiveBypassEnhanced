@@ -86,4 +86,14 @@ describe("Electron renderer security boundary", () => {
     }
   });
 
+
+  it("requires hardened notarized macOS release configuration", () => {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "package.json"), "utf8"));
+    expect(pkg.build.mac.identity).not.toBe(null);
+    expect(pkg.build.mac.hardenedRuntime).toBe(true);
+    expect(pkg.build.mac.notarize).toBe(true);
+    expect(pkg.build.mac.entitlements).toBe("build/entitlements.mac.plist");
+    expect(pkg.build.mac.entitlementsInherit).toBe("build/entitlements.mac.inherit.plist");
+  });
+
 });
