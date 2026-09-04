@@ -1384,33 +1384,67 @@ function Invoke-GoLiveCompatibilityMigration($root) {
 
 function Copy-Plugin($root) {
     if (-not $root) { throw 'Caminho do checkout invalido para copiar o plugin.' }
-    $target = Join-Path $root "src\userplugins\$PluginDirName"
-    Write-Step "Instalando o plugin em $target"
 
-    # Substituicao transacional da pasta inteira: versoes antigas deixaram index.ts,
-    # helpers e shims obsoletos que o TypeScript continuava compilando mesmo depois de
-    # os arquivos atuais serem copiados por cima.
-    if (Test-Path -LiteralPath $target) {
-        $backup = Backup-MigrationPath $target "$(Get-CheckoutMod $root)-goLiveBypass-source"
-        Remove-CaminhoSilencioso $target
-        Write-Step "Fonte anterior arquivado em $backup"
-    }
-    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    $userplugins = Join-Path $root 'src\userplugins'
+    $target = Join-Path $userplugins $PluginDirName
+    $stage = Join-Path $userplugins ('.' + $PluginDirName + '.stage-' + $PID)
 
-    foreach ($file in $PluginFiles) {
-        $leaf = Split-Path -Leaf $file
-        if (-not $PluginSource -or [string]::IsNullOrWhiteSpace($PluginSource)) {
-            Save-Text (Join-Path $target $leaf) (Get-RepoFile $file)
-            continue
+    Write-Step "Preparando plugin enhanced antes de substituir $target"
+
+    Remove-CaminhoSilencioso $stage
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+    try {
+        # Primeiro materializa TODOS os arquivos no stage. Se GitHub/rede/local source falhar
+        # aqui, o plugin anterior ainda esta 100% intacto.
+        foreach ($file in $PluginFiles) {
+            $leaf = Split-Path -Leaf $file
+            $dest = Join-Path $stage $leaf
+
+            if (-not $PluginSource -or [string]::IsNullOrWhiteSpace($PluginSource)) {
+                Save-Text $dest (Get-RepoFile $file)
+            } else {
+                $local = Join-Path $PluginSource $leaf
+                if (-not (Test-Path -LiteralPath $local)) { throw "Nao achei $leaf em $PluginSource." }
+                Copy-Item -LiteralPath $local -Destination $dest -Force
+            }
+
+            if (-not (Test-Path -LiteralPath $dest) -or (Get-Item -LiteralPath $dest).Length -eq 0) {
+                throw "O arquivo enhanced $leaf nao foi materializado corretamente."
+            }
         }
 
-        $local = Join-Path $PluginSource $leaf
-        if (-not (Test-Path -LiteralPath $local)) { throw "Nao achei $leaf em $PluginSource." }
-        Copy-Item -LiteralPath $local -Destination (Join-Path $target $leaf) -Force
-    }
+        foreach ($required in @('index.tsx', 'native.ts', 'rtcRecovery.ts', 'rtcShim.ts', 'manifest.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $stage $required))) {
+                throw "Stage enhanced incompleto: falta $required."
+            }
+        }
 
-    if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
-        Write-Warn "Plugin copiado de $PluginSource, e nao do GitHub."
+        try {
+            $manifest = Get-Content -LiteralPath (Join-Path $stage 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') {
+                throw 'manifest.json do stage nao pertence ao enhanced fork.'
+            }
+        } catch {
+            throw "Stage enhanced tem manifest invalido: $($_.Exception.Message)"
+        }
+
+        # Somente depois do stage completo fazemos o swap. O anterior fica arquivado.
+        if (Test-Path -LiteralPath $target) {
+            $backup = Backup-MigrationPath $target "$(Get-CheckoutMod $root)-goLiveBypass-source"
+            Write-Step "Fonte anterior arquivado em $backup"
+            Remove-CaminhoSilencioso $target
+        }
+
+        Move-Item -LiteralPath $stage -Destination $target -Force
+        Write-Step "Plugin enhanced instalado atomicamente em $target"
+
+        if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
+            Write-Warn "Plugin copiado de $PluginSource, e nao do GitHub."
+        }
+    } catch {
+        Remove-CaminhoSilencioso $stage
+        throw
     }
 }
 
