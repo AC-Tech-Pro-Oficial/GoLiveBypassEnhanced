@@ -1,6 +1,6 @@
-import { ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
-(window as any).api = {
+const api = {
   platform: process.platform,
   activate: (proxy?: string, confirmOverride?: boolean) =>
     ipcRenderer.invoke('activate', proxy, !!confirmOverride),
@@ -46,3 +46,5 @@ import { ipcRenderer } from 'electron';
   setTheme: (theme: string) => ipcRenderer.send('set-theme', theme),
   reportBug: (payload: { title: string; description: string; includeLogs: boolean }) => ipcRenderer.invoke('report-bug', payload),
 };
+
+contextBridge.exposeInMainWorld('api', api);
