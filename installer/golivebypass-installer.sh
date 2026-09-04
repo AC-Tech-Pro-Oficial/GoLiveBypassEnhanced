@@ -145,7 +145,7 @@ fail() {
 banner() {
     printf '\n  %sGoLiveBypass%s\n' "$C_CYAN$C_BOLD" "$C_OFF"
     printf '  %sGo Live e camera de volta no Discord%s\n' "$C_DIM" "$C_OFF"
-    printf '  %shttps://github.com/bezumiya/GoLiveBypass%s\n\n' "$C_DIM" "$C_OFF"
+    printf '  %shttps://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced%s\n\n' "$C_DIM" "$C_OFF"
 }
 
 confirm() {
@@ -161,11 +161,10 @@ confirm() {
 
 # =========================================================================== Report de bugs
 # Quando o instalador falha, monta um diagnostico (versao, OS, log sanitizado) e chama
-# a mesma API de bugs da GUI. A issue abre automaticamente no bezumiya/GoLiveBypass.
+# a mesma API publica e rate-limited da GUI. Nenhum segredo de cliente e distribuido.
 # O envio NUNCA bloqueia o fluxo.
 
 BUG_API_URL="https://api.skyplaceia.com/bugs/v1/reports"
-BUG_API_TOKEN="c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511"
 
 report_sanitize() {
     local texto="$1"
@@ -173,6 +172,21 @@ report_sanitize() {
     texto="$(printf '%s' "$texto" | sed -E 's/\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b/***/g')"
     texto="$(printf '%s' "$texto" | sed -E 's#(https://gateway[^ ?]+)\?[^ ]*#\1?<params>#g')"
     printf '%s' "$texto"
+}
+
+report_json_quote() {
+    # JSON string POSIX: escapa barra/aspas/CR/TAB e transforma linhas em \\n.
+    # O sender antigo escapava so aspas; diagnostico multiline virava JSON invalido.
+    awk 'BEGIN { ORS=""; printf "\"" }
+         {
+           gsub(/\\/, "\\\\");
+           gsub(/"/, "\\"");
+           gsub(/\r/, "\\r");
+           gsub(/\t/, "\\t");
+           if (NR > 1) printf "\\n";
+           printf "%s", $0
+         }
+         END { printf "\"" }'
 }
 
 report_send() {
@@ -199,20 +213,37 @@ report_send() {
         printf '%s %s\n' "$sig" "$(date +%s)" > "$state" 2>/dev/null || true
     fi
 
+    local corpo title_json desc_json json
     corpo="$(report_sanitize "$descricao")"
-    json="$(printf '{"title":"%s","description":"%s","includeLogs":true}' \
-        "$(printf '%s' "$titulo" | sed 's/"/\\"/g')" \
-        "$(printf '%s' "$corpo" | sed 's/"/\\"/g')")"
+    title_json="$(printf '%s' "$titulo" | report_json_quote)"
+    desc_json="$(printf '%s' "$corpo" | report_json_quote)"
+    json="{\"title\":$title_json,\"description\":$desc_json}"
+
     if have curl; then
-        curl -fsS -X POST "$BUG_API_URL" -H "Authorization: Bearer $BUG_API_TOKEN" -H "Content-Type: application/json" -d "$json" >/dev/null 2>&1 && return 0
+        curl -fsS --max-time 15 -X POST "$BUG_API_URL" \
+            -H "Content-Type: application/json" \
+            -d "$json" >/dev/null 2>&1 && return 0
     elif have wget; then
-        echo "$json" | wget -qO- --post-data=- --header="Authorization: Bearer $BUG_API_TOKEN" --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
+        echo "$json" | wget -qO- --timeout=15 --post-data=- \
+            --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
     fi
     return 1
 }
 
 report_error() {
-    local titulo="$1" desc=""
+    local titulo="$1"
+
+    # O destino e uma issue publica. Sem TTY/consentimento, nada sai da maquina.
+    [ "${ASSUME_YES:-0}" -eq 1 ] && return 1
+    [ -t 0 ] || return 1
+    printf '  Enviar diagnostico sanitizado para uma issue publica do GoLiveBypassEnhanced? [s/N] ' >&2
+    local consent
+    read -r consent || return 1
+    case "$consent" in [sSyY]*) ;; *)
+        printf '  %s[i]%s Relatorio nao enviado.\n' "$C_DIM" "$C_OFF" >&2
+        return 0
+        ;;
+    esac desc=""
     # INSTALL_DIR nao eh setado neste script (era de uma versao antiga da GUI). O log
     # do bypass fica em ${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/golivebypass.log,
     # o mesmo que a GUI e o standalone usam. Fallback para o path do log se existir.
