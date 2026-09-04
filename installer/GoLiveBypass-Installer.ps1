@@ -668,23 +668,62 @@ function Hide-ProxySecret($proxy) {
 # quebra com "Cannot find matching keyid". So testar se o comando existe nao prova nada.
 $script:PnpmVersion = ''
 
-function Test-Pnpm {
-    if (-not (Test-Tool 'pnpm')) { return $false }
+function Get-PnpmVersion {
+    if (-not (Test-Tool 'pnpm')) { return $null }
+    try { $found = & pnpm --version 2>$null } catch { return $null }
+    if ($LASTEXITCODE -ne 0) { return $null }
 
-    # Um atalho do corepack existe mesmo quando nao funciona, entao a unica prova que vale e
-    # executar. O 2>$null evita assustar quem so vai ver a instalacao seguir depois.
-    # A saida e capturada inteira antes de olhar o codigo. Filtrar com Select-Object no meio do
-    # cano interrompe o comando por cima, e o codigo de saida deixa de valer: um pnpm que
-    # funciona era reprovado.
-    # O atalho do corepack pode nao so falhar como EXPLODIR: a pergunta "Corepack is about to
-    # download" sem resposta vira erro terminante por causa do ErrorActionPreference=Stop daqui.
-    # Sem o try/catch a excecao escapava do probe e derrubava o instalador inteiro, em vez de
-    # cair no npm install -g. Relato real: o instalador morria apontando a linha 16 do shim.
-    try { $found = & pnpm --version 2>$null } catch { return $false }
-    if ($LASTEXITCODE -ne 0) { return $false }
+    $version = [string]($found | Select-Object -First 1)
+    if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { return $null }
+    return $version.Trim()
+}
 
-    $script:PnpmVersion = ($found | Select-Object -First 1)
-    return $true
+function Test-Pnpm([string]$expected = '') {
+    $found = Get-PnpmVersion
+    if (-not $found) { return $false }
+    $script:PnpmVersion = $found
+    return [string]::IsNullOrWhiteSpace($expected) -or $found -eq $expected
+}
+
+function Get-RequiredPnpmVersion($root) {
+    if (-not $root) { throw 'Caminho do checkout ausente ao resolver a versao do pnpm.' }
+    $packageFile = Join-Path $root 'package.json'
+    if (-not (Test-Path -LiteralPath $packageFile)) {
+        throw "Nao achei package.json em $root para resolver a versao do pnpm."
+    }
+
+    try {
+        $package = Get-Content -LiteralPath $packageFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "Nao consegui ler $packageFile para resolver a versao do pnpm."
+    }
+
+    $manager = [string]$package.packageManager
+    if ($manager -notmatch '^pnpm@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+        throw "O checkout nao declarou uma versao exata de pnpm em packageManager (recebido '$manager')."
+    }
+    return $matches[1]
+}
+
+function Ensure-PnpmForCheckout($root) {
+    $required = Get-RequiredPnpmVersion $root
+    if (Test-Pnpm $required) {
+        Write-Ok "pnpm $required (igual ao packageManager do checkout)"
+        return
+    }
+
+    $current = Get-PnpmVersion
+    if ($current) {
+        Write-Step "O checkout pede pnpm $required; substituindo pnpm $current."
+    } else {
+        Write-Step "O checkout pede pnpm $required; preparando essa versao."
+    }
+
+    Install-Pnpm $required
+    if (-not (Test-Pnpm $required)) {
+        throw "O checkout pede pnpm $required, mas a versao ativa ficou '$($script:PnpmVersion)'."
+    }
+    Write-Ok "pnpm $required pronto para este checkout"
 }
 
 function Update-PathFromEnvironment {
@@ -1029,70 +1068,49 @@ function Show-ModChoice {
     }
 }
 
-function Install-Pnpm {
-    # O corepack vem ligado no Node 22 e cria um atalho do pnpm que quebra na primeira
-    # execucao: as chaves de assinatura embutidas estao velhas ("Cannot find matching
-    # keyid") ou ele pergunta "Corepack is about to download..." e, sem quem responder,
-    # derruba o instalador. Desligar o corepack tira esse atalho do caminho; quem ja tiver
-    # o pnpm de verdade instalado passa a ser encontrado de novo.
-    # "disable pnpm", e nao "disable" seco: o segundo leva o atalho do yarn junto, e o yarn
-    # nao e nosso para desligar. Esta funcao so roda com o pnpm ja reprovado no Test-Pnpm,
-    # entao quem tem um corepack que funciona nunca passa por aqui.
-    if (Test-Tool 'corepack') {
-        Write-Step 'Desligando o atalho quebrado do pnpm no corepack'
-        & corepack disable pnpm 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) { Update-PathFromEnvironment }
+function Install-Pnpm([string]$version) {
+    if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+        throw "Versao de pnpm invalida: '$version'."
     }
 
-    if (Test-Pnpm) { return }
+    # Corepack pode deixar um shim quebrado na frente do npm global. Desabilitamos somente
+    # o pnpm; yarn e outros gerenciadores do usuario nao sao nossos para alterar.
+    if (Test-Tool 'corepack') {
+        try {
+            & corepack disable pnpm 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { Update-PathFromEnvironment }
+        } catch { }
+    }
 
-    Write-Step 'Instalando o pnpm pelo npm'
-    & npm install -g pnpm | Out-Host
+    if (Test-Pnpm $version) { return }
+
+    $package = "pnpm@$version"
+    Write-Step "Instalando $package pelo npm"
+    & npm install -g $package --no-audit --no-fund | Out-Host
 
     if ($LASTEXITCODE -eq 0) {
         Update-PathFromEnvironment
-        if (Test-Pnpm) { return }
+        if (Test-Pnpm $version) { return }
     }
 
-    # O npm global mora na pasta do Node; com o Node instalado em "Arquivos de Programas"
-    # (o instalador padrao do site), escrever ali exige admin e o npm falha com EPERM.
-    # Num prefixo dentro do perfil o npm escreve sem admin, e o pnpm entra no PATH desta
-    # sessao e fica registrado no PATH do usuario para as proximas.
-    Write-Step 'O npm nao conseguiu escrever na pasta global; instalando num prefixo do seu perfil'
-    $pnpmHome = Join-Path $env:LOCALAPPDATA 'pnpm-global'
-    & npm install -g --prefix $pnpmHome pnpm | Out-Host
+    # Sem admin, o prefixo global do Node pode ser somente leitura. Instala exatamente a
+    # mesma versao dentro do perfil do usuario e adiciona apenas esse prefixo ao PATH.
+    Write-Step "Instalando $package num prefixo do seu perfil (sem admin)"
+    $pnpmHome = Join-Path (Get-EffectiveLocalApp) 'GoLiveBypass\Toolchain\pnpm-global'
+    New-Item -ItemType Directory -Path $pnpmHome -Force | Out-Null
+    & npm install -g --prefix $pnpmHome $package --no-audit --no-fund | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        throw 'O npm nao conseguiu instalar o pnpm. Rode "npm install -g pnpm" num terminal como administrador e tente de novo.'
+        throw "O npm nao conseguiu instalar $package."
     }
 
-    $env:Path = "$pnpmHome;$env:Path"
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($userPath -notlike "*$pnpmHome*") {
-        [Environment]::SetEnvironmentVariable('Path', "$pnpmHome;$userPath", 'User')
-    }
+    # npm global em Windows grava os shims na raiz do prefixo; em alguns layouts eles ficam
+    # em bin. Colocamos ambos na sessao e persistimos somente a raiz no PATH do usuario.
+    Add-UserPathEntry $pnpmHome
+    $pnpmBin = Join-Path $pnpmHome 'bin'
+    if (Test-Path -LiteralPath $pnpmBin) { $env:Path = "$pnpmBin;$env:Path" }
 
-    if (-not (Test-Pnpm)) {
-        # Ultimo recurso, e o mais robusto: o instalador oficial baixa o binario standalone
-        # do pnpm (que nem precisa do Node instalado) para %LOCALAPPDATA%\pnpm, sem admin
-        # e sem depender do npm. O instalador pode ser 5.1 (sem verificacao de assinatura)
-        # e ainda assim valida o checksum por baixo.
-        Write-Step 'Baixando o pnpm do site oficial (pasta do usuario, sem admin)'
-        $installer = Join-Path $env:TEMP 'install-pnpm.ps1'
-        try {
-            Invoke-WebRequest -UseBasicParsing -Uri 'https://get.pnpm.io/install.ps1' -OutFile $installer
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $installer 2>&1 | Out-Host
-        } catch {
-            Write-Step 'O download do site oficial falhou; seguindo para a checagem final.'
-        }
-        Update-PathFromEnvironment
-        # O setup do pnpm grava o PATH do usuario; no caso de nao ter gravado, os dois
-        # caminhos possiveis (com e sem \bin) entram aqui na sessao.
-        $pnpmHome = Join-Path $env:LOCALAPPDATA 'pnpm'
-        $env:Path = "$pnpmHome\bin;$pnpmHome;$env:Path"
-    }
-
-    if (-not (Test-Pnpm)) {
-        throw 'Nao consegui deixar o pnpm funcionando. Abra um terminal e rode: npm install -g pnpm'
+    if (-not (Test-Pnpm $version)) {
+        throw "Instalei $package, mas o comando pnpm $version nao ficou acessivel."
     }
 }
 
@@ -1260,9 +1278,6 @@ function Install-Toolchain($needGit) {
     if ($needGit -and -not (Test-Tool 'git')) {
         Write-Step 'Git nao encontrado; o mod sera obtido por source archive oficial do GitHub.'
     }
-
-    if (-not (Test-Pnpm)) { Install-Pnpm }
-    Write-Ok "pnpm $script:PnpmVersion"
 }
 
 function Install-Mod($choice) {
@@ -1800,6 +1815,7 @@ function Invoke-Install($root) {
     $permanent = Select-Persistence
 
     Install-Toolchain $false
+    Ensure-PnpmForCheckout $root
 
     # Discord precisa estar fechado antes de limpar native/settings: aberto, o mod pode
     # regravar o estado antigo da memoria por cima da migracao.
