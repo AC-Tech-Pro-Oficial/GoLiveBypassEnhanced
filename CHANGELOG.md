@@ -1,5 +1,10 @@
 # Changelog
 
+- Changes the Windows one-line splash to a full-terminal `KINGCIR` frame for two seconds, with a compact fallback for redirected/non-interactive output.
+- Hardens the Electron GUI boundary: `nodeIntegration: false`, `contextIsolation: true`, `contextBridge` preload API, trusted external-link allowlist, and wrapped IPC notifications that do not expose Electron event objects.
+- Redacts local user/home paths from public bug reports and blocks submission if a known local path survives the final privacy scan.
+- Adds an explicit GUI tests + TypeScript/Vite compile job to the enhanced verification workflow.
+
 ## Enhanced fork — RTC recovery v1
 
 ### Changed
