@@ -139,6 +139,119 @@ jobs:
 
           Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
+      - name: Simulate broken legacy GoLiveBypass install
+        shell: powershell
+        run: |
+          $resources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $resources) { throw 'Discord resources missing before legacy simulation.' }
+
+          $appAsar = Join-Path $resources.FullName 'app.asar'
+          $backupAsar = Join-Path $resources.FullName '_app.asar'
+          if (-not (Test-Path $backupAsar)) { throw 'Expected mod _app.asar backup is missing.' }
+
+          # Model the old standalone installer: restore original app.asar, back it up,
+          # then replace app.asar with a directory stub that requires golivebypass.js.
+          Remove-Item -LiteralPath $appAsar -Recurse -Force
+          Rename-Item -LiteralPath $backupAsar -NewName 'app.asar' -Force
+          Rename-Item -LiteralPath $appAsar -NewName '_app.asar' -Force
+          New-Item -ItemType Directory -Path $appAsar -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $appAsar 'package.json') -Value '{"main":"index.js"}' -Encoding UTF8
+          $legacyJs = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\golivebypass.js'
+          New-Item -ItemType Directory -Path (Split-Path -Parent $legacyJs) -Force | Out-Null
+          Set-Content -LiteralPath $legacyJs -Value '// old broken standalone' -Encoding UTF8
+          Set-Content -LiteralPath (Join-Path $appAsar 'index.js') -Value ('require(' + ($legacyJs | ConvertTo-Json -Compress) + ');') -Encoding UTF8
+
+          $equicord = Join-Path $env:USERPROFILE 'Equicord'
+          $plugin = Join-Path $equicord 'src\userplugins\goLiveBypass'
+          Set-Content -LiteralPath (Join-Path $plugin 'legacy.ts') -Value 'export const stale = true;' -Encoding UTF8
+          $manifestFile = Join-Path $plugin 'manifest.json'
+          $manifest = Get-Content $manifestFile -Raw | ConvertFrom-Json
+          $manifest.updater.id = 'bezumiya/GoLiveBypass'
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestFile -Encoding UTF8
+
+          $settingsFile = Join-Path $env:APPDATA 'Equicord\settings\settings.json'
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          $glb = $settings.plugins.GoLiveBypass
+          $glb.proxy = 'socks5://127.0.0.1:9050'
+          $glb.sessionRouting = 'login'
+          $glb.voiceRegion = 'brazil'
+          $glb.streamRegion = 'brazil'
+          $settings.plugins | Add-Member -NotePropertyName GoLiveBypassLegacy -NotePropertyValue ([pscustomobject]@{ enabled = $true }) -Force
+          $settings.plugins | Add-Member -NotePropertyName UnrelatedPlugin -NotePropertyValue ([pscustomobject]@{ enabled = $true; keep = 42 }) -Force
+          $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsFile -Encoding UTF8
+
+          $nativeFile = Join-Path $env:APPDATA 'Equicord\settings\native-settings.json'
+          $native = if (Test-Path $nativeFile) { Get-Content $nativeFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+          if (-not $native.PSObject.Properties['plugins']) {
+            $native | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{}) -Force
+          }
+          $native.plugins | Add-Member -NotePropertyName UnrelatedNativePlugin -NotePropertyValue ([pscustomobject]@{ keep = 99 }) -Force
+          $native.plugins | Add-Member -NotePropertyName GoLiveBypass -NotePropertyValue ([pscustomobject]@{
+            bootPending = $true
+            lastKnownProxy = 'socks5://127.0.0.1:9050'
+            verifiedProxy = [pscustomobject]@{ proxy = 'socks5://127.0.0.1:9050'; at = 1 }
+            pool = @([pscustomobject]@{ proxy = 'socks5://1.2.3.4:1080'; country = 'US'; ms = 10; at = 1 })
+          }) -Force
+          New-Item -ItemType Directory -Path (Split-Path -Parent $nativeFile) -Force | Out-Null
+          $native | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $nativeFile -Encoding UTF8
+
+      - name: Migrate broken legacy install through public one-liner
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify legacy migration result
+        shell: powershell
+        run: |
+          $resources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $resources) { throw 'Discord resources missing after migration.' }
+
+          $appAsar = Join-Path $resources.FullName 'app.asar'
+          if (Test-Path $appAsar -PathType Container) {
+            throw 'Legacy standalone app.asar directory survived migration.'
+          }
+          $bytes = [IO.File]::ReadAllBytes($appAsar)
+          $take = [Math]::Min(65536, $bytes.Length)
+          $stub = [Text.Encoding]::UTF8.GetString($bytes, 0, $take)
+          if ($stub -notmatch '(?i)Equicord') { throw 'Discord is not reinjected into Equicord after migration.' }
+          if ($stub -match '(?i)golivebypass\.js') { throw 'Legacy standalone require survived migration.' }
+
+          $equicord = Join-Path $env:USERPROFILE 'Equicord'
+          $plugin = Join-Path $equicord 'src\userplugins\goLiveBypass'
+          if (Test-Path (Join-Path $plugin 'legacy.ts')) { throw 'Stale plugin source survived transactional replacement.' }
+          $manifest = Get-Content (Join-Path $plugin 'manifest.json') -Raw | ConvertFrom-Json
+          if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') { throw 'Enhanced manifest was not restored.' }
+
+          $settingsFile = Join-Path $env:APPDATA 'Equicord\settings\settings.json'
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          $glb = $settings.plugins.GoLiveBypass
+          if (-not $glb.enabled) { throw 'GoLiveBypass disabled after migration.' }
+          if ($glb.proxy -ne 'socks5://127.0.0.1:9060') { throw 'Migration did not repin local Tor.' }
+          if ($glb.sessionRouting -ne 'gateway') { throw 'Migration did not normalize sessionRouting.' }
+          if ([string]$glb.voiceRegion -ne '') { throw 'Migration did not reset voiceRegion to Automatic.' }
+          if ([string]$glb.streamRegion -ne '') { throw 'Migration did not reset streamRegion to Automatic.' }
+          if ($settings.plugins.PSObject.Properties['GoLiveBypassLegacy']) { throw 'Legacy alias settings survived migration.' }
+          if (-not $settings.plugins.UnrelatedPlugin -or $settings.plugins.UnrelatedPlugin.keep -ne 42) {
+            throw 'Unrelated renderer plugin settings were not preserved.'
+          }
+
+          $nativeFile = Join-Path $env:APPDATA 'Equicord\settings\native-settings.json'
+          $native = Get-Content $nativeFile -Raw | ConvertFrom-Json
+          if ($native.plugins.PSObject.Properties['GoLiveBypass']) { throw 'Legacy native GoLiveBypass state survived migration.' }
+          if (-not $native.plugins.UnrelatedNativePlugin -or $native.plugins.UnrelatedNativePlugin.keep -ne 99) {
+            throw 'Unrelated native plugin settings were not preserved.'
+          }
+
+          $backups = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\backups\migration-*') -Directory -ErrorAction SilentlyContinue
+          if (-not $backups) { throw 'Migration backups were not created.' }
+
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
 
   mod-build:
     strategy:
