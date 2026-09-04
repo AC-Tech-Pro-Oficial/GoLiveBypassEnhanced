@@ -52,6 +52,12 @@ describe("Electron renderer security boundary", () => {
     expect(renderer).toContain("document.createElement('a')");
   });
 
+  it("does not keep generic innerHTML sinks in the renderer", () => {
+    expect(renderer).not.toContain("innerHTML");
+    expect(renderer).toContain("replaceChildren");
+    expect(renderer).toContain("document.createElement('strong')");
+  });
+
   it("does not expose public proxy lists as an enhanced GUI mode", () => {
     const html = fs.readFileSync(path.resolve(process.cwd(), "index.html"), "utf8");
     const electronMain = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
