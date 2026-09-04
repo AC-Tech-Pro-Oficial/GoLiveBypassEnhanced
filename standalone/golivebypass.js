@@ -353,10 +353,12 @@ const excludedCountries = new Set(
         .split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
 );
 
-// Rede de saida escolhida na GUI. "auto" (ou vazio) = comportamento classico: Tor local se
-// houver, senao gratuitas. "tor" = SO o Tor (a GUI sobe o proprio). "free" = pula o Tor e
-// vai so as gratuitas (para quem nao quer Tor).
-const routeMode = typeof settings.routeMode === "string" ? settings.routeMode : "auto";
+// Enhanced trust policy: sem proxy explicita, a unica saida intermediaria permitida e Tor.
+// Valores legados "auto"/"free" nao reativam listas publicas. Com proxy personalizada,
+// "auto" continua sendo usado internamente apenas para permitir o fallback DIRETO do gateway
+// se a saida escolhida estiver indisponivel; nunca significa procurar terceiros.
+const hasExplicitProxy = typeof settings.proxy === "string" && settings.proxy.trim() !== "";
+const routeMode = hasExplicitProxy ? "auto" : "tor";
 // O endereco do Tor pode vir das settings (a GUI sobe o proprio numa porta dedicada).
 const TOR_ADDR = typeof settings.torAddr === "string" && settings.torAddr !== ""
     ? settings.torAddr
@@ -1118,14 +1120,10 @@ async function cachedExit() {
 async function chooseExit() {
     const manual = manualProxy();
     if (manual === null) {
-        log("o endereco em proxy nao e valido, ignorando");
+        log("o endereco em proxy nao e valido; ignorando e usando somente Tor local");
     } else if (manual !== "") {
-        // Saida escolhida e gravada pela pessoa nas settings: usar NA HORA, sem probe.
-        // O probe completo (TLS ate o Discord) gasta ~1s, e o gateway conecta em menos —
-        // com a escolha devagar a corrida morre e a sessao nasce direta pelo IP brasileiro
-        // (o "carregando infinitamente" no video). Com a saida na mao em milissegundos o
-        // gateway ja nasce roteado; o batimento valida a cada 30s, e se ela estiver morta
-        // o trafego vivo cai para reserva/cache/lista antes de ir direto.
+        // Proxy personalizada e uma decisao explicita de confianca. Usa na hora para o
+        // gateway nascer roteado; o probe em segundo plano so produz diagnostico.
         log("usando a saida que voce configurou: " + safeProxy(manual));
         probe(manual, 2500).then(ok => {
             if (ok === null) {
@@ -1139,33 +1137,11 @@ async function chooseExit() {
         return manual;
     }
 
-    const cached = await cachedExit();
-    if (cached !== null) return cached;
-
-    // Modo "tor": SO o Tor conta. Sem Tor nao ha saida — o gateway fica segurado (nunca
-    // vaza direto para o IP brasileiro), e o refresh continua tentando ate o Tor voltar.
-    if (routeMode === "tor") {
-        const tor = await detectTor();
-        if (tor !== null) return tor;
-        log("modo tor: nenhum Tor respondeu em " + TOR_ADDR + ", segurando o gateway (sem saida direta)");
-        return null;
-    }
-
-    // Modo "free": pula o Tor (quem escolheu gratuitas nao quer depender de Tor).
-    if (routeMode === "free") {
-        const free = await pickFreeExit();
-        if (free !== null) return free;
-        // Sem gratuitas vivas (lista toda morta e o cache vazio): a sessao morreria
-        // direto pelo IP brasileiro, que e EXATAMENTE o "load infinito" da issue #85.
-        // Tenta o Tor como ultimo recurso antes de desistir -- o Tor ja esta rodando
-        // (a GUI sobe na inicializacao do modo tor e nao desliga se o usuario trocou
-        // para gratuitas), e com o fix de pais (PR #82) garante que exits BR sao
-        // recusados. Melhor um Tor lento que um Discord travado.
-        log("nenhuma gratuita viva, tentando o Tor local como fallback");
-        return await detectTor();
-    }
-
-    return await detectTor() || await pickFreeExit();
+    // Nao consulta state.json/pool: ele pode conter saidas publicas de versoes antigas.
+    const tor = await detectTor();
+    if (tor !== null) return tor;
+    log("enhanced: nenhum Tor respondeu em " + TOR_ADDR + "; nenhuma proxy publica sera usada");
+    return null;
 }
 
 let lastExitAt = 0; // quando a saida atual foi escolhida (para o log do gateway visto)
@@ -1283,6 +1259,8 @@ function ensureReserveThenReload(exit) {
         win.webContents.reload();
     };
 
+    // Enhanced nao estoca terceiros. Tor/proxy explicita recarregam sem exigir reserva publica.
+    if (routeMode === "tor" || usingManualProxy) return tryReload();
     if (liveReserveCount() >= RELOAD_MIN_RESERVES) return tryReload();
 
     // Sem reserva: busca em background e espera um pouco. A sessao ja esta bloqueada, entao
@@ -3468,51 +3446,15 @@ function currentExit() {
     if (exitSettled) return Promise.resolve(chosenExit);
 
     return new Promise(resolve => {
-        // No modo "tor" o prazo e maior: o bootstrap do Tor leva ~20s, bem mais que o orcamento
-        // pensado para uma saida gratuita, e estourar o prazo aqui nao devolve conexao direta
-        // (o serveSocks recusa neste modo) -- devolve so uma reconexao a toa do gateway.
-        // O refresh (chamado pelo batimento quando a ativa caiu) usa probe com timeout
-        // curto (3s) para nao segurar o gateway por 12+ segundos quando o Tor oscila
-        // (issue #87: "loading infinito ao assistir a tela estando mto tempo com
-        // discord aberto"). Espera-se o refresh terminar ate TOR_HOLD_BUDGET_MS e so
-        // depois recusa-se: o refresh provavelmente ja terminou e o Tor ja voltou.
         const prazo = routeMode === "tor" ? TOR_HOLD_BUDGET_MS : HOLD_BUDGET_MS;
-        const refreshRunning = routeMode === "tor" ? refreshingExit : null;
+        const refreshRunning = refreshingExit;
 
         const timer = setTimeout(() => {
-            // Cold start no modo "gratuitas": com lista publica, as candidatas comumente
-            // nao ficam prontas dentro do prazo (#98: saida escolhida so aos 20s, conexao
-            // nasceu direta aos 13s). Em vez de nascer direta -- IP BR, sessao bloqueada,
-            // reload a toa -- tenta o MESMO fallback do #85: o Tor local. O detectTor so
-            // testa portas que ja existem (nunca sobe/para daemon); sem Tor, cai direta
-            // como sempre. A preferencia por gratuitas fica intacta: se o pickFreeExit em
-            // curso entregar uma saida depois, ela assume as conexoes novas sem religar
-            // a sessao ativa.
-            if (routeMode === "free" && poolFrio()) {
-                log("gratuitas nao ficaram prontas a tempo (" + Math.round(prazo / 1000) + "s); tentando o Tor local antes de sair direta");
-                detectTor(3000).then(tor => {
-                    if (exitSettled) return; // uma saida gratuita chegou nesse meio-tempo
-                    if (tor !== null) {
-                        settleExit(tor); // entrega pra quem espera e vira a saida ativa
-                        return;
-                    }
-                    log("sem Tor local tambem; esta conexao vai sair direta");
-                    const index = waitingForExit.indexOf(deliver);
-                    if (index >= 0) waitingForExit.splice(index, 1);
-                    resolve(null);
-                }).catch(() => {
-                    if (exitSettled) return;
-                    const index = waitingForExit.indexOf(deliver);
-                    if (index >= 0) waitingForExit.splice(index, 1);
-                    resolve(null);
-                });
-                return;
-            }
             const index = waitingForExit.indexOf(deliver);
             if (index >= 0) waitingForExit.splice(index, 1);
             log(routeMode === "tor"
-                ? "a saida nao ficou pronta a tempo; no modo tor a conexao sera recusada, nao direta"
-                : "a saida nao ficou pronta a tempo, esta conexao vai sair direta");
+                ? "a saida confiavel nao ficou pronta a tempo; recusando esta conexao, sem proxy publica"
+                : "a proxy configurada nao ficou pronta a tempo; esta conexao pode seguir direta");
             resolve(null);
         }, prazo);
 
@@ -3523,18 +3465,8 @@ function currentExit() {
 
         waitingForExit.push(deliver);
 
-        // Se o refresh esta rodando, espera ele terminar. O chosenExit vai ser setado
-        // pelo settleExit (no refreshExit) ou ja' foi setado em outra execucao do chooseExit
-        // (em outro currentExit). Quando o refresh termina, o resolve e' chamado
-        // se a ativa foi setada; senao o timer estoura.
         if (refreshRunning !== null) {
             refreshRunning.then(() => {
-                // O refresh terminou. Se o chosenExit foi setado (sucesso), o deliver ja'
-                // foi chamado e o resolve ja' foi feito. Se nao (falha do refresh), o
-                // currentExit continua esperando o timer. O tempo ate agora ja' contou
-                // parte do prazo -- mas como o refresh ja' terminou, qualquer nova conexao
-                // pode prosseguir com a ativa (mesmo "morta") e a recarga (se houver)
-                // fara a troca.
                 if (chosenExit !== null) {
                     const index = waitingForExit.indexOf(deliver);
                     if (index >= 0) waitingForExit.splice(index, 1);
@@ -3556,30 +3488,21 @@ function refreshExit() {
 
     lastRefreshAt = Date.now();
     refreshingExit = (async () => {
-        log("nenhuma saida do pool entregou, procurando uma saida nova");
-        // Modo "tor": a reposicao tambem SO considera o Tor — cair para gratuita aqui
-        // trocaria a garantia escolhida pelo usuario por um IP qualquer. Sem Tor no ar,
-        // devolve null e o gateway fica segurado ate o Tor voltar.
-        // Probe do Tor com timeout curto (3s) para o refresh nao segurar o gateway
-        // por 12+ segundos quando o Tor esta morrendo (issue #87). O probe da escolha
-        // inicial usa o timeout completo (6s) porque vale a pena esperar mais.
-        // Modo "free"/"auto" tenta gratuitas; se nao houver nenhuma viva, cai pro Tor
-        // (que esta rodando de qualquer jeito) em vez de devolver null e abrir direto.
+        const manual = manualProxy();
         let fresh = null;
-        if (routeMode === "tor") {
-            fresh = await detectTor(3000);
+
+        if (manual !== null && manual !== "") {
+            const ok = await probe(manual, HEARTBEAT_TIMEOUT_MS);
+            fresh = ok === null ? null : manual;
+            if (fresh === null) log("proxy configurada ainda nao respondeu; nenhuma reserva publica sera buscada");
         } else {
-            fresh = await pickFreeExit();
-            if (fresh === null) {
-                log("gratuitas mortas, tentando Tor local como fallback");
-                fresh = await detectTor();
-            }
+            fresh = await detectTor(3000);
+            if (fresh === null) log("Tor ainda nao respondeu; nenhuma reserva publica sera buscada");
         }
+
         if (fresh !== null) {
             settleExit(fresh);
-            log("saida nova encontrada: " + safeProxy(fresh));
-        } else {
-            log("nenhuma saida nova disponivel agora");
+            log("saida confiavel recuperada: " + safeProxy(fresh));
         }
         return fresh;
     })();
@@ -3698,6 +3621,28 @@ async function checkPool() {
         return;
     }
 
+    if (usingManualProxy) {
+        if (active === null) {
+            refreshExit().catch(error => log("retry da proxy configurada falhou: " + error.message));
+            return;
+        }
+        const ok = await probe(active, HEARTBEAT_TIMEOUT_MS) !== null;
+        if (ok) {
+            missedBeats.delete(active);
+            return;
+        }
+        const count = (missedBeats.get(active) || 0) + 1;
+        missedBeats.set(active, count);
+        if (count >= MAX_MISSED_BEATS) {
+            missedBeats.delete(active);
+            log("proxy configurada perdeu " + MAX_MISSED_BEATS + " batimentos; tentando somente ela novamente");
+            refreshExit().catch(error => log("retry da proxy configurada falhou: " + error.message));
+        }
+        return;
+    }
+
+    // Codigo legado de pool fica inacessivel no enhanced: routeMode so chega aqui
+    // sem Tor quando ha uma proxy explicita, coberta acima.
     // A ativa entra na rodada mesmo estando fora do pote: proxy do settings.json e Tor local
     // nunca sao guardados, e sao exatamente os que a pessoa mais sente quando caem.
     const targets = [];
@@ -3958,65 +3903,31 @@ async function openThroughPool(target) {
     const active = await currentExit();
     if (active === null) return null;
 
-    // A ativa sozinha primeiro: ela e o IP que o servidor ja viu nesta sessao, e trocar sem
-    // precisar seria pedir uma reavaliacao a toa. No modo tor o prazo e o folgado
-    // (TOR_RELAY_TIMEOUT_MS): construcao de circuito do Tor nao pode ser abortada.
-    const tAtiva = Date.now();
+    const started = Date.now();
     const prazoTunel = routeMode === "tor" ? TOR_RELAY_TIMEOUT_MS : RELAY_TIMEOUT_MS;
-    const direto = await openTunnel(active, target.host, target.port, prazoTunel);
-    if (direto !== null) {
+    let socket = await openTunnel(active, target.host, target.port, prazoTunel);
+    if (socket !== null) {
         markGatewayRouted();
-        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(active) + " via=ativa latencia=" + (Date.now() - tAtiva) + "ms");
-        return direto;
+        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(active) + " via=ativa latencia=" + (Date.now() - started) + "ms");
+        return socket;
     }
 
-    log(safeProxy(active) + " nao entregou " + target.host);
-
-    // As reservas correm todas juntas em vez de uma por vez: enfileiradas, o prazo de cada uma
-    // somava com o gateway ja reconectando, e o Chromium desiste do roteador antes disso.
-    const won = await firstTunnel(pool.map(entry => entry.proxy).filter(proxy => proxy !== active), target, RELAY_TIMEOUT_MS);
-    if (won !== null) {
-        log("a saida " + safeProxy(active) + " parou de entregar, troquei para " + safeProxy(won.proxy));
-        chosenExit = won.proxy;
-        lastExitAt = Date.now();
-        missedBeats.delete(active);
-        pool = pool.filter(entry => entry.proxy !== active);
-        savePool();
-        markGatewayRouted();
-        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(won.proxy) + " via=reserva latencia=" + (Date.now() - tAtiva) + "ms");
-        return won.socket;
-    }
-
-    // Pool inteiro morto: antes de render a conexao ao IP brasileiro (o "carregando para
-    // sempre"), tenta o cache do state.json (revalidacao rapida, ~1-2s) e so entao a lista
-    // nova (lenta, ~4s+). No caso do ciclo 7 o pool tinha 1 saida que morreu; o cache teria
-    // saidas guardadas de aberturas anteriores para assumir na hora.
-    const cached = await cachedExit();
-    if (cached !== null) {
-        const socket = await openTunnel(cached, target.host, target.port, PROBE_TIMEOUT_MS);
-        if (socket !== null) {
-            chosenExit = cached;
-            lastExitAt = Date.now();
-            markGatewayRouted();
-            log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(cached) + " via=cache latencia=" + (Date.now() - tAtiva) + "ms");
-            return socket;
-        }
-        log(safeProxy(cached) + " do cache nao entregou " + target.host);
-    }
+    log(safeProxy(active) + " nao entregou " + target.host + "; nenhuma reserva publica sera tentada");
 
     const fresh = await refreshExit();
-    if (fresh !== null) {
-        const socket = await openTunnel(fresh, target.host, target.port, PROBE_TIMEOUT_MS);
-        if (socket !== null) {
-            chosenExit = fresh;
-            lastExitAt = Date.now();
-            markGatewayRouted();
-            log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(fresh) + " via=nova latencia=" + (Date.now() - tAtiva) + "ms");
-            return socket;
-        }
-        log(safeProxy(fresh) + " nao entregou " + target.host + " logo depois de escolhida");
+    if (fresh === null) return null;
+
+    const retryTimeout = routeMode === "tor" ? TOR_RELAY_TIMEOUT_MS : RELAY_TIMEOUT_MS;
+    socket = await openTunnel(fresh, target.host, target.port, retryTimeout);
+    if (socket !== null) {
+        chosenExit = fresh;
+        lastExitAt = Date.now();
+        markGatewayRouted();
+        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(fresh) + " via=retry-confiavel latencia=" + (Date.now() - started) + "ms");
+        return socket;
     }
 
+    log(safeProxy(fresh) + " nao entregou " + target.host + " depois do retry confiavel");
     return null;
 }
 
@@ -4381,7 +4292,7 @@ async function start() {
                             .filter(proxy => proxy !== chosenExit)
                             .sort((a, b) => (rttEma.get(a) ?? Infinity) - (rttEma.get(b) ?? Infinity))[0];
                         const emaAlvo = alvo === undefined ? Infinity : (rttEma.get(alvo) ?? Infinity);
-                        const podeTrocar = alvo !== undefined && trocaProativaPode() && emaAlvo <= emaAtual * SWAP_RESERVA_RAZAO;
+                        const podeTrocar = !usingManualProxy && routeMode !== "tor" && alvo !== undefined && trocaProativaPode() && emaAlvo <= emaAtual * SWAP_RESERVA_RAZAO;
                         log("gw.rajada_limite | n=" + gatewayReconexoes.length + "/180s" +
                             " intervalo_min=" + minD + "ms intervalo_med=" + medD + "ms" +
                             " ema_atual=" + (emaAtual === Infinity ? "?" : Math.round(emaAtual) + "ms") +
