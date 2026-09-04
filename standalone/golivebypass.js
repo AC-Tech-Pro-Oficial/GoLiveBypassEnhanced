@@ -1639,6 +1639,7 @@ function instalarVoiceShim() {
             optionShape: shape(options, 0, new WeakSet()),
             conn: conn,
             sourceReplay: null,
+            sourceAt: 0,
             replayingSource: false,
             recoveryClearingSource: false,
             lastRole: 'unknown',
@@ -1652,6 +1653,7 @@ function instalarVoiceShim() {
                 conn.destroy = function () {
                     rec.destroyedAt = Date.now();
                     rec.sourceReplay = null;
+                    rec.sourceAt = 0;
                     return originalDestroy.apply(this, arguments);
                 };
             }
@@ -1665,6 +1667,7 @@ function instalarVoiceShim() {
                     conn[name] = function () {
                         if (!rec.replayingSource) {
                             rec.sourceReplay = { name: name, args: Array.prototype.slice.call(arguments) };
+                            rec.sourceAt = Date.now();
                         }
                         return original.apply(this, arguments);
                     };
@@ -1674,7 +1677,10 @@ function instalarVoiceShim() {
                 var originalClear = conn.clearDesktopSource;
                 if (typeof originalClear === 'function') {
                     conn.clearDesktopSource = function () {
-                        if (!rec.recoveryClearingSource) rec.sourceReplay = null;
+                        if (!rec.recoveryClearingSource) {
+                            rec.sourceReplay = null;
+                            rec.sourceAt = 0;
+                        }
                         return originalClear.apply(this, arguments);
                     };
                 }
@@ -1868,6 +1874,9 @@ function instalarVoiceShim() {
                     createdHa: now - rec.createdAt,
                     destroyed: rec.destroyedAt > 0,
                     optionShape: rec.optionShape,
+                    roleHint: connectionRoleHint(rec),
+                    sourceCached: !!rec.sourceReplay,
+                    sourceHa: rec.sourceReplay && rec.sourceAt > 0 ? now - rec.sourceAt : -1,
                     stats: sampled,
                 };
             });
@@ -2753,7 +2762,7 @@ function iniciarRecuperacaoNativa(ctx, nivel, sinal) {
     const geracao = geracaoNativa(ctx.voice, stream);
     videoNativoTentativas.push(agora);
     videoNativoUltimaAcaoEm = agora;
-    const tentativa = { nivel, geracao, papel, sinal, inicioEm: agora, sucessoEm: 0, confirmada: false, action: '' };
+    const tentativa = { nivel, geracao, papel, sinal, inicioEm: agora, sucessoEm: 0, confirmada: false, action: '', demandaBaixaLogada: false };
     videoNativoPendente = tentativa;
     sessaoRevives++;
     log("gw.revive | rtc nativo: nivel=" + nivel + " papel=" + papel + " sinal=" + String(sinal || '?'));
@@ -2772,6 +2781,25 @@ function iniciarRecuperacaoNativa(ctx, nivel, sinal) {
         .catch(error => {
             if (videoNativoPendente === tentativa) falharRecuperacaoNativa(ctx, 'mundo_isolado: ' + error.message);
         });
+}
+
+function broadcasterRecoveryStillOwned(ctx, pendente) {
+    if (!pendente || pendente.papel !== 'broadcaster') return false;
+    const stream = streamNativaAtiva(ctx && ctx.voice);
+    if (!stream || stream.destroyed === true) return false;
+    if (geracaoNativa(ctx.voice, stream) !== pendente.geracao) return false;
+
+    // sourceCached is deliberately sanitized. A voluntary clearDesktopSource() clears it,
+    // while our guarded level-2 clear keeps it. Therefore this is the strongest signal that
+    // the user still owns the same share without exposing source ids/arguments to main.
+    if (stream.sourceCached !== true) return false;
+
+    const stats = stream.stats;
+    if (!stats || stats.statsOk !== true) return true;
+    const papel = stats.role ||
+        ((typeof stats.framesEncoded === 'number' && typeof stats.encodeFrameRate === 'number')
+            ? 'broadcaster' : 'unknown');
+    return papel === 'broadcaster';
 }
 
 function acompanharRecuperacaoNativa(ctx) {
@@ -2794,9 +2822,20 @@ function acompanharRecuperacaoNativa(ctx) {
     pendente.sucessoEm = 0;
 
     if (ctx.demanda && ctx.demanda.known === true && ctx.demanda.active !== true && ctx.demanda.changedHa >= 15_000) {
-        log("gw.revive | rtc nativo: tentativa cancelada, demanda terminou");
-        videoNativoPendente = null;
-        return true;
+        if (pendente.papel === 'broadcaster' && broadcasterRecoveryStillOwned(ctx, pendente)) {
+            // His real failure showed this exact sequence: capture stayed at ~30 fps while
+            // encoded output remained zero, then demand fell and the old controller aborted
+            // before level 2. A cached source means the broadcaster did NOT voluntarily clear
+            // the share, so keep the bounded L1 -> L2 ladder alive.
+            if (!pendente.demandaBaixaLogada) {
+                pendente.demandaBaixaLogada = true;
+                log("gw.revive | rtc nativo: demanda caiu mas a fonte broadcaster continua ativa; mantendo recuperacao");
+            }
+        } else {
+            log("gw.revive | rtc nativo: tentativa cancelada, demanda terminou");
+            videoNativoPendente = null;
+            return true;
+        }
     }
 
     const prazo = pendente.nivel === 1 ? VOICE_NIVEL1_ESPERA_MS : VOICE_NIVEL2_ESPERA_MS;
