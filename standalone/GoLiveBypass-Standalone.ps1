@@ -30,7 +30,7 @@ try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch 
 
 # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e :
 # codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
-# bypass cairia para a lista gratuita sem dizer por que.
+# bypass ficaria sem uma saida confiavel sem dizer por que.
 if ($Proxy -ne '' -and $Proxy -notmatch '^(socks5|socks4|https?)://(?:.+@)?[^:/@\s]+:\d{1,5}(?:-\d{1,5})?$') {
     Write-Host ''
     Write-Host '  [X] Endereco de proxy invalido.' -ForegroundColor Red
@@ -1060,11 +1060,10 @@ if ($Mode -eq 'Install' -and (Test-TuiInteractive)) {
             # Instalar: pede a rede antes de prosseguir.
             $tuiNet = Tui-Menu 'Como o bypass vai sair?' @(
                 'Tor automatico (recomendado, baixa e sobe sozinho)',
-                'Proxy gratuita (escolhida e testada sozinha)',
                 'Proxy minha (socks5://host:porta)'
             )
-            if ($tuiNet -eq 1) { $Tor = $true }
-            elseif ($tuiNet -eq 3) { $Proxy = (Tui-Input 'Endereco da proxy').Trim() }
+            if ($tuiNet -eq 2) { $Proxy = (Tui-Input 'Endereco da proxy').Trim() }
+            else { $Tor = $true }
         }
     }
 }
