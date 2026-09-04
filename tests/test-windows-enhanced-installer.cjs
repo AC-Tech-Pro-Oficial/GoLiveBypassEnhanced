@@ -134,6 +134,10 @@ assert(pluginInstaller.includes("PSObject.Properties.Remove('GoLiveBypass')"),
   "legacy native GoLiveBypass state must be removed without wiping other native plugin state");
 assert(pluginInstaller.includes("Remove-CaminhoSilencioso $target"),
   "canonical userplugin directory must be replaced, not only overwritten file-by-file");
+assert(pluginInstaller.includes("'.' + $PluginDirName + '.stage-' + $PID") &&
+       pluginInstaller.includes("Move-Item -LiteralPath $stage -Destination $target -Force") &&
+       pluginInstaller.includes("Stage enhanced incompleto"),
+  "enhanced plugin must be fully staged and validated before swapping out the previous source");
 assert(pluginInstaller.includes("viewer-video-parado") &&
        pluginInstaller.includes("rtc.enhanced.status"),
   "installer must verify enhanced markers are present in compiled output");
