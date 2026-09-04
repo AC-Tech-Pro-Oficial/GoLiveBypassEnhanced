@@ -36,7 +36,6 @@ func newTestApp(t *testing.T, cfg *config.Config, f *fakeIssues) *echo.Echo {
 
 func testConfig() *config.Config {
 	return &config.Config{
-		APIToken:        "segredo",
 		GitHubToken:     "gh",
 		GitHubRepo:      "owner/repo",
 		Labels:          []string{"bug"},
@@ -107,19 +106,11 @@ func TestCreateReportHappyPath(t *testing.T) {
 	}
 }
 
-func TestCreateReportNoAuth(t *testing.T) {
-	e := newTestApp(t, testConfig(), &fakeIssues{})
+func TestCreateReportIsPublicAndRateLimited(t *testing.T) {
+	e := newTestApp(t, testConfig(), &fakeIssues{res: gh.IssueResult{Number: 7, URL: "https://github.com/owner/repo/issues/7"}})
 	rec := do(t, e, http.MethodPost, "/v1/reports", "", `{"title":"x"}`)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
-}
-
-func TestCreateReportBadToken(t *testing.T) {
-	e := newTestApp(t, testConfig(), &fakeIssues{})
-	rec := do(t, e, http.MethodPost, "/v1/reports", "errado", `{"title":"x"}`)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 sem bearer token (body = %s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -171,7 +162,7 @@ func TestRateLimit(t *testing.T) {
 		t.Fatalf("segunda chamada: status = %d, want 429", second.Code)
 	}
 	if got := second.Header().Get("Retry-After"); got != "300" {
-		t.Errorf("Retry-After = %q, want 300 (BlockSeconds)", got)
+		t.Errorf("Retry-After = %q, want 300 (BlockSeconds do teste)", got)
 	}
 	if got := second.Header().Get("X-RateLimit-Remaining"); got != "0" {
 		t.Errorf("X-RateLimit-Remaining = %q, want 0", got)
@@ -265,5 +256,19 @@ func TestBasePath(t *testing.T) {
 	rec = do(t, e, http.MethodGet, "/healthz", "", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (sem prefixo nao deve existir)", rec.Code)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	e := newTestApp(t, testConfig(), &fakeIssues{})
+	rec := do(t, e, http.MethodGet, "/healthz", "", "")
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", got)
 	}
 }
