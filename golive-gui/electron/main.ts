@@ -346,7 +346,7 @@ function openLogWindow() {
     resizable: true,
     icon: loadAsset("icon.png"),
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload-logs.js"),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
