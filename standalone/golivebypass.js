@@ -2894,6 +2894,8 @@ function logRtcNativo(ctx) {
         " demanda_ha=" + idadeSeg(ctx.demanda ? ctx.demanda.demandHa : -1) +
         " entrada_ha=" + idadeSeg(stats ? stats.entradaHa : -1) +
         " saida_ha=" + idadeSeg(stats ? stats.saidaHa : -1) +
+        " fonte=" + (stream ? (stream.sourceCached === true ? "sim" : "nao") : "?") +
+        " fonte_ha=" + idadeSeg(stream && typeof stream.sourceHa === 'number' ? stream.sourceHa : -1) +
         " video=" + (stats && stats.videoExpected ? "sim" : "?") +
         " video_ha=" + idadeSeg(stats ? stats.decodeHa : -1) +
         " fps_in=" + (stats && typeof stats.inputFrameRate === 'number' ? Math.round(stats.inputFrameRate) : "?") +
