@@ -161,6 +161,46 @@ function openAppManagementSettings() {
   );
 }
 
+const TRUSTED_EXTERNAL_HOSTS = new Set(["github.com", "discord.gg"]);
+
+function isTrustedExternalUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && TRUSTED_EXTERNAL_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+async function openTrustedExternal(raw: string): Promise<boolean> {
+  if (!isTrustedExternalUrl(raw)) {
+    console.warn("[security] bloqueei URL externa nao confiavel:", raw);
+    return false;
+  }
+  await shell.openExternal(raw);
+  return true;
+}
+
+function hardenWindowNavigation(win: BrowserWindow) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void openTrustedExternal(url);
+    return { action: "deny" };
+  });
+
+  win.webContents.on("will-navigate", (event, url) => {
+    // Navegacao da propria pagina local/dev continua permitida; links externos sao
+    // sempre tirados do renderer e abertos no navegador padrao se estiverem na allowlist.
+    try {
+      const parsed = new URL(url);
+      const current = new URL(win.webContents.getURL() || url);
+      if (parsed.protocol === "file:" || parsed.origin === current.origin) return;
+    } catch { }
+
+    event.preventDefault();
+    void openTrustedExternal(url);
+  });
+}
+
 function writeError(targetPath: string) {
   if (isMac) {
     const appPath = enclosingApp(targetPath);
@@ -216,8 +256,8 @@ function createWindow() {
     icon: loadAsset('icon.png'),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
     },
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
@@ -235,10 +275,7 @@ function createWindow() {
   // a pessoa nao ve para onde esta indo, e nao tem como voltar. Vale para o botao do Discord,
   // que ja existia, e para os creditos.
   mainWindow.setTitle(`GoLiveBypass v${app.getVersion()}`);
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https:\/\//.test(url)) void shell.openExternal(url);
-    return { action: "deny" };
-  });
+  hardenWindowNavigation(mainWindow);
 
   mainWindow.on("close", (event) => {
     if (quitting || isQuittingForUpdate()) return;
@@ -308,8 +345,8 @@ function openLogWindow() {
     icon: loadAsset("icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
     },
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
@@ -319,10 +356,7 @@ function openLogWindow() {
   });
 
   logWindow.setTitle("GoLiveBypass — Logs");
-  logWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https:\/\//.test(url)) void shell.openExternal(url);
-    return { action: "deny" };
-  });
+  hardenWindowNavigation(logWindow);
 
   logWindow.on("closed", () => {
     logWindow = null;
@@ -3055,7 +3089,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
   if (apiCfg) {
     const posted = await postBugReportToApi(apiCfg, title, note, status);
     if (posted.ok) {
-      await shell.openExternal(posted.issueUrl);
+      await openTrustedExternal(posted.issueUrl);
       return {
         ok: true,
         via: "api" as const,
@@ -3077,7 +3111,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
       labels: ISSUE_LABELS.join(","),
     });
     const url = `https://github.com/${ISSUE_REPO}/issues/new?${params.toString()}`;
-    await shell.openExternal(url);
+    await openTrustedExternal(url);
     return {
       ok: true,
       via: "github" as const,
@@ -3101,7 +3135,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
     labels: ISSUE_LABELS.join(","),
   });
   const url = `https://github.com/${ISSUE_REPO}/issues/new?${params.toString()}`;
-  await shell.openExternal(url);
+  await openTrustedExternal(url);
 
   return {
     ok: true,
