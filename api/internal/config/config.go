@@ -24,10 +24,10 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		GitHubRepo:      getenv("GITHUB_REPO", "bezumiya/GoLiveBypass"),
+		GitHubRepo:      getenv("GITHUB_REPO", "AC-Tech-Pro-Oficial/GoLiveBypassEnhanced"),
 		Port:            getenv("PORT", "8080"),
-		RateLimitPerMin: getenvFloat("RATE_LIMIT", 10),
-		BlockSeconds:    getenvInt("BLOCK_SECONDS", 300),
+		RateLimitPerMin: getenvFloat("RATE_LIMIT", 3),
+		BlockSeconds:    getenvInt("BLOCK_SECONDS", 600),
 		MaxLogBytes:     getenvInt64("MAX_LOG_BYTES", 262144),
 		LogLevel:        getenv("LOG_LEVEL", "info"),
 	}
