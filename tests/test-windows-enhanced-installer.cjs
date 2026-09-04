@@ -259,5 +259,11 @@ assert(
 
 assert(click.includes("Install-Enhanced.ps1"));
 assert(click.includes("ExecutionPolicy Bypass"));
+assert(click.includes("api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/"),
+  "double-click bootstrap must resolve the enhanced branch to a commit before execution");
+assert(click.includes("GOLIVE_ENHANCED_REF") && click.includes("$r.sha"),
+  "double-click bootstrap must pass the resolved immutable commit into the wrapper");
+assert(!click.includes("enhanced/rtc-viewer-recovery-v1/installer/Install-Enhanced.ps1' | iex"),
+  "double-click bootstrap must not execute the mutable branch raw URL directly");
 
 console.log("Windows enhanced installer/coexistence contract: OK");
