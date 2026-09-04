@@ -98,6 +98,12 @@ $script:MigrationResetCritical = $false
 $script:MigrationReasons = [System.Collections.Generic.List[string]]::new()
 $script:MigrationBackupRoot = $null
 $script:ExternalBypassConflict = $false
+$script:RollbackRoot = $null
+$script:RollbackFiles = [System.Collections.Generic.List[object]]::new()
+$script:PluginSourceTarget = $null
+$script:PluginSourceBackup = $null
+$script:PluginSourceHadPrevious = $false
+$script:PluginSourceSwapped = $false
 
 function Write-Step($text) { Write-Host "  [*] $text" -ForegroundColor DarkGray }
 function Write-Ok($text) { Write-Host "  [OK] $text" -ForegroundColor Green }
@@ -1376,6 +1382,92 @@ function Backup-MigrationPath([string]$path, [string]$label) {
     return $dest
 }
 
+
+function Start-InstallTransaction($root) {
+    $script:RollbackRoot = $root
+    $script:RollbackFiles.Clear()
+    $script:PluginSourceTarget = $null
+    $script:PluginSourceBackup = $null
+    $script:PluginSourceHadPrevious = $false
+    $script:PluginSourceSwapped = $false
+
+    foreach ($entry in @(
+        @{ Path = (Get-ModSettingsFile $root); Label = "$(Get-CheckoutMod $root)-settings.json" },
+        @{ Path = (Get-ModNativeSettingsFile $root); Label = "$(Get-CheckoutMod $root)-native-settings-before-install.json" }
+    )) {
+        $path = [string]$entry.Path
+        $existed = Test-Path -LiteralPath $path
+        $backup = if ($existed) { Backup-MigrationPath $path ([string]$entry.Label) } else { $null }
+        $script:RollbackFiles.Add([pscustomobject]@{
+            Path = $path
+            Existed = $existed
+            Backup = $backup
+        })
+    }
+}
+
+function Restore-InstallTransaction {
+    if (-not $script:RollbackRoot) { return }
+
+    Write-Warn 'A instalacao falhou depois de iniciar mudancas; restaurando o estado anterior do mod.'
+
+    if ($script:PluginSourceSwapped -and $script:PluginSourceTarget) {
+        try {
+            Remove-CaminhoSilencioso $script:PluginSourceTarget
+            if ($script:PluginSourceHadPrevious -and $script:PluginSourceBackup -and
+                (Test-Path -LiteralPath $script:PluginSourceBackup)) {
+                Copy-Item -LiteralPath $script:PluginSourceBackup -Destination $script:PluginSourceTarget -Recurse -Force
+                Write-Step 'Fonte anterior do GoLiveBypass restaurada.'
+            } else {
+                Write-Step 'Plugin enhanced removido; este checkout nao tinha GoLiveBypass antes.'
+            }
+        } catch {
+            Write-Warn "Nao consegui restaurar a fonte anterior automaticamente: $($_.Exception.Message)"
+        }
+    }
+
+    foreach ($snapshot in @($script:RollbackFiles)) {
+        try {
+            $path = [string]$snapshot.Path
+            if ([bool]$snapshot.Existed) {
+                if ($snapshot.Backup -and (Test-Path -LiteralPath $snapshot.Backup)) {
+                    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+                    Copy-Item -LiteralPath $snapshot.Backup -Destination $path -Force
+                }
+            } else {
+                Remove-CaminhoSilencioso $path
+            }
+        } catch {
+            Write-Warn "Nao consegui restaurar $($snapshot.Path): $($_.Exception.Message)"
+        }
+    }
+
+    # Se o novo plugin chegou a ser compilado, dist pode conter o bundle novo mesmo depois
+    # de restaurar os sources. Recompilar o checkout anterior evita deixar essa divergencia.
+    try {
+        if (Test-Path -LiteralPath $script:RollbackRoot) {
+            Ensure-PnpmForCheckout $script:RollbackRoot
+            Build-Mod $script:RollbackRoot
+            Write-Ok 'Build anterior do Vencord/Equicord restaurado.'
+        }
+    } catch {
+        Write-Warn "Fonte/settings foram restaurados, mas o rebuild anterior falhou: $($_.Exception.Message)"
+    }
+
+    $script:RollbackRoot = $null
+    $script:RollbackFiles.Clear()
+    $script:PluginSourceSwapped = $false
+}
+
+function Commit-InstallTransaction {
+    $script:RollbackRoot = $null
+    $script:RollbackFiles.Clear()
+    $script:PluginSourceSwapped = $false
+    $script:PluginSourceTarget = $null
+    $script:PluginSourceBackup = $null
+    $script:PluginSourceHadPrevious = $false
+}
+
 function Read-GoLiveInjectionContent([string]$resources) {
     if (-not $resources) { return '' }
     $parts = @()
@@ -1603,13 +1695,17 @@ function Copy-Plugin($root) {
         }
 
         # Somente depois do stage completo fazemos o swap. O anterior fica arquivado.
-        if (Test-Path -LiteralPath $target) {
-            $backup = Backup-MigrationPath $target "$(Get-CheckoutMod $root)-goLiveBypass-source"
-            Write-Step "Fonte anterior arquivado em $backup"
+        $script:PluginSourceTarget = $target
+        $script:PluginSourceHadPrevious = Test-Path -LiteralPath $target
+        $script:PluginSourceBackup = $null
+        if ($script:PluginSourceHadPrevious) {
+            $script:PluginSourceBackup = Backup-MigrationPath $target "$(Get-CheckoutMod $root)-goLiveBypass-source"
+            Write-Step "Fonte anterior arquivado em $script:PluginSourceBackup"
             Remove-CaminhoSilencioso $target
         }
 
         Move-Item -LiteralPath $stage -Destination $target -Force
+        $script:PluginSourceSwapped = $true
         Write-Step "Plugin enhanced instalado atomicamente em $target"
 
         if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
@@ -1829,6 +1925,7 @@ function Invoke-Install($root) {
     # Discord precisa estar fechado antes de limpar native/settings: aberto, o mod pode
     # regravar o estado antigo da memoria por cima da migracao.
     Stop-Discord
+    Start-InstallTransaction $root
     Invoke-GoLiveCompatibilityMigration $root
 
     Copy-Plugin $root
@@ -1857,6 +1954,7 @@ function Invoke-Install($root) {
     # apaga o que escrevemos aqui.
     Set-PluginSettings $root $proxy
     Assert-EnhancedInstallState $root $targets $proxy
+    Commit-InstallTransaction
 
     Start-Discord
 
@@ -2958,12 +3056,17 @@ try {
         default       { Show-MainMenu }
     }
 } catch {
+    $originalError = $_
+    if ($Mode -eq 'Install') {
+        try { Restore-InstallTransaction } catch { Write-Warn "Rollback incompleto: $($_.Exception.Message)" }
+    }
+
     Write-Host ''
-    Write-Err $_.Exception.Message
+    Write-Err $originalError.Exception.Message
 
     # Sem isto o relato vira so a mensagem do PowerShell, que nao diz onde quebrou. Com a linha
     # e o comando, um print de tela ja basta para achar a causa.
-    $info = $_.InvocationInfo
+    $info = $originalError.InvocationInfo
     if ($info -and $info.ScriptLineNumber) {
         Write-Host "      linha $($info.ScriptLineNumber): $($info.Line.Trim())" -ForegroundColor DarkGray
     }
@@ -2971,8 +3074,8 @@ try {
 
     # Report automatico (se nao for automacao): a issue abre no GitHub.
     # Erros de uso (dependencia, CLI typo, path errado, ferramenta externa) nao viram issue.
-    if (Test-ShouldReport $_.Exception.Message) {
-        Invoke-SendAutoReport "Falha no instalador GoLiveBypass: $($_.Exception.Message)" $_.Exception.Message $_
+    if (Test-ShouldReport $originalError.Exception.Message) {
+        Invoke-SendAutoReport "Falha no instalador GoLiveBypass: $($originalError.Exception.Message)" $originalError.Exception.Message $originalError
     }
     exit 1
 }
