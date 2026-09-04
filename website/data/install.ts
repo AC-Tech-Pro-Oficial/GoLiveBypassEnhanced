@@ -25,8 +25,8 @@ const standaloneLinuxDirect = String.raw`tmp="$(mktemp -d "${posixTempPrefix}/go
 export const terminalCommands: Record<CommandPlatform, { plugin: CommandPair; standalone: CommandPair }> = {
   windows: {
     plugin: {
-      tui: String.raw`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "${enhancedPinnedPrefix} $s=irm ('${enhancedRawBase}/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s"`,
-      direct: String.raw`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "${enhancedPinnedPrefix} irm ('${enhancedRawBase}/'+$r.sha+'/installer/Install-Enhanced.ps1') -OutFile $env:TEMP\glb-enhanced.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\glb-enhanced.ps1 -Mod Equicord"`,
+      tui: String.raw`${enhancedPinnedPrefix} $s=irm ('${enhancedRawBase}/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s`,
+      direct: String.raw`${enhancedPinnedPrefix} irm ('${enhancedRawBase}/'+$r.sha+'/installer/Install-Enhanced.ps1') -OutFile $env:TEMP\glb-enhanced.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\glb-enhanced.ps1 -Mod Equicord`,
       directNote: 'O primeiro comando detecta Vencord/Equicord e migra automaticamente. O direto força Equicord.',
     },
     standalone: {
