@@ -98,3 +98,41 @@ assert(installer.includes("goLiveBypass/rtcRecovery.ts"));
 assert(installer.includes("goLiveBypass/rtcShim.ts"));
 
 console.log("Vencord/Equicord enhanced RTC parity contract: OK");
+
+
+(function testEnhancedRoutingTrustPolicy() {
+  const autoStart = native.indexOf("async function autoExit(");
+  const autoEnd = native.indexOf("\n}", autoStart);
+  assert(autoStart >= 0 && autoEnd > autoStart, "autoExit block missing");
+  const autoBlock = native.slice(autoStart, autoEnd + 2);
+  assert(autoBlock.includes("torExit("), "blank enhanced proxy must prefer local Tor");
+  for (const forbidden of ["sharedFreeExit(", "freeExit(", "readPool(", "FREE_PROXY_API"]) {
+    assert(!autoBlock.includes(forbidden), `autoExit must not consult public proxy machinery: ${forbidden}`);
+  }
+
+  const serveStart = native.indexOf("async function serveRequest(");
+  const serveEnd = native.indexOf("\nfunction pacScript", serveStart);
+  assert(serveStart >= 0 && serveEnd > serveStart, "serveRequest block missing");
+  const serveBlock = native.slice(serveStart, serveEnd);
+  assert(!serveBlock.includes("firstTunnel("),
+    "live gateway relay must not silently switch to a public reserve");
+
+  const migrationStart = native.indexOf("function migrateLegacyPool()");
+  const migrationEnd = native.indexOf("\n}", migrationStart);
+  assert(migrationStart >= 0 && migrationEnd > migrationStart, "legacy pool migration block missing");
+  const migrationBlock = native.slice(migrationStart, migrationEnd + 2);
+  assert(migrationBlock.includes("delete (store as any).pool") &&
+         migrationBlock.includes("delete (store as any).verifiedProxy"),
+    "enhanced startup must erase inherited public-proxy pool state");
+
+  const retryStart = native.indexOf("export async function retryWithProxy");
+  const retryEnd = native.indexOf("\nexport async function testProxy", retryStart);
+  assert(retryStart >= 0 && retryEnd > retryStart, "retryWithProxy block missing");
+  const retryBlock = native.slice(retryStart, retryEnd);
+  assert(retryBlock.includes("isTorProxy(through)") &&
+         retryBlock.includes("torReachable(through, TOR_HEARTBEAT_TIMEOUT_MS)"),
+    "Tor retry must use Tor-specific reachability rather than the generic proxy probe");
+
+  assert(index.includes("Enhanced never falls back to public proxy lists."),
+    "plugin settings must state the enhanced trust policy");
+})();
