@@ -74,8 +74,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   macos:
-    # No canal beta o mac pula: o updater dele ja esta desligado no codigo (app
-    # nao assinado) — nao ha o que testar lá, e buildar sem consumidor e ruido.
+    # O lane macOS publicado e assinado/notarizado e o updater esta ativo. Beta ainda
+    # fica fora por rollout conservador: habilite somente depois de validar um lane beta
+    # tambem assinado/notarizado de ponta a ponta.
     if: ${{ inputs.canal != 'beta' }}
     runs-on: macos-latest
     steps:
