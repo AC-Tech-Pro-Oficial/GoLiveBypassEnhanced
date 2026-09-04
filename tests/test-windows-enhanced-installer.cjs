@@ -156,6 +156,14 @@ assert(
   !oneClick.includes("GoLiveBypass-Standalone.ps1"),
   "one-click path must install the userplugin, not the standalone injector"
 );
+assert(oneClick.includes("Resolve-EnhancedCommit") &&
+       oneClick.includes("GOLIVE_ENHANCED_REF") &&
+       oneClick.includes("/commits/$encoded") &&
+       oneClick.includes("$RepoRef"),
+  "public wrapper must pin the whole install to one immutable enhanced commit");
+assert(pluginInstaller.includes("GOLIVE_ENHANCED_REF") &&
+       pluginInstaller.includes("^[0-9a-fA-F]{40}$"),
+  "canonical installer must consume the pinned enhanced commit when provided");
 
 for (const marker of [
   "Restore-KnownGoLiveStandaloneInjections",
