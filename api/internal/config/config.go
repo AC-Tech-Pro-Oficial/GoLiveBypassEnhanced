@@ -9,7 +9,6 @@ import (
 )
 
 type Config struct {
-	APIToken    string
 	GitHubToken string
 	GitHubRepo  string
 	Labels      []string
@@ -33,10 +32,6 @@ func Load() (*Config, error) {
 		LogLevel:        getenv("LOG_LEVEL", "info"),
 	}
 
-	cfg.APIToken = os.Getenv("API_TOKEN")
-	if cfg.APIToken == "" {
-		return nil, errors.New("API_TOKEN e obrigatoria")
-	}
 	cfg.GitHubToken = os.Getenv("GITHUB_TOKEN")
 	if cfg.GitHubToken == "" {
 		return nil, errors.New("GITHUB_TOKEN e obrigatoria")
