@@ -185,11 +185,10 @@ fail() {
 
 # =========================================================================== Report de bugs
 # Quando o instalador falha, monta um diagnostico (versao, OS, log sanitizado) e chama
-# a mesma API de bugs da GUI. A issue abre automaticamente no bezumiya/GoLiveBypass.
+# a mesma API publica e rate-limited da GUI. Nenhum segredo de cliente e distribuido.
 # O envio NUNCA bloqueia o fluxo: falhou o report, avisa e segue.
 
 BUG_API_URL="https://api.skyplaceia.com/bugs/v1/reports"
-BUG_API_TOKEN="c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511"
 
 # Sanitiza texto: credenciais em URL, tokens Discord, query de gateway, e a proxy salva.
 report_sanitize() {
@@ -212,6 +211,21 @@ report_sanitize() {
 }
 
 # Envia o report para a API. Devolve 0 em caso de sucesso (issue aberta).
+report_json_quote() {
+    # JSON string POSIX: escapa barra/aspas/CR/TAB e transforma linhas em \\n.
+    # O sender antigo escapava so aspas; diagnostico multiline virava JSON invalido.
+    awk 'BEGIN { ORS=""; printf "\"" }
+         {
+           gsub(/\\/, "\\\\");
+           gsub(/"/, "\\"");
+           gsub(/\r/, "\\r");
+           gsub(/\t/, "\\t");
+           if (NR > 1) printf "\\n";
+           printf "%s", $0
+         }
+         END { printf "\"" }'
+}
+
 report_send() {
     local titulo="$1" descricao="$2"
 
@@ -236,19 +250,19 @@ report_send() {
     fi
 
     local corpo
+    local corpo title_json desc_json json
     corpo="$(report_sanitize "$descricao")"
-    # JSON minimo: title, description, includeLogs
-    local json
-    json="$(printf '{"title":"%s","description":"%s","includeLogs":true}' \
-        "$(printf '%s' "$titulo" | sed 's/"/\\"/g')" \
-        "$(printf '%s' "$corpo" | sed 's/"/\\"/g')")"
+    title_json="$(printf '%s' "$titulo" | report_json_quote)"
+    desc_json="$(printf '%s' "$corpo" | report_json_quote)"
+    json="{\"title\":$title_json,\"description\":$desc_json}"
+
     if have curl; then
-        curl -fsS -X POST "$BUG_API_URL" \
-            -H "Authorization: Bearer $BUG_API_TOKEN" \
+        curl -fsS --max-time 15 -X POST "$BUG_API_URL" \
             -H "Content-Type: application/json" \
             -d "$json" >/dev/null 2>&1 && return 0
     elif have wget; then
-        echo "$json" | wget -qO- --post-data=- --header="Authorization: Bearer $BUG_API_TOKEN" --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
+        echo "$json" | wget -qO- --timeout=15 --post-data=- \
+            --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
     fi
     return 1
 }
@@ -256,6 +270,18 @@ report_send() {
 # Chamada unica de report: mostra aviso e tenta enviar (sem bloquear).
 report_error() {
     local titulo="$1"
+
+    # O destino e uma issue publica. Sem TTY/consentimento, nada sai da maquina.
+    [ "${ASSUME_YES:-0}" -eq 1 ] && return 1
+    [ -t 0 ] || return 1
+    printf '  Enviar diagnostico sanitizado para uma issue publica do GoLiveBypassEnhanced? [s/N] ' >&2
+    local consent
+    read -r consent || return 1
+    case "$consent" in [sSyY]*) ;; *)
+        printf '  %s[i]%s Relatorio nao enviado.\n' "$C_DIM" "$C_OFF" >&2
+        return 0
+        ;;
+    esac
     local desc="$(cat 2>/dev/null || true)"
     if [ -s /tmp/glb-report-context.txt ]; then
         desc="$(cat /tmp/glb-report-context.txt 2>/dev/null || true) $desc"
