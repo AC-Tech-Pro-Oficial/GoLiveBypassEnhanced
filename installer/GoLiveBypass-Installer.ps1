@@ -1349,7 +1349,14 @@ function Check-ExternalBypassLaunchers {
         foreach ($p in $props.PSObject.Properties) {
             if ($p.Name -like 'PS*' -or -not ($p.Value -is [string])) { continue }
             if (([string]$p.Value) -match '(?i)DiscordGoLiveBypass') {
-                Write-Warn "Existe um launcher externo de bypass no inicio do Windows ($($p.Name)). Nao o removi."
+                $backupFile = Join-Path (Get-MigrationBackupRoot) 'external-bypass-run-entry.txt'
+                $record = "name=$($p.Name)$([Environment]::NewLine)value=$([string]$p.Value)$([Environment]::NewLine)"
+                [IO.File]::AppendAllText($backupFile, $record, (New-Object Text.UTF8Encoding $false))
+
+                Remove-ItemProperty -Path $runKey -Name $p.Name -ErrorAction Stop
+                Write-Warn "Launcher externo de bypass desativado da inicializacao ($($p.Name)); executavel nao foi apagado."
+                Write-Step "Entrada original salva em $backupFile"
+                Add-MigrationReason "autostart externo conflitante: $($p.Name)"
                 $script:ExternalBypassConflict = $true
             }
         }
@@ -1624,6 +1631,7 @@ function Invoke-Install($root) {
     Write-Host '  Entre numa call e use Go Live ou a camera.' -ForegroundColor DarkGray
     if ($script:ExternalBypassConflict) {
         Write-Warn 'Nao abra o Discord por outro launcher de Go Live/proxy ao mesmo tempo; abra o Discord normalmente.'
+        Write-Host '  O executavel externo nao foi desinstalado; apenas um autostart conhecido foi desativado e arquivado.' -ForegroundColor DarkGray
     }
 
     if (-not $permanent) {
