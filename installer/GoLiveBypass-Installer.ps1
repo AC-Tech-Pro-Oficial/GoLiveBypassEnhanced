@@ -1591,19 +1591,52 @@ function Copy-Plugin($root) {
 
 function Build-Mod($root) {
     if (-not $root) { throw 'Caminho do checkout invalido para compilar o mod.' }
-    Push-Location -LiteralPath $root
+
+    $oldVencordHash = $env:VENCORD_HASH
+    $oldVencordRemote = $env:VENCORD_REMOTE
+    $oldEquicordHash = $env:EQUICORD_HASH
+    $oldEquicordRemote = $env:EQUICORD_REMOTE
+
     try {
-        if (-not (Test-Path -LiteralPath (Join-Path $root 'node_modules'))) {
-            Write-Step 'Instalando dependencias (na primeira vez demora alguns minutos)'
-            & pnpm install
-            if ($LASTEXITCODE -ne 0) { throw 'pnpm install falhou' }
+        # Source archives nao tem .git. Ambos os projetos suportam estas variaveis para
+        # builds reproduziveis; fornecemos o commit resolvido pela API oficial do GitHub.
+        $sourceCommitFile = Join-Path $root '.golive-source-commit'
+        if (Test-Path -LiteralPath $sourceCommitFile) {
+            $commit = (Get-Content -LiteralPath $sourceCommitFile -Raw -Encoding UTF8).Trim()
+            if ($commit -notmatch '^[0-9a-fA-F]{40}$') {
+                throw 'O marker .golive-source-commit esta invalido.'
+            }
+
+            $modName = Get-CheckoutMod $root
+            if ($modName -eq 'Vencord') {
+                $env:VENCORD_HASH = $commit.Substring(0, 12)
+                $env:VENCORD_REMOTE = 'Vendicated/Vencord'
+            } else {
+                $env:EQUICORD_HASH = $commit
+                $env:EQUICORD_REMOTE = 'Equicord/Equicord'
+            }
+            Write-Step "Build de source archive usando metadata $modName @ $($commit.Substring(0, 12))"
         }
 
-        Write-Step 'Compilando'
-        & pnpm build
-        if ($LASTEXITCODE -ne 0) { throw 'pnpm build falhou' }
+        Push-Location -LiteralPath $root
+        try {
+            if (-not (Test-Path -LiteralPath (Join-Path $root 'node_modules'))) {
+                Write-Step 'Instalando dependencias (na primeira vez demora alguns minutos)'
+                & pnpm install
+                if ($LASTEXITCODE -ne 0) { throw 'pnpm install falhou' }
+            }
+
+            Write-Step 'Compilando'
+            & pnpm build
+            if ($LASTEXITCODE -ne 0) { throw 'pnpm build falhou' }
+        } finally {
+            Pop-Location
+        }
     } finally {
-        Pop-Location
+        $env:VENCORD_HASH = $oldVencordHash
+        $env:VENCORD_REMOTE = $oldVencordRemote
+        $env:EQUICORD_HASH = $oldEquicordHash
+        $env:EQUICORD_REMOTE = $oldEquicordRemote
     }
 }
 
