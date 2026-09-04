@@ -349,6 +349,7 @@ function openLogWindow() {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
     },
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
