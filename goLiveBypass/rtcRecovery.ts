@@ -53,6 +53,7 @@ interface PendingRecovery {
     startedAt: number;
     successAt: number;
     action: string;
+    demandDropLogged: boolean;
 }
 
 let pending: PendingRecovery | null = null;
@@ -171,6 +172,22 @@ function generation(voice: any, stream: any) {
     return String(voice?.instanceId ?? "legacy") + ":" + String(stream?.id ?? "none");
 }
 
+function broadcasterRecoveryStillOwned(ctx: VoiceContext, attempt: PendingRecovery) {
+    if (attempt.role !== "broadcaster") return false;
+    const stream = activeStream(ctx?.voice);
+    if (!stream || stream.destroyed === true) return false;
+    if (generation(ctx.voice, stream) !== attempt.generation) return false;
+
+    // Voluntary clearDesktopSource invalidates sourceCached in the isolated shim.
+    // Our recovery clear is guarded and preserves it. This lets demand fall without
+    // confusing a stalled broadcaster with an intentional Stop Sharing action.
+    if (stream.sourceCached !== true) return false;
+
+    const stats = stream.stats;
+    if (!stats || stats.statsOk !== true) return true;
+    return roleOf(stats) === "broadcaster";
+}
+
 function diagnoseMissingBroadcasterStats(ctx: VoiceContext, now: number) {
     if (now - lastDiagnosticAt < DIAGNOSTIC_THROTTLE_MS) return;
 
@@ -287,7 +304,8 @@ async function performRecovery(webContents: WebContents, ctx: VoiceContext, leve
         generation: generation(ctx.voice, stream),
         startedAt: now,
         successAt: 0,
-        action: ""
+        action: "",
+        demandDropLogged: false
     };
     pending = attempt;
 
@@ -343,9 +361,16 @@ async function tick() {
 
             attempt.successAt = 0;
             if (ctx.voice.demandKnown === true && ctx.voice.demandActive !== true) {
-                log("tentativa cancelada: demanda terminou");
-                pending = null;
-                return;
+                if (attempt.role === "broadcaster" && broadcasterRecoveryStillOwned(ctx, attempt)) {
+                    if (!attempt.demandDropLogged) {
+                        attempt.demandDropLogged = true;
+                        log("demanda caiu mas a fonte broadcaster continua ativa; mantendo recuperacao");
+                    }
+                } else {
+                    log("tentativa cancelada: demanda terminou");
+                    pending = null;
+                    return;
+                }
             }
 
             const wait = attempt.level === 1 ? LEVEL1_WAIT_MS : LEVEL2_WAIT_MS;
