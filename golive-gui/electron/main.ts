@@ -9,6 +9,8 @@ import {
   shell,
   clipboard,
   session,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
 } from "electron";
 import path, { dirname } from "path";
 import { fileURLToPath } from "url";
@@ -116,6 +118,56 @@ let mainWindow: BrowserWindow | null = null;
 let logWindow: BrowserWindow | null = null;
 let suppressLogClosedNotify = false;
 let tray: Tray | null = null;
+
+type TrustedIpcEvent = IpcMainInvokeEvent | IpcMainEvent;
+
+function isTopFrameFrom(win: BrowserWindow | null, event: TrustedIpcEvent): boolean {
+  if (!win || win.isDestroyed() || event.sender !== win.webContents) return false;
+  try {
+    return event.senderFrame === event.sender.mainFrame;
+  } catch {
+    return false;
+  }
+}
+
+function assertIpcSender(event: TrustedIpcEvent, scope: "main" | "ui") {
+  const fromMain = isTopFrameFrom(mainWindow, event);
+  const fromLogs = scope === "ui" && isTopFrameFrom(logWindow, event);
+  if (!fromMain && !fromLogs) {
+    console.warn("[security] IPC recusado de renderer nao autorizado:", event.sender.getURL());
+    throw new Error("IPC sender nao autorizado");
+  }
+}
+
+function handleMain(
+  channel: string,
+  handler: (event: IpcMainInvokeEvent, ...args: any[]) => any,
+) {
+  ipcMain.handle(channel, (event, ...args) => {
+    assertIpcSender(event, "main");
+    return handler(event, ...args);
+  });
+}
+
+function handleUi(
+  channel: string,
+  handler: (event: IpcMainInvokeEvent, ...args: any[]) => any,
+) {
+  ipcMain.handle(channel, (event, ...args) => {
+    assertIpcSender(event, "ui");
+    return handler(event, ...args);
+  });
+}
+
+function onMain(
+  channel: string,
+  handler: (event: IpcMainEvent, ...args: any[]) => void,
+) {
+  ipcMain.on(channel, (event, ...args) => {
+    assertIpcSender(event, "main");
+    handler(event, ...args);
+  });
+}
 
 // Fechar a janela esconde na bandeja (Windows) / barra de menus (Mac); so o Sair do menu
 // desliga o app (e reverte o bypass, como o fechar da janela fazia antes). Sem a trava, o X
@@ -1510,7 +1562,7 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
 // tambem remontam o menu ao terminar.
-ipcMain.handle("activate", async (event, proxyAddress: string = "", confirmOverride: boolean = false) => {
+handleMain("activate", async (event, proxyAddress: string = "", confirmOverride: boolean = false) => {
   if (IS_LINUX) {
     // No Linux, a GUI delega pro script standalone; o script.sh ja tem a heuristica
     // de deteccao de outromod e pede Confirm-Action quando acha Vencord/Equicord
@@ -1524,7 +1576,7 @@ ipcMain.handle("activate", async (event, proxyAddress: string = "", confirmOverr
   }
   refreshTray().catch(() => {});
 });
-ipcMain.handle("deactivate", async (event) => {
+handleMain("deactivate", async (event) => {
   // Deactivate EXPLICITO (botao/bandeja): o usuario nao quer mais — zera a flag de
   // auto-injecao do boot. O quit limpo NAO passa aqui (la a injecao e removida mas o
   // usuario so fechou o app; o boot seguinte re-injeta pela flag).
@@ -1536,14 +1588,14 @@ ipcMain.handle("deactivate", async (event) => {
   }
   refreshTray().catch(() => {});
 });
-ipcMain.handle("get-platform", () => (IS_LINUX ? "linux" : isMac ? "mac" : "windows"));
-ipcMain.handle("get-app-version", () => app.getVersion());
-ipcMain.handle("get-status", async () => {
+handleMain("get-platform", () => (IS_LINUX ? "linux" : isMac ? "mac" : "windows"));
+handleMain("get-app-version", () => app.getVersion());
+handleUi("get-status", async () => {
   if (IS_LINUX) return linuxStatus();
   return getStatus();
 });
-ipcMain.handle("get-startup", () => getStartup());
-ipcMain.handle("set-startup", (_event, enabled: unknown) => {
+handleMain("get-startup", () => getStartup());
+handleMain("set-startup", (_event, enabled: unknown) => {
   setStartup(enabled === true);
   refreshTray().catch(() => {});
 });
@@ -2452,8 +2504,8 @@ export function readAutoRevive(): boolean {
 // Detecta Tor disponivel: o embutido (porta dedicada) ou um Tor do sistema (portas classicas).
 
 // IPC de autoUpdate
-ipcMain.handle("get-auto-update", () => readAutoUpdate());
-ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
+handleMain("get-auto-update", () => readAutoUpdate());
+handleMain("set-auto-update", (_event, enabled: unknown) => {
   saveAutoUpdate(enabled !== false);
   refreshTray().catch(() => {});
 });
@@ -2461,22 +2513,22 @@ ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
 // IPC do revive automatico (zumbi: issues #145/#149/#153). No Windows/macOS a copia
 // dentro do asar injetado acompanha o toggle — o runtime le o settings do asar, nao o
 // compartilhado.
-ipcMain.handle("get-auto-revive", () => readAutoRevive());
-ipcMain.handle("set-auto-revive", (_event, enabled: unknown) => {
+handleMain("get-auto-revive", () => readAutoRevive());
+handleMain("set-auto-revive", (_event, enabled: unknown) => {
   saveAutoRevive(enabled !== false);
   updateInjectedAutoRevive(enabled !== false);
 });
 
 // IPC do canal de atualizacao (stable | beta). Nao vai para o asar injetado: e
 // preferencia do updater da GUI, o bypass injetado nao lê isso.
-ipcMain.handle("get-update-channel", () => readUpdateChannel());
-ipcMain.handle("set-update-channel", (_event, canal: unknown) => {
+handleMain("get-update-channel", () => readUpdateChannel());
+handleMain("set-update-channel", (_event, canal: unknown) => {
   saveUpdateChannel(typeof canal === "string" ? canal : "stable");
 });
 
 // IPC do modo de rede + Tor embutido.
-ipcMain.handle("get-net-mode", () => readNetMode());
-ipcMain.handle("set-net-mode", (_event, mode: unknown) => {
+handleMain("get-net-mode", () => readNetMode());
+handleMain("set-net-mode", (_event, mode: unknown) => {
   // A UI manda "auto" para o modo Personalizado (o campo de proxy define a saida).
   const m = typeof mode === "string" && ["auto", "tor"].includes(mode) ? mode : "tor";
   saveNetMode(m);
@@ -2485,7 +2537,7 @@ ipcMain.handle("set-net-mode", (_event, mode: unknown) => {
   const reescritos = m !== "tor" || torVerificado ? updateInjectedNetSettings(m) : 0;
   return { mode: m, reescritos };
 });
-ipcMain.handle("get-tor-status", async () => {
+handleMain("get-tor-status", async () => {
   // "Presente" cobre os dois casos em que nao ha nada a baixar: o nosso ja extraido e um tor
   // instalado no sistema.
   //
@@ -2499,7 +2551,7 @@ ipcMain.handle("get-tor-status", async () => {
     porta: torPortaEmUso,
   };
 });
-ipcMain.handle("install-tor", async () => {
+handleMain("install-tor", async () => {
   // Nao baixa nada quando ja ha um Tor de pe ou instalado: o garantirTor tenta, nessa ordem,
   // reaproveitar quem ja atende, subir o nosso ja extraido, subir o do sistema e, so entao,
   // baixar o pacote oficial.
@@ -2739,7 +2791,7 @@ async function exitCountryViaSocks(
   return null;
 }
 
-ipcMain.handle("test-proxy", async (_event, proxyRaw: unknown) => {
+handleMain("test-proxy", async (_event, proxyRaw: unknown) => {
   const raw = typeof proxyRaw === "string" ? proxyRaw.trim() : "";
   if (raw === "") {
     return { ok: false, error: "Cole o endereco da proxy (socks5://host:porta)." };
@@ -2961,17 +3013,17 @@ function startLogWatch() {
   });
 }
 
-ipcMain.handle("start-log-watch", () => {
+handleUi("start-log-watch", () => {
   startLogWatch();
   return { path: logFilePath() };
 });
 
-ipcMain.handle("stop-log-watch", () => {
+handleUi("stop-log-watch", () => {
   stopLogWatch();
   return true;
 });
 
-ipcMain.handle("get-diagnostic", (_event, payload: unknown) => {
+handleUi("get-diagnostic", (_event, payload: unknown) => {
   const p = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
   const status = typeof p.status === "string" ? p.status : "UNKNOWN";
   const note = typeof p.note === "string" ? p.note : "";
@@ -3072,7 +3124,7 @@ async function postBugReportToApi(
   }
 }
 
-ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
+handleUi("open-bug-report", async (_event, payload: unknown) => {
   const p = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
   const status = typeof p.status === "string" ? p.status : "UNKNOWN";
   const note =
@@ -3150,14 +3202,14 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
   };
 });
 
-ipcMain.handle("open-log-folder", async () => {
+handleUi("open-log-folder", async () => {
   const dir = settingsDir();
   fs.mkdirSync(dir, { recursive: true });
   await shell.openPath(dir);
   return dir;
 });
 
-ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
+handleMain("set-dev-log-window", (_event, open: unknown) => {
   // Janela de logs e ferramenta de desenvolvimento: so existe em npm run dev.
   if (open === true && app.isPackaged) return false;
   if (open === true) {
@@ -3169,7 +3221,7 @@ ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
   return false;
 });
 
-ipcMain.handle("get-proxy", () => {
+handleMain("get-proxy", () => {
   const salva = readProxyFrom(path.join(settingsDir(), "settings.json"));
   if (salva !== "") return salva;
 
@@ -3247,7 +3299,7 @@ function readRuntimeAutoRevive(): boolean {
   return true;
 }
 
-ipcMain.handle("report-bug", async (_event, payload: unknown) => {
+handleMain("report-bug", async (_event, payload: unknown) => {
   const p = (payload ?? {}) as { title?: string; description?: string; includeLogs?: boolean };
   const netMode = readNetMode();
   // O modo que o runtime VAI ler (o que esta gravado na injecao), nao so o do
@@ -3273,7 +3325,7 @@ ipcMain.handle("report-bug", async (_event, payload: unknown) => {
 // A pagina reporta a ALTURA DO CONTEUDO. Com titleBarOverlay, setSize (janela externa)
 // nao casa com essa medida: a janela crescia no Personalizado e nao encolhia ao voltar.
 // setContentSize ajusta a area cliente — a mesma que o getBoundingClientRect mede.
-ipcMain.on("resize-window", (_event, height: unknown) => {
+onMain("resize-window", (_event, height: unknown) => {
   const h = Math.round(Number(height));
   if (!mainWindow || mainWindow.isDestroyed() || !Number.isFinite(h) || h <= 0) return;
   const [, contentH] = mainWindow.getContentSize();
@@ -3283,7 +3335,7 @@ ipcMain.on("resize-window", (_event, height: unknown) => {
 
 // O renderer avisa quando o tema muda para o overlay da barra de titulo
 // (Windows) acompanhar; no Mac e Linux nao ha overlay a ajustar.
-ipcMain.on('set-theme', (_event, value: unknown) => {
+onMain("set-theme", (_event, value: unknown) => {
   if (value !== 'light' && value !== 'dark') return;
   theme = value;
   applyTitlebarTheme();
