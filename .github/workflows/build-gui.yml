@@ -87,8 +87,21 @@ jobs:
           node-version: 22
       - run: npm ci
         working-directory: golive-gui
-      # Com CSC_LINK/CSC_KEY_PASSWORD o electron-builder assina o app; sem eles, builda
-      # sem assinatura (auto-update do Mac so funciona com app assinado).
+      - name: Exigir credenciais de assinatura e notarizacao
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$CSC_LINK" || { echo "CSC_LINK ausente"; exit 1; }
+          test -n "$CSC_KEY_PASSWORD" || { echo "CSC_KEY_PASSWORD ausente"; exit 1; }
+          test -n "$APPLE_ID" || { echo "APPLE_ID ausente"; exit 1; }
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD" || { echo "APPLE_APP_SPECIFIC_PASSWORD ausente"; exit 1; }
+          test -n "$APPLE_TEAM_ID" || { echo "APPLE_TEAM_ID ausente"; exit 1; }
       - run: npm run publish:mac
         working-directory: golive-gui
         env:
