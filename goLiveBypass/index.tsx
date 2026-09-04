@@ -157,7 +157,7 @@ const settings = definePluginSettings({
     },
     proxy: {
         type: OptionType.STRING,
-        description: "Trusted proxy that carries the gateway connection. Leave empty to auto-detect local Tor (recommended), or enter your own SOCKS5/HTTP proxy such as socks5://user:password@host:port. Enhanced never falls back to public proxy lists.",
+        description: "Trusted proxy that carries the gateway connection. Leave empty to auto-detect local Tor (recommended), or enter your own SOCKS5/HTTP proxy such as socks5://user:password@host:port. Enhanced never falls back to public proxy lists. If you include credentials, Vencord/Equicord stores this setting locally as plain configuration text, so prefer a dedicated proxy credential.",
         default: "",
         // Aceita usuario e senha antes do @. O trecho e casado com ganancia para a senha poder
         // conter @ e :, que e comum em credencial gerada por provedor.
@@ -166,7 +166,7 @@ const settings = definePluginSettings({
     },
     excludedCountries: {
         type: OptionType.STRING,
-        description: "Two letter country codes, comma separated, whose proxies are never used. The real exit address is checked, not the one the list claims.",
+        description: "Two-letter country codes, comma separated, that are rejected as exit locations. Enhanced checks the real Tor/custom-proxy exit country when it can; default BR prevents choosing a Brazilian exit.",
         default: "BR"
     }
 });
