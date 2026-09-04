@@ -7,11 +7,19 @@ describe("Electron renderer security boundary", () => {
   const preload = fs.readFileSync(path.resolve(process.cwd(), "electron/preload.ts"), "utf8");
   const renderer = fs.readFileSync(path.resolve(process.cwd(), "src/main.ts"), "utf8");
 
-  it("disables Node integration and enables context isolation in every BrowserWindow", () => {
+  it("isolates and sandboxes every BrowserWindow", () => {
     expect(main).not.toContain("nodeIntegration: true");
     expect(main).not.toContain("contextIsolation: false");
+    expect(main).not.toContain("sandbox: false");
     expect(main.match(/nodeIntegration: false/g)?.length).toBeGreaterThanOrEqual(2);
     expect(main.match(/contextIsolation: true/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(main.match(/sandbox: true/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("denies renderer permission requests by default", () => {
+    expect(main).toContain("setPermissionRequestHandler");
+    expect(main).toContain("callback(false)");
+    expect(main).toContain("setPermissionCheckHandler(() => false)");
   });
 
   it("exports the renderer API only through contextBridge", () => {
