@@ -118,7 +118,10 @@ async function run() {
             box.api.seed(role);
             if (mutation === "disappear") current.voice.connections = [];
             if (mutation === "destroy") current.voice.connections[0].destroyed = true;
-            if (mutation === "generation") current.voice.connections[0].id++;
+            if (mutation === "generation") {
+                current.voice.connections[0].id++;
+                current.voice.connections[0].createdHa = 0; // replacement is not itself stalled
+            }
             if (mutation === "source-clear") current.voice.connections[0].sourceCached = false;
             box.ctx = current;
             await box.api.tick(current);

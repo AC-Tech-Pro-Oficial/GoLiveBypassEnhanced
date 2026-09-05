@@ -37,8 +37,9 @@ let activeWebContents: WebContents | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
 let logger: ((message: string) => void) | null = null;
-let attempts: number[] = [];
-let lastActionAt = 0;
+// Keep the bounded retry window across stream generations, independently by role.
+const attempts = { broadcaster: [] as number[], viewer: [] as number[] };
+const lastActionAt = { broadcaster: 0, viewer: 0 };
 let blockedGeneration = "";
 let blockedAt = 0;
 let lastDiagnosticAt = 0;
@@ -292,7 +293,9 @@ function healthy(ctx: VoiceContext, expectedRole: Exclude<Role, "unknown">) {
 }
 
 function pruneAttempts(now = Date.now()) {
-    attempts = attempts.filter(at => at >= now - ATTEMPT_WINDOW_MS);
+    for (const role of ["broadcaster", "viewer"] as const) {
+        attempts[role] = attempts[role].filter(at => at >= now - ATTEMPT_WINDOW_MS);
+    }
 }
 
 function blockCurrent(ctx: VoiceContext, reason: string) {
@@ -308,11 +311,6 @@ function blockCurrent(ctx: VoiceContext, reason: string) {
 async function performRecovery(webContents: WebContents, ctx: VoiceContext, level: 1 | 2, signal: Signal) {
     const now = Date.now();
     pruneAttempts(now);
-    if (attempts.length >= MAX_ATTEMPTS) {
-        blockCurrent(ctx, "teto de tentativas");
-        return;
-    }
-
     const stream = activeStream(ctx.voice);
     const role = roleOf(stream?.stats);
     if (!stream || (role !== "broadcaster" && role !== "viewer")) {
@@ -320,8 +318,13 @@ async function performRecovery(webContents: WebContents, ctx: VoiceContext, leve
         return;
     }
 
-    attempts.push(now);
-    lastActionAt = now;
+    if (attempts[role].length >= MAX_ATTEMPTS) {
+        blockCurrent(ctx, "teto de tentativas");
+        return;
+    }
+
+    attempts[role].push(now);
+    lastActionAt[role] = now;
     const attempt: PendingRecovery = {
         level,
         role,
@@ -379,8 +382,13 @@ async function tick() {
                 (attempt.role === "broadcaster" && currentStream.sourceCached !== true)) {
                 log("tentativa cancelada: stream terminou ou mudou");
                 pending = null;
-                return;
+                if (!currentStream || generation(ctx.voice, currentStream) === attempt.generation) return;
             }
+        }
+
+        // A replacement stream gets evaluated now, without inheriting the old wait.
+        if (pending) {
+            const attempt = pending;
             if (healthy(ctx, attempt.role)) {
                 if (attempt.successAt === 0) attempt.successAt = now;
                 if (now - attempt.successAt >= SUCCESS_SUSTAINED_MS) {
@@ -424,7 +432,9 @@ async function tick() {
 
         const stream = activeStream(ctx.voice);
         if (blockedAt > 0 && stream && generation(ctx.voice, stream) === blockedGeneration) return;
-        if (lastActionAt > 0 && now - lastActionAt < ACTION_COOLDOWN_MS) return;
+        const role = roleOf(stream?.stats);
+        if (role !== "viewer" && role !== "broadcaster") return;
+        if (lastActionAt[role] > 0 && now - lastActionAt[role] < ACTION_COOLDOWN_MS) return;
 
         await performRecovery(webContents, ctx, 1, signal);
     } finally {
@@ -470,7 +480,8 @@ export function rtcRecoveryStatus() {
     return {
         active: timer !== null && activeWebContents !== null && !activeWebContents.isDestroyed(),
         pending: pending ? { level: pending.level, role: pending.role, action: pending.action } : null,
-        attempts: attempts.length,
+        attempts: attempts.broadcaster.length + attempts.viewer.length,
+        attemptsByRole: { broadcaster: attempts.broadcaster.length, viewer: attempts.viewer.length },
         blocked: blockedAt > 0
     };
 }

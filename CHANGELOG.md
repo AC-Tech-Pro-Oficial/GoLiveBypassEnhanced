@@ -900,6 +900,11 @@ Veja o histórico de tags e commits para o que veio antes.
 - The installed Equicord StreamingCodecDisabler references removed `setAv1Enabled`/`setH265Enabled`/`setH264Enabled` methods. Its checkbox was not proof of a negotiated codec change. No codec-disabler dependency is introduced by this repair.
 # Unreleased — first-frame recovery deadline
 
+- Keep retry budgets and cooldowns separate for viewer and broadcaster roles.
+  Failed viewing attempts no longer prevent recovery of a newly started share.
+  Each role retains its two-attempt limit across stream generations for thirty
+  minutes. A replaced pending stream no longer delays evaluating its replacement.
+
 - Correct native viewer statistics filter to INBOUND=4 (ALL=7 for unknown
   roles). Live inspection confirmed the previous filters never requested
   incoming video statistics. This repairs viewer observability and detection;

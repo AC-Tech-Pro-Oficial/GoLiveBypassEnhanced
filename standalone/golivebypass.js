@@ -2626,8 +2626,9 @@ function showZumbiBanner() {
 // desktop usa discord_voice. A recuperacao enhanced e role-aware: broadcaster
 // reaplica a fonte sem destruir RTC; viewer refresca transporte/subscricao de video.
 // Voice, media sockets e gateway permanecem intactos.
-let videoNativoTentativas = [];
-let videoNativoUltimaAcaoEm = 0;
+// Retry limits survive stream changes, but viewer work cannot consume sender recovery.
+const videoNativoTentativas = { broadcaster: [], viewer: [] };
+const videoNativoUltimaAcaoEm = { broadcaster: 0, viewer: 0 };
 let videoNativoPendente = null;
 let videoNativoBloqueadoGeracao = '';
 let videoNativoBloqueadoEm = 0;
@@ -2786,12 +2787,8 @@ function falharRecuperacaoNativa(ctx, motivo) {
 
 function iniciarRecuperacaoNativa(ctx, nivel, sinal) {
     const agora = Date.now();
-    while (videoNativoTentativas.length > 0 && videoNativoTentativas[0] < agora - VOICE_JANELA_MS) {
-        videoNativoTentativas.shift();
-    }
-    if (videoNativoTentativas.length >= VOICE_TENTATIVAS) {
-        falharRecuperacaoNativa(ctx, 'teto_tentativas');
-        return;
+    for (const papel of ['broadcaster', 'viewer']) {
+        videoNativoTentativas[papel] = videoNativoTentativas[papel].filter(at => at >= agora - VOICE_JANELA_MS);
     }
     const stream = streamNativaAtiva(ctx.voice);
     const stats = stream && stream.stats;
@@ -2801,8 +2798,12 @@ function iniciarRecuperacaoNativa(ctx, nivel, sinal) {
         return;
     }
     const geracao = geracaoNativa(ctx.voice, stream);
-    videoNativoTentativas.push(agora);
-    videoNativoUltimaAcaoEm = agora;
+    if (videoNativoTentativas[papel].length >= VOICE_TENTATIVAS) {
+        falharRecuperacaoNativa(ctx, 'teto_tentativas');
+        return;
+    }
+    videoNativoTentativas[papel].push(agora);
+    videoNativoUltimaAcaoEm[papel] = agora;
     const tentativa = { nivel, geracao, papel, sinal, inicioEm: agora, sucessoEm: 0, confirmada: false, action: '', demandaBaixaLogada: false };
     videoNativoPendente = tentativa;
     sessaoRevives++;
@@ -2852,7 +2853,8 @@ function acompanharRecuperacaoNativa(ctx) {
         (pendente.papel === 'broadcaster' && streamAtual.sourceCached !== true)) {
         log("gw.revive | rtc nativo: tentativa cancelada, stream terminou ou mudou");
         videoNativoPendente = null;
-        return true;
+        // A replacement stream can use its own detector and role budget now.
+        return !streamAtual || geracaoNativa(ctx.voice, streamAtual) === pendente.geracao;
     }
     const agora = Date.now();
     const streamSaudavel = rtcNativoSaudavel(ctx, pendente.papel);
@@ -2902,8 +2904,8 @@ function acompanharRecuperacaoNativa(ctx) {
 
 function processarRtcNativo(ctx) {
     const agora = Date.now();
-    while (videoNativoTentativas.length > 0 && videoNativoTentativas[0] < agora - VOICE_JANELA_MS) {
-        videoNativoTentativas.shift();
+    for (const papel of ['broadcaster', 'viewer']) {
+        videoNativoTentativas[papel] = videoNativoTentativas[papel].filter(at => at >= agora - VOICE_JANELA_MS);
     }
     if (acompanharRecuperacaoNativa(ctx)) return;
     const stream = streamNativaAtiva(ctx.voice);
@@ -2920,7 +2922,8 @@ function processarRtcNativo(ctx) {
         falharRecuperacaoNativa(ctx, 'autoRevive_desligado');
         return;
     }
-    if (videoNativoUltimaAcaoEm > 0 && agora - videoNativoUltimaAcaoEm < VOICE_ACAO_COOLDOWN_MS) return;
+    const papel = sinal === 'viewer-video-parado' ? 'viewer' : 'broadcaster';
+    if (videoNativoUltimaAcaoEm[papel] > 0 && agora - videoNativoUltimaAcaoEm[papel] < VOICE_ACAO_COOLDOWN_MS) return;
     iniciarRecuperacaoNativa(ctx, 1, sinal);
 }
 
