@@ -1,0 +1,65 @@
+{
+  "$schema": "https://ac-tech.pro/schemas/project-design-spec.schema.json",
+  "schema_version": "0.1",
+  "status": "draft",
+  "updated_at": "2026-09-05",
+  "owner_approval": "pending",
+  "product": {
+    "name": "GoLiveBypass Enhanced",
+    "app_id": "golivebypass-enhanced",
+    "description": "TODO"
+  },
+  "audience": {
+    "primary_users": [
+      "TODO"
+    ],
+    "operating_context": "TODO",
+    "accessibility_notes": "TODO"
+  },
+  "platforms": [
+    "TODO"
+  ],
+  "theme": {
+    "default_source": "system_setting",
+    "required_modes": [
+      "light",
+      "dark"
+    ],
+    "in_app_override": "TODO",
+    "exceptions": []
+  },
+  "localization": {
+    "default_source": "system_locale",
+    "required_languages": [
+      "en",
+      "pt-BR"
+    ],
+    "in_app_override": "TODO",
+    "exceptions": []
+  },
+  "brand_assets": {
+    "corporate_identity": "A:\\AC-Tech\\docs\\corporate-identity.md",
+    "asset_reference": "A:\\Assets\\Images\\AC Tech",
+    "usage_notes": "TODO"
+  },
+  "color_tokens": [],
+  "typography": [],
+  "spacing": [],
+  "components": [],
+  "accessibility": {
+    "contrast_target": "WCAG AA unless project documents a stricter target",
+    "keyboard_navigation": "TODO",
+    "screen_reader_labels": "TODO",
+    "focus_states": "TODO",
+    "reduced_motion": "TODO"
+  },
+  "tests": {
+    "light_mode": "TODO",
+    "dark_mode": "TODO",
+    "english": "TODO",
+    "pt_br": "TODO",
+    "layout_overflow": "TODO",
+    "accessibility": "TODO"
+  },
+  "exceptions": []
+}

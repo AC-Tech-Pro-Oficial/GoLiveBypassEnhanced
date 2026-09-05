@@ -1,6 +1,6 @@
-import { ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
-(window as any).api = {
+const api = {
   platform: process.platform,
   activate: (proxy?: string, confirmOverride?: boolean) =>
     ipcRenderer.invoke('activate', proxy, !!confirmOverride),
@@ -36,9 +36,15 @@ import { ipcRenderer } from 'electron';
   onDevLogWindowClosed: (callback: () => void) => {
     ipcRenderer.on('dev-log-window-closed', () => callback());
   },
-  onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
-  onRefreshAutoUpdate: (callback: () => void) => ipcRenderer.on('refresh-auto-update', callback),
-  onRefreshStatus: (callback: () => void) => ipcRenderer.on('refresh-status', callback),
+  onRefreshStartup: (callback: () => void) => {
+    ipcRenderer.on('refresh-startup', () => callback());
+  },
+  onRefreshAutoUpdate: (callback: () => void) => {
+    ipcRenderer.on('refresh-auto-update', () => callback());
+  },
+  onRefreshStatus: (callback: () => void) => {
+    ipcRenderer.on('refresh-status', () => callback());
+  },
   // O watchdog do Tor ressuscitou o daemon no meio da sessao: a janela reabre o aviso do
   // Ctrl+R (a reconexao do gateway pode travar o video ate um reload).
   onTorWatchdogRecuperado: (callback: () => void) => ipcRenderer.on('tor-watchdog-recuperado', callback),
@@ -46,3 +52,5 @@ import { ipcRenderer } from 'electron';
   setTheme: (theme: string) => ipcRenderer.send('set-theme', theme),
   reportBug: (payload: { title: string; description: string; includeLogs: boolean }) => ipcRenderer.invoke('report-bug', payload),
 };
+
+contextBridge.exposeInMainWorld('api', api);

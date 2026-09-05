@@ -1,0 +1,79 @@
+# Native inactive encoder investigation — 2026-09-05
+
+## Observed locally
+
+Windows Discord 1.0.9256, RTX 4080, Equicord with GoLiveBypass Enhanced.
+The owner initiated a test share and confirmed the viewer had it fully open.
+Only selected numeric RTC fields were inspected; source identifiers and account
+identifiers are not recorded here.
+
+- Capture remained around 30 FPS. Native `framesEncoded`, encryption success
+  count for video, and target video bitrate stayed zero. Encoder queue drops grew.
+- The stream's audio packet and byte counters grew with no reported send failures.
+  This proves local transmission, not receiver playback.
+- Renderer `selfVideo` and stream-parameter `active` were true. Native encoder
+  logs nevertheless reported the simulcast stream as inactive.
+- Changing the live codec through `setAudioVideoOverridesTransport` to H.265,
+  H.264 and VP8 did not restore frames. Restoring AV1 preserved the failure.
+- Disabling capture-device sharing, then testing GDI capture, did not restore
+  frames. Original capture options were restored.
+- A nonzero pixel request supplied to the renderer did not restore encoding.
+  The original request was restored.
+
+## Successful controlled intervention
+
+`setTransportOptions({ keyframeInterval: 1000, alwaysSendVideo: true })` on the
+already-sharing native connection restored encoding. `alwaysSendVideo` alone
+did not. Restoring the original keyframe behavior reproduced the stall.
+Reapplying the combined setting restored sustained AV1 NVIDIA Direct3D output:
+2,457 encoded frames, 30 FPS, roughly 2.08 Mbps, zero encoder-queue drops in
+the sampled encoder generation. The encrypted-video counter continued growing.
+
+This establishes a local workaround for the inactive native encoder condition.
+It does not establish why Discord's native activation policy disabled the
+encoder, nor receiver-visible video/audio success on the friend's machine.
+
+## Implemented scope
+
+The existing broadcaster stall detector triggers level-one recovery. After
+source reapplication, the shim enables the combined transport settings only if
+the original keyframe and always-send values were observed. Caller updates are
+remembered while repair remains active. Source change or voluntary stop restores
+the latest caller values. Viewer connections, codec selection, gateway routing,
+encryption and source selection are not changed by this repair.
+
+The selected share may keep encoding with no viewers until its source stops or
+changes. Positive `remoteSinkWantsPixelCount` is a computed quality limit and
+must not be described as proof that a viewer is receiving video.
+
+## Validation boundary
+
+Executable tests cover repair activation, preserving caller objects, remembering
+new original settings, and restoration on source switch/stop in plugin and
+standalone shims. GUI payload regeneration and compilation, and Equicord build
+passed. After a clean restart, an owner-started fresh share triggered
+`desktop-source-keyframe-rearm` automatically at 10:30:46 UTC. The controller
+credited sustained recovery at 10:31:01 UTC. Native samples subsequently exceeded
+10,000 encoded frames at 30–31 FPS, with roughly 1.45–2.31 Mbps across samples,
+over more than five minutes. No live debugging intervention was used on that
+fresh share. Receiver-visible video and application-audio confirmation remain
+required for end-to-end proof.
+
+## First-frame deadline correction
+
+The paired test exposed a timing defect in that workaround. The local native
+sender still reported zero encoded frames at 11:42:12.721 UTC. Recovery and
+encoder reinitialization followed at 11:42:12.928 UTC, with 294 frames by
+11:42:22.782 UTC. The friend's reported receiver timeout was 11:42:07.298 UTC.
+Thus the previous post-recovery counters did not establish timely startup.
+Cross-PC clocks were not independently synchronized; the local 20-second
+zero-output interval itself also exhausted most of the observed receiver budget.
+
+Both controllers now poll every two seconds and allow level-one recovery after
+five seconds of zero output from a selected source with positive input FPS.
+Source age, output-stall age, fresh stats, and existing demand/ownership guards
+remain required. Streams that have encoded frames retain the 20-second stall
+threshold. The existing repair and source restoration behavior are unchanged.
+This corrects a confirmed late-recovery path; successful receiver playback still
+requires a new live test. It does not establish the meaning of the native
+receiver-count feedback or rule out another transport/signaling defect.

@@ -160,6 +160,32 @@ const settingsClose = document.getElementById('settingsClose') as HTMLButtonElem
 
 let currentState = 'INACTIVE';
 
+function appendConflictText(text: string, strong = false) {
+  const node = strong ? document.createElement('strong') : document.createTextNode(text);
+  if (strong) node.textContent = text;
+  conflictBodyText.append(node);
+}
+
+function renderConflictBody(friendly: string, isProtected: boolean) {
+  conflictBodyText.replaceChildren();
+  if (isProtected) {
+    appendConflictText('Sobrescrever este Discord ');
+    appendConflictText(`apaga o ${friendly}`, true);
+    appendConflictText(' e os outros plugins dele ate voce reinstalar tudo. Use o ');
+    appendConflictText('plugin', true);
+    appendConflictText(' do GoLiveBypass para conviver com o mod.');
+    return;
+  }
+
+  appendConflictText('Detectamos o cliente paralelo ');
+  appendConflictText(friendly, true);
+  appendConflictText('. Como esse cliente nao roda plugins de Vencord/Equicord, sobrescrever o app.asar dele nao perde nada - mas o ');
+  appendConflictText(friendly);
+  appendConflictText(' deixa de existir como tal (vira um Discord com bypass). Para manter o mod embutido do ');
+  appendConflictText(friendly);
+  appendConflictText(', o caminho recomendado tambem e o plugin.');
+}
+
 // ---------------------------------------------------------------------------
 // Toast de aviso — canto superior direito. Persistente: so fecha quando o
 // usuario clica no "x" (sem auto-close). Reaparece ao ativar o bypass.
@@ -220,7 +246,7 @@ document.querySelectorAll<HTMLButtonElement>('.theme-opt').forEach((opt) => {
 // necessaria para o main process redimensionar e nada ficar cortado.
 function fitWindowToContent() {
   // Espera o layout apos hidden/details: sem rAF a medicao ainda ve a altura antiga
-  // (Personalizado expandia e a janela nunca encolhia ao voltar para Tor/Gratuitas).
+  // (Personalizado expandia e a janela nunca encolhia ao voltar para Tor).
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       const container = document.querySelector('.container') as HTMLElement | null;
@@ -243,7 +269,7 @@ async function updateStatus() {
     conflictCard.hidden = true;
     // Link do plugin (zip do release): mesma URL para todos os mods.
     conflictPluginLink.href =
-      'https://github.com/bezumiya/GoLiveBypass#instala%C3%A7%C3%A3o-passo-a-passo-completo';
+      'https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/blob/enhanced/rtc-viewer-recovery-v1/goLiveBypass/COMO-INSTALAR.md';
 
     // Decodifica o status: pode ser "OTHER_MOD" (legado) ou "OTHER_MOD:vencord" / "OTHER_MOD:equicord" / etc.
     let baseStatus = status;
@@ -288,20 +314,9 @@ async function updateStatus() {
         toggleBtn.classList.add('overwrite');
       }
       statusCard.hidden = false;
-      // Conflict card: texto especifico por mod
+      // Conflict card: texto especifico por mod, montado sem HTML dinamico.
       conflictTitleText.textContent = `${friendly} detectado`;
-      if (isProtected) {
-        conflictBodyText.innerHTML =
-          `Sobrescrever este Discord <strong>apaga o ${friendly}</strong> e os outros plugins ` +
-          `dele ate voce reinstalar tudo. Use o <strong>plugin</strong> do GoLiveBypass ` +
-          `para conviver com o mod.`;
-      } else {
-        conflictBodyText.innerHTML =
-          `Detectamos o cliente paralelo <strong>${friendly}</strong>. Como esse cliente ` +
-          `nao roda plugins de Vencord/Equicord, sobrescrever o app.asar dele nao perde ` +
-          `nada - mas o ${friendly} deixa de existir como tal (vira um Discord com bypass). ` +
-          `Para manter o mod embutido do ${friendly}, o caminho recomendado tambem e o plugin.`;
-      }
+      renderConflictBody(friendly, isProtected);
       conflictCard.hidden = false;
     } else if (status === 'NOT_FOUND') {
       statusText.innerText = 'Discord não encontrado';
@@ -457,9 +472,8 @@ async function refreshProxy() {
 }
 
 // ---------------------------------------------------------------------------
-// Rede de saida: tres modos segmentados (Tor / Gratuitas / Personalizado).
-// O padrao e TOR (o app instala e usa o Tor sempre). O campo de proxy so aparece
-// no modo Personalizado.
+// Rede de saida: Tor (padrao) ou proxy personalizado explicitamente confiado.
+// O enhanced nao oferece listas publicas: o campo so aparece no modo Personalizado.
 // ---------------------------------------------------------------------------
 const segBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.seg-btn'));
 const torStatusEl = document.getElementById('torStatus') as HTMLElement;
@@ -509,12 +523,9 @@ async function refreshNetMode() {
   try {
     const saved = await window.api.getNetMode();
     const proxy = await window.api.getProxy();
-    // Mapeia o estado salvo para a UI de 3 opcoes:
-    // - "free" -> Gratuitas (escolha explicita)
-    // - "auto" com proxy preenchida -> Personalizado
-    // - o resto ("tor", "auto" sem proxy, vazio) -> Tor, que e o padrao
-    if (saved === 'free') selectMode('free');
-    else if (saved === 'auto' && proxy) selectMode('manual');
+    // Estado "free" de versoes antigas e migrado visualmente para Tor.
+    // "auto" so significa proxy personalizado quando ha um endereco explicito.
+    if (saved === 'auto' && proxy) selectMode('manual');
     else selectMode('tor');
   } catch (err) {
     console.error(err);
@@ -580,11 +591,6 @@ for (const btn of segBtns) {
         aplicarTravaDoTor();
       }).catch(() => {});
       fitWindowToContent();
-    } else if (mode === 'free') {
-      window.api.setNetMode('free').then((r) => mostrarNetModeHint(r.reescritos)).catch(() => {});
-      // Fora do modo Tor nao ha o que esperar: devolve o botao.
-      aplicarTravaDoTor();
-      updateStatus();
     } else {
       // Personalizado: volta ao auto com a proxy do campo.
       window.api.setNetMode('auto').then((r) => mostrarNetModeHint(r.reescritos)).catch(() => {});
@@ -769,7 +775,7 @@ function openBugDialog() {
   if (bugForm) bugForm.hidden = false;
   if (bugSkeleton) bugSkeleton.hidden = true;
   if (bugSuccess) bugSuccess.hidden = true;
-  if (bugSuccessLink) bugSuccessLink.innerHTML = '';
+  if (bugSuccessLink) bugSuccessLink.replaceChildren();
   if (bugDialogTitle) bugDialogTitle.textContent = 'Reportar bug';
   const hint = document.querySelector('.bug-dialog__hint') as HTMLElement | null;
   if (hint) hint.hidden = false;
@@ -831,11 +837,22 @@ bugSubmit?.addEventListener('click', async () => {
       if (hint) hint.hidden = true;
       if (bugDialogTitle) bugDialogTitle.textContent = 'Obrigado!';
       if (bugSuccessLink) {
+        bugSuccessLink.replaceChildren();
         if (r.issueUrl) {
-          const n = r.issueNumber ? ` #${r.issueNumber}` : '';
-          bugSuccessLink.innerHTML = `<a href="${r.issueUrl}" target="_blank" rel="noopener">Ver issue${n} no GitHub →</a>`;
-        } else {
-          bugSuccessLink.textContent = '';
+          try {
+            const issue = new URL(r.issueUrl);
+            if (issue.protocol === 'https:' && issue.hostname === 'github.com') {
+              const n = r.issueNumber ? ` #${r.issueNumber}` : '';
+              const link = document.createElement('a');
+              link.href = issue.toString();
+              link.target = '_blank';
+              link.rel = 'noopener';
+              link.textContent = `Ver issue${n} no GitHub →`;
+              bugSuccessLink.append(link);
+            }
+          } catch {
+            // URL invalida vinda da API: o report continua enviado, apenas nao cria link.
+          }
         }
       }
       setBugStatus('', null);

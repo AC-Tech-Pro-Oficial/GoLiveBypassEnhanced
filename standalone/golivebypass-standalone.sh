@@ -87,7 +87,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # Tor embutido: mesma versao, mesmos hashes e mesma porta da GUI
 # (golive-gui/electron/main.ts). A porta dedicada 9060 nao conflita com um Tor
 # do sistema (9050) nem do Tor Browser (9150).
-TOR_BUNDLE_VERSION="13.5"
+TOR_BUNDLE_VERSION="15.0.21"
 TOR_PORT="9060"
 TOR_BASE="$INSTALL_DIR/Tor"
 TOR_EXE="$TOR_BASE/tor/tor"
@@ -99,8 +99,8 @@ TOR_TORRC="$TOR_BASE/torrc"
 # em golive-gui/electron/main.ts.
 TOR_LIBDIR="$TOR_BASE/tor"
 TOR_TARBALL="tor-expert-bundle-linux-x86_64-$TOR_BUNDLE_VERSION.tar.gz"
-TOR_URL="https://archive.torproject.org/tor-package-archive/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
-TOR_SHA256="147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d"
+TOR_URL="https://dist.torproject.org/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
+TOR_SHA256="40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11"
 TOR_SERVICE="golivebypass-tor.service"
 
 MODE="install"
@@ -185,11 +185,10 @@ fail() {
 
 # =========================================================================== Report de bugs
 # Quando o instalador falha, monta um diagnostico (versao, OS, log sanitizado) e chama
-# a mesma API de bugs da GUI. A issue abre automaticamente no bezumiya/GoLiveBypass.
+# a mesma API publica e rate-limited da GUI. Nenhum segredo de cliente e distribuido.
 # O envio NUNCA bloqueia o fluxo: falhou o report, avisa e segue.
 
 BUG_API_URL="https://api.skyplaceia.com/bugs/v1/reports"
-BUG_API_TOKEN="c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511"
 
 # Sanitiza texto: credenciais em URL, tokens Discord, query de gateway, e a proxy salva.
 report_sanitize() {
@@ -212,6 +211,21 @@ report_sanitize() {
 }
 
 # Envia o report para a API. Devolve 0 em caso de sucesso (issue aberta).
+report_json_quote() {
+    # JSON string POSIX: escapa barra/aspas/CR/TAB e transforma linhas em \\n.
+    # O sender antigo escapava so aspas; diagnostico multiline virava JSON invalido.
+    awk 'BEGIN { ORS=""; printf "\"" }
+         {
+           gsub(/\\/, "\\\\");
+           gsub(/"/, "\\"");
+           gsub(/\r/, "\\r");
+           gsub(/\t/, "\\t");
+           if (NR > 1) printf "\\n";
+           printf "%s", $0
+         }
+         END { printf "\"" }'
+}
+
 report_send() {
     local titulo="$1" descricao="$2"
 
@@ -236,19 +250,19 @@ report_send() {
     fi
 
     local corpo
+    local corpo title_json desc_json json
     corpo="$(report_sanitize "$descricao")"
-    # JSON minimo: title, description, includeLogs
-    local json
-    json="$(printf '{"title":"%s","description":"%s","includeLogs":true}' \
-        "$(printf '%s' "$titulo" | sed 's/"/\\"/g')" \
-        "$(printf '%s' "$corpo" | sed 's/"/\\"/g')")"
+    title_json="$(printf '%s' "$titulo" | report_json_quote)"
+    desc_json="$(printf '%s' "$corpo" | report_json_quote)"
+    json="{\"title\":$title_json,\"description\":$desc_json}"
+
     if have curl; then
-        curl -fsS -X POST "$BUG_API_URL" \
-            -H "Authorization: Bearer $BUG_API_TOKEN" \
+        curl -fsS --max-time 15 -X POST "$BUG_API_URL" \
             -H "Content-Type: application/json" \
             -d "$json" >/dev/null 2>&1 && return 0
     elif have wget; then
-        echo "$json" | wget -qO- --post-data=- --header="Authorization: Bearer $BUG_API_TOKEN" --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
+        echo "$json" | wget -qO- --timeout=15 --post-data=- \
+            --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
     fi
     return 1
 }
@@ -256,6 +270,18 @@ report_send() {
 # Chamada unica de report: mostra aviso e tenta enviar (sem bloquear).
 report_error() {
     local titulo="$1"
+
+    # O destino e uma issue publica. Sem TTY/consentimento, nada sai da maquina.
+    [ "${ASSUME_YES:-0}" -eq 1 ] && return 1
+    [ -t 0 ] || return 1
+    printf '  Enviar diagnostico sanitizado para uma issue publica do GoLiveBypassEnhanced? [s/N] ' >&2
+    local consent
+    read -r consent || return 1
+    case "$consent" in [sSyY]*) ;; *)
+        printf '  %s[i]%s Relatorio nao enviado.\n' "$C_DIM" "$C_OFF" >&2
+        return 0
+        ;;
+    esac
     local desc="$(cat 2>/dev/null || true)"
     if [ -s /tmp/glb-report-context.txt ]; then
         desc="$(cat /tmp/glb-report-context.txt 2>/dev/null || true) $desc"
@@ -560,8 +586,9 @@ while [ $# -gt 0 ]; do
 done
 
 case "$NET_MODE" in
-    ""|auto|tor|free) ;;
-    *) fail "Valor invalido para --net-mode: $NET_MODE (use auto, tor ou free)" ;;
+    ""|auto|tor) ;;
+    free) fail "O modo free foi removido do enhanced. Use Tor ou --proxy com uma saida sua." ;;
+    *) fail "Valor invalido para --net-mode: $NET_MODE (use auto ou tor)" ;;
 esac
 
 # Em automacao (--yes) o report automatico nao deve spammar a API: quase sempre essas
@@ -627,7 +654,7 @@ os_field() {
 
 # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e :
 # codificados. Sem validar aqui, um endereco com erro de digitacao viraria configuracao e o
-# bypass cairia para a lista gratuita sem dizer por que.
+# bypass ficaria sem uma saida confiavel sem dizer por que.
 if [ -n "$PROXY" ]; then
     if ! printf '%s' "$PROXY" | grep -Eq '^(socks5|socks4|https?)://(.+@)?[^:/@[:space:]]+:[0-9]{1,5}(-[0-9]{1,5})?$'; then
         printf '\n  %s[X]%s Endereco de proxy invalido.\n' "$C_RED" "$C_OFF" >&2
@@ -1064,9 +1091,9 @@ install_patcher() {
 
     # O modo de rede (routeMode/torAddr) e escolhido no seletor da GUI e vive no mesmo
     # arquivo. Regravar sem essas chaves apagava a escolha A CADA ativacao: o runtime
-    # voltava ao "auto" em silencio enquanto a GUI seguia mostrando Tor (issue #108).
+    # voltava ao modo errado em silencio enquanto a GUI seguia mostrando Tor (issue #108).
     # Precedencia: flag (--net-mode/--tor-addr, a GUI manda sempre) > --tor/TUI > o que
-    # o arquivo ja tinha. Sem nenhuma das tres (CLI puro), o runtime usa o "auto" classico.
+    # o arquivo ja tinha. O runtime enhanced normaliza ausencia/legado para Tor.
     local route_mode="" tor_addr="" autoupdate=""
     if [ -f "$INSTALL_DIR/settings.json" ]; then
         route_mode="$(sed -n 's/.*"routeMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
@@ -1592,11 +1619,9 @@ tally="$(mktemp)"
 if [ "$MODE" = "install" ] && [ -z "$NET_MODE" ] && st_tui_is_interactive; then
     st_net="$(st_tui_menu "Como o bypass vai sair?" \
         "Tor automatico (recomendado, baixa e sobe sozinho)" \
-        "Proxy gratuita (escolhida e testada sozinha)" \
         "Proxy minha (socks5://host:porta)")"
     case "$st_net" in
-        2) PROXY="" ; TOR_MODE=0 ; NET_MODE="free" ;;
-        3) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ; NET_MODE="auto" ;;
+        2) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ; NET_MODE="auto" ;;
         *) TOR_MODE=1 ; NET_MODE="tor" ;;
     esac
 fi

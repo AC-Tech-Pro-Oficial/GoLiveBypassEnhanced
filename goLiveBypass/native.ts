@@ -5,14 +5,14 @@
  */
 
 import { NativeSettings, RendererSettings } from "@main/settings";
+import { spawn } from "child_process";
 import { app, IpcMainInvokeEvent, session } from "electron";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { request } from "https";
 import { AddressInfo, connect, createServer, Server, Socket } from "net";
 import { dirname, join } from "path";
 import { connect as connectTls } from "tls";
+import { rtcRecoveryStatus, startRtcRecovery, stopRtcRecovery } from "./rtcRecovery";
 
-const FREE_PROXY_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json&timeout=1500";
 const DISCORD_HOST = "discord.com";
 
 // O trace da Cloudflare (~200 bytes) confirma tunel, TLS valido e pais de saida numa conexao
@@ -37,17 +37,12 @@ function isGatewayHost(host: string): boolean {
     return host === "discord.gg" || host.endsWith(ROUTE_SUFFIX);
 }
 
-const MAX_LIST_BYTES = 1024 * 1024;
 const PROBE_TIMEOUT_MS = 6000;
 
 // Prazo curto para as checagens no caminho de abertura: cada segundo aqui sai do orcamento
 // que segura o gateway a espera de uma saida.
 const WARM_PROBE_TIMEOUT_MS = 2500;
 
-const PARALLEL_PROBES = 12;
-const MAX_CANDIDATES = 48;
-const MIN_UPTIME = 90;
-const MAX_LISTED_TIMEOUT = 1500;
 
 // Portas SOCKS de clientes Tor, em ordem de preferencia: 9060 e a porta dedicada que o
 // GoLiveBypass usa (GUI e instaladores), 9052 e a porta comum de um Tor configurado a mao
@@ -68,12 +63,8 @@ const TOR_PORT_TIMEOUT_MS = 400;
 // pronto.
 const TOR_RELAY_TIMEOUT_MS = 30_000;
 
-const POOL_SIZE = 5;
-const POOL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-// De quanto em quanto tempo as saidas do pote sao reconferidas com a sessao ja aberta. Trinta
-// segundos e curto o bastante para a reserva estar quente quando o gateway reconectar, e longo
-// o bastante para nao virar carga na saida gratuita, que costuma limitar conexoes.
+// Batimento leve para a saida confiavel ativa.
 const HEARTBEAT_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 4000;
 
@@ -83,18 +74,14 @@ const HEARTBEAT_TIMEOUT_MS = 4000;
 // protegido pelo TOR_RELAY_TIMEOUT_MS.
 const TOR_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_TIMEOUT_MS * 4;
 
-// Quantos batimentos seguidos uma saida pode errar antes de sair do pote. Cortar no primeiro
-// seria cruel com saida gratuita congestionada, que erra um e volta; nunca cortar deixaria o
-// pote cheio de endereco morto, que e o mesmo que nao ter reserva nenhuma.
+// Proxy personalizado: duas falhas seguidas antes de tentar a mesma configuracao novamente.
 const MAX_MISSED_BEATS = 2;
 
 // Abaixo disto o batimento vai atras de reservas novas. Uma so nao e reserva: e a proxima a
 // morrer.
-const MIN_LIVE_RESERVES = 2;
 
 // Trava entre buscas de fundo: sem ela, um pote que nao consegue encher viraria uma varredura
 // inteira da lista gratuita a cada trinta segundos, pela sessao toda.
-const HUNT_COOLDOWN_MS = 3 * 60_000;
 
 const MAX_LOG_LINES = 400;
 const MAX_LOG_BYTES = 256 * 1024;
@@ -104,26 +91,20 @@ const MAX_RETRIES = 2;
 // sempre travaria o login; soltar na hora perderia a corrida em toda abertura fria. Se
 // estourar, perde-se o Go Live daquela sessao, nunca o Discord.
 const STALL_BUDGET_MS = 12_000;
+const TOR_STARTUP_WAIT_MS = 45_000;
+const TOR_STARTUP_STALL_MS = TOR_STARTUP_WAIT_MS + 5_000;
 
 // Menores que o teste de candidata: uma saida agonizante que demora a falhar no trafego vivo
 // faria o Chromium desistir do roteador inteiro.
 const RELAY_TUNNEL_TIMEOUT_MS = 2500;
 const RELAY_DIRECT_TIMEOUT_MS = 8000;
 
-const INTERCEPTING_PORTS = new Set([4145]);
 
 // O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e : sem
 // precisar de escape: quem recebe um endereco pronto da AWS costuma cola-lo como veio.
 const PROXY_RULES_RE = /^(socks5|https?):\/\/(?:(.+)@)?([a-z0-9.-]{1,253}):(\d{1,5})(?:-(\d{1,5}))?$/;
 
 export type Scope = "login" | "gateway" | "off";
-
-interface PoolEntry {
-    proxy: string;
-    country: string;
-    ms: number;
-    at: number;
-}
 
 // A pasta e a mesma que o modo standalone usa. Quem experimentou os dois acha um arquivo so,
 // em vez de descobrir depois que estava lendo o registro do outro.
@@ -219,6 +200,69 @@ function isTorProxy(proxy: string | null): boolean {
     return (parsed.host === "127.0.0.1" || parsed.host === "localhost") && (TOR_PORTS as number[]).includes(parsed.port);
 }
 
+function sleep(ms: number) {
+    return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
+
+function managedTorPaths(proxy: string) {
+    if (process.platform !== "win32") return null;
+    const parsed = parseProxy(proxy);
+    if (parsed === null || parsed.scheme !== "socks5" ||
+        (parsed.host !== "127.0.0.1" && parsed.host !== "localhost") ||
+        parsed.port !== 9060) return null;
+
+    const base = logDir();
+    if (base === null) return null;
+    return {
+        exe: join(base, "Tor", "tor", "tor.exe"),
+        torrc: join(base, "Tor", "torrc")
+    };
+}
+
+function startManagedTorIfPresent(proxy: string) {
+    const paths = managedTorPaths(proxy);
+    if (paths === null || !existsSync(paths.exe) || !existsSync(paths.torrc)) return false;
+
+    try {
+        const child = spawn(paths.exe, ["-f", paths.torrc], {
+            windowsHide: true,
+            detached: true,
+            stdio: "ignore"
+        });
+        child.unref();
+        log("Tor gerenciado nao estava escutando; relancado invisivelmente pelo plugin");
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Windows Run entries have no reliable ordering. Discord can start while Tor is still
+// bootstrapping, so an explicitly configured local Tor gets a bounded startup window.
+// If our hashed/installed daemon is absent we relaunch only that known executable.
+// The window is finite: after it expires the gateway goes direct, never to a public proxy.
+async function waitForConfiguredTor(proxy: string, totalMs = TOR_STARTUP_WAIT_MS) {
+    const parsed = parseProxy(proxy);
+    if (parsed === null || !isTorProxy(proxy)) return false;
+
+    const deadline = Date.now() + totalMs;
+    let launchAttempted = false;
+    while (Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        if (await listening(parsed.port, TOR_PORT_TIMEOUT_MS)) {
+            const probe = Math.max(1000, Math.min(PROBE_TIMEOUT_MS, remaining));
+            if (await torReachable(proxy, probe)) return true;
+        } else if (!launchAttempted) {
+            launchAttempted = true;
+            startManagedTorIfPresent(proxy);
+        }
+
+        if (Date.now() < deadline) await sleep(Math.min(750, deadline - Date.now()));
+    }
+
+    return false;
+}
+
 function pluginSettings() {
     return RendererSettings.plain.plugins?.GoLiveBypass;
 }
@@ -258,39 +302,6 @@ function requestedCountries(raw: unknown) {
 
 function routesLogin() {
     return pluginSettings()?.sessionRouting === "login";
-}
-
-function readPool(): PoolEntry[] {
-    let stored: unknown;
-    try {
-        stored = NativeSettings.plain.plugins?.GoLiveBypass?.pool;
-    } catch {
-        return [];
-    }
-
-    if (!Array.isArray(stored)) return [];
-
-    return stored.filter((entry): entry is PoolEntry => {
-        if (typeof entry !== "object" || entry === null) return false;
-
-        const { proxy, country, ms, at } = entry as Partial<PoolEntry>;
-        return typeof proxy === "string" && parseProxy(proxy) !== null
-            && typeof country === "string" && typeof ms === "number"
-            && typeof at === "number" && Date.now() - at < POOL_MAX_AGE_MS;
-    });
-}
-
-// Duas instancias do Discord dividem este arquivo; gravar pode falhar por disputa. Perder o
-// pote custa uma busca a mais no proximo boot -- deixar a excecao subir custava o processo.
-function writePool(entries: PoolEntry[]) {
-    try {
-        NativeSettings.store.plugins.GoLiveBypass ??= {};
-        NativeSettings.store.plugins.GoLiveBypass.pool = entries
-            .sort((a, b) => a.ms - b.ms)
-            .slice(0, POOL_SIZE);
-    } catch {
-        // sem pote guardado, o proximo boot procura de novo
-    }
 }
 
 // ------------------------------------------------------------------ falar com uma saida
@@ -442,28 +453,6 @@ function openTunnel(proxy: string, host: string, port: number, timeoutMs = PROBE
 // Abre o mesmo destino por varias saidas ao mesmo tempo e fica com a primeira que responder.
 // Quem chega depois e fechado na hora: tunel aberto e esquecido segura uma conexao do outro
 // lado, e saida gratuita costuma ter poucas.
-function firstTunnel(candidates: string[], host: string, port: number, timeoutMs: number): Promise<{ proxy: string; socket: Socket; } | null> {
-    return new Promise(resolve => {
-        let pending = candidates.length;
-        if (pending === 0) return resolve(null);
-
-        let settled = false;
-
-        for (const candidate of candidates) {
-            openTunnel(candidate, host, port, timeoutMs).then(socket => {
-                if (socket !== null && !settled) {
-                    settled = true;
-                    resolve({ proxy: candidate, socket });
-                    return;
-                }
-
-                socket?.destroy();
-                if (--pending === 0 && !settled) resolve(null);
-            });
-        }
-    });
-}
-
 function readOverTls(socket: Socket, host: string, path: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<string | null> {
     return new Promise(resolve => {
         let body = "";
@@ -506,46 +495,6 @@ function listening(port: number, timeoutMs: number): Promise<boolean> {
     });
 }
 
-function downloadText(url: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const req = request(url, res => {
-            if (res.statusCode !== 200) {
-                res.resume();
-                reject(new Error("Unexpected response status"));
-                return;
-            }
-
-            const chunks: Buffer[] = [];
-            let size = 0;
-            let settled = false;
-
-            res.on("data", (chunk: Buffer) => {
-                if (settled) return;
-
-                size += chunk.length;
-                if (size > MAX_LIST_BYTES) {
-                    settled = true;
-                    res.destroy();
-                    reject(new Error("Response too large"));
-                    return;
-                }
-
-                chunks.push(chunk);
-            });
-
-            res.on("end", () => {
-                if (settled) return;
-                settled = true;
-                resolve(Buffer.concat(chunks).toString("utf8"));
-            });
-        });
-
-        req.on("error", reject);
-        req.setTimeout(15_000, () => req.destroy(new Error("Request timed out")));
-        req.end();
-    });
-}
-
 // ------------------------------------------------------------------ provar uma saida
 
 // O trace da Cloudflare prova que a saida chega na internet, nao que alcanca o Discord --
@@ -583,33 +532,6 @@ async function measure(proxy: string, timeoutMs = PROBE_TIMEOUT_MS) {
     if (!(await reachesGateway(proxy, timeoutMs))) return null;
 
     return { proxy, country: country[1].toUpperCase(), ip: ip?.[1] ?? "", ms: Date.now() - started };
-}
-
-// Todo o lote anda junto e a primeira que responder bem ganha -- testar candidata por
-// candidata podia somar um minuto sozinho, bem no caminho em que o gateway ja esta conectando.
-function firstUsable(candidates: string[], excluded: Set<string>, timeoutMs: number): Promise<PoolEntry | null> {
-    return new Promise(resolve => {
-        let pending = candidates.length;
-        if (pending === 0) return resolve(null);
-
-        let settled = false;
-
-        // candidates.map(measure) pareceria igual mas nao e: map passa (item, indice, array),
-        // e o indice cairia em timeoutMs, dando zero ms para a candidata numero zero.
-        for (const candidate of candidates) {
-            measure(candidate, timeoutMs).then(result => {
-                if (!settled && result !== null && !excluded.has(result.country)) {
-                    settled = true;
-                    log(`${safeProxy(result.proxy)} passou: ${result.ms}ms, saida em ${result.country}`);
-                    resolve({ proxy: result.proxy, country: result.country, ms: result.ms, at: Date.now() });
-                    return;
-                }
-
-                if (result !== null && excluded.has(result.country)) log(`${safeProxy(result.proxy)} recusada: saida em ${result.country}`);
-                if (--pending === 0 && !settled) resolve(null);
-            });
-        }
-    });
 }
 
 // Prazo curto para o handshake TLS puro ate o gateway -- e so isso que decide se a saida
@@ -683,77 +605,6 @@ async function torExit(excluded: Set<string>, timeoutMs: number): Promise<string
     return null;
 }
 
-function rankFreeProxies(body: string, excluded: Set<string>) {
-    const data: unknown = JSON.parse(body);
-    const { proxies } = data as { proxies?: unknown; };
-    if (!Array.isArray(proxies)) return [];
-
-    const usable: { proxy: string; uptime: number; timeout: number; }[] = [];
-
-    for (const item of proxies) {
-        if (typeof item !== "object" || item === null) continue;
-
-        const entry = item as {
-            proxy?: unknown;
-            alive?: unknown;
-            uptime?: unknown;
-            timeout?: unknown;
-            ip_data?: { countryCode?: unknown; };
-        };
-
-        if (typeof entry.proxy !== "string" || entry.alive !== true) continue;
-
-        const parsed = parseProxy(entry.proxy);
-        // A porta 4145 e quase toda de intermediario que responde por qualquer destino sem
-        // encaminhar nada. Ela reprova no teste, mas so depois de gastar o prazo.
-        if (parsed === null || INTERCEPTING_PORTS.has(parsed.port)) continue;
-
-        const uptime = typeof entry.uptime === "number" ? entry.uptime : 0;
-        const timeout = typeof entry.timeout === "number" ? entry.timeout : MAX_LISTED_TIMEOUT;
-        if (uptime < MIN_UPTIME || timeout > MAX_LISTED_TIMEOUT) continue;
-
-        const country = typeof entry.ip_data?.countryCode === "string" ? entry.ip_data.countryCode.toUpperCase() : "";
-        if (excluded.has(country)) continue;
-
-        usable.push({ proxy: entry.proxy, uptime, timeout });
-    }
-
-    return usable
-        .sort((a, b) => b.uptime - a.uptime || a.timeout - b.timeout)
-        .slice(0, MAX_CANDIDATES)
-        .map(entry => entry.proxy);
-}
-
-async function freeExit(excluded: Set<string>, want: number): Promise<PoolEntry[]> {
-    let candidates: string[];
-    try {
-        candidates = rankFreeProxies(await downloadText(FREE_PROXY_API), excluded);
-    } catch {
-        return [];
-    }
-
-    log(`${candidates.length} candidatas depois do ranqueamento`);
-
-    const found: PoolEntry[] = [];
-
-    for (let i = 0; i < candidates.length && found.length < want; i += PARALLEL_PROBES) {
-        const winner = await firstUsable(candidates.slice(i, i + PARALLEL_PROBES), excluded, PROBE_TIMEOUT_MS);
-        if (winner !== null) found.push(winner);
-    }
-
-    return found;
-}
-
-// Reabastecer o pote e uma escolha nova podem correr ao mesmo tempo; duas buscas paralelas
-// disputam a mesma banda e dobram o tempo ate a primeira saida ficar pronta, que e exatamente
-// a janela em que o gateway conecta sem protecao. Quem chegar depois espera a que ja corre.
-let hunting: Promise<PoolEntry[]> | null = null;
-
-function sharedFreeExit(excluded: Set<string>, want: number) {
-    hunting ??= freeExit(excluded, want).finally(() => { hunting = null; });
-    return hunting;
-}
-
 // ------------------------------------------------------------------ escolher a saida
 
 let exit: string | null = null;
@@ -781,11 +632,16 @@ function currentExit(): Promise<string | null> {
             resolve(value);
         };
 
+        const configured = manualProxy();
+        const budget = configured !== "auto" && configured !== "invalid" && isTorProxy(configured.proxy)
+            ? TOR_STARTUP_STALL_MS
+            : STALL_BUDGET_MS;
+
         const guard = setTimeout(() => {
             waiting = waiting.filter(entry => entry !== resume);
-            log("nenhuma saida ficou pronta a tempo, esta conexao vai direta");
+            log(`nenhuma saida ficou pronta em ${Math.round(budget / 1000)}s, esta conexao vai direta`);
             resolve(null);
-        }, STALL_BUDGET_MS);
+        }, budget);
 
         waiting.push(resume);
     });
@@ -796,16 +652,13 @@ function currentExit(): Promise<string | null> {
 function dropExit(dead: string, excluded?: Set<string>) {
     if (exit !== dead) return;
 
-    log(`${safeProxy(dead)} parou de entregar, tirando do pote e procurando outra`);
-    writePool(readPool().filter(entry => entry.proxy !== dead));
+    log(`${safeProxy(dead)} parou de entregar; tentando novamente somente Tor/proxy configurada`);
     missed.delete(dead);
     exit = null;
 
-    // Volta a segurar conexao nova enquanto a busca corre. Sem isto, toda conexao de gateway
-    // que chegasse durante a troca sairia direta na hora -- e a reconexao logo depois de uma
-    // saida morrer e justamente a que decide se a transmissao sobrevive. O then fecha a corrida
-    // de a busca em curso ja ter passado pelo settleExit: sem ele os que esperam so sairiam
-    // pelo prazo, doze segundos parados.
+    // Nao existe fallback para lista publica no enhanced. Enquanto a saida confiavel
+    // reaparece, conexoes novas aguardam o mesmo seletor e, ao fim do prazo, o gateway
+    // pode seguir direto para manter o Discord utilizavel (login continua fail-closed).
     exitSettled = false;
     void chooseExit(excluded).then(() => { if (!exitSettled) settleExit(exit); });
 }
@@ -848,7 +701,7 @@ async function pickExit(excluded: Set<string>) {
         // (Tor respondendo fora do plugin, measure() ainda assim reprovando dentro do prazo).
         const started = Date.now();
         const manualOk = isTorProxy(manual.proxy)
-            ? await torReachable(manual.proxy, PROBE_TIMEOUT_MS)
+            ? await waitForConfiguredTor(manual.proxy)
             : await measure(manual.proxy, WARM_PROBE_TIMEOUT_MS) !== null;
         if (manualOk) {
             log(`seu proxy respondeu em ${Date.now() - started}ms: ${safeProxy(manual.proxy)}`);
@@ -856,62 +709,34 @@ async function pickExit(excluded: Set<string>) {
         }
 
         log(`seu proxy nao respondeu: ${safeProxy(manual.proxy)}`);
-        log("se for Tor, ele precisa estar aberto ANTES do Discord. Procurando alternativa.");
+        // Explicit proxy means explicit trust. Never reinterpret a dead configured
+        // Tor/private proxy as permission to send the gateway through strangers.
+        // settleExit(null) lets Discord remain usable via its normal direct route;
+        // Go Live bypass stays unavailable until the chosen proxy returns.
+        log("proxy configurado indisponivel; nenhuma proxy publica sera usada");
+        return settleExit(null);
     }
 
     return autoExit(excluded);
 }
 
 async function autoExit(excluded: Set<string>) {
-    const pool = readPool();
-    if (pool.length > 0) {
-        const warm = await firstUsable(pool.map(entry => entry.proxy), excluded, WARM_PROBE_TIMEOUT_MS);
-        if (warm !== null) {
-            log(`saida guardada revalidada em ${warm.ms}ms: ${safeProxy(warm.proxy)}`);
-            settleExit(warm.proxy);
-
-            // Solta sem esperar: o pote so serve para o proximo boot, e prender a escolha ate
-            // encher deixaria a sessao atual esperando uma lista inteira a toa.
-            refillPool(excluded, warm).catch(() => { });
-            return;
-        }
-
-        log("as saidas guardadas morreram, procurando outra");
-    }
-
+    // Enhanced trust model: campo vazio significa "Tor local", nunca "ache uma proxy
+    // publica para mim". Isto torna install, plugin e GUI coerentes e impede que estado
+    // legado de pool transforme uma falha do Tor em trafego por um terceiro desconhecido.
     const tor = await torExit(excluded, PROBE_TIMEOUT_MS);
     if (tor !== null) return settleExit(tor);
 
-    log(`procurando uma saida nova, o gateway fica segurado por ate ${Math.round(STALL_BUDGET_MS / 1000)}s`);
-    const [first] = await sharedFreeExit(excluded, 1);
-    log(first === undefined ? "nenhuma saida passou nos testes" : `saida escolhida: ${safeProxy(first.proxy)}`);
-
-    settleExit(first?.proxy ?? null);
-    if (first !== undefined) writePool([first]);
-}
-
-// A busca cara acontece com a sessao ja aberta, para o proximo boot ter opcao pronta --
-// diferenca entre abrir em dois segundos e esperar meio minuto por uma lista.
-async function refillPool(excluded: Set<string>, keep: PoolEntry) {
-    try {
-        const found = await sharedFreeExit(excluded, POOL_SIZE);
-        writePool([keep, ...found.filter(entry => entry.proxy !== keep.proxy)]);
-        log(`pote guardado com ${Math.min(found.length + 1, POOL_SIZE)} saida(s)`);
-    } catch {
-        writePool([keep]);
-    }
+    log("nenhum Tor local confiavel respondeu; nenhuma proxy publica sera consultada ou usada");
+    settleExit(null);
 }
 
 // ------------------------------------------------------------------ manter reserva viva
 
-// Saida gratuita nao avisa que morreu: ela para de encaminhar, e quem descobre e a conexao que
-// estava passando por ela. No meio de uma transmissao isso custa a sessao inteira -- o gateway
-// reconecta, e se reconectar direto o servidor reavalia a conta e o video cai. O batimento
-// existe para que, quando isso acontecer, ja haja no pote uma reserva testada ha trinta
-// segundos para assumir na hora, em vez de a busca comecar com o Discord ja reconectando.
+// O batimento observa apenas a saida confiavel ativa. Tor recebe tratamento conservador
+// durante rotacao de circuito; proxy personalizado so e reavaliado sem buscar terceiros.
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let beating = false;
-let lastHunt = 0;
 
 const missed = new Map<string, number>();
 
@@ -951,88 +776,31 @@ async function beat() {
 // mais uma conexao simultanea numa saida que talvez nao aceite duas.
 async function checkPool() {
     const active = exit;
+    if (active === null) return;
 
-    // Saida Tor: o batimento e so INFORMATIVO -- nunca troca nem descarta (ver comentario de
-    // TOR_HEARTBEAT_TIMEOUT_MS). Sem esta excecao, uma falha de probe durante a construcao de
-    // um circuito novo (a cada ~10min) contava como "perdeu o batimento" e o codigo abaixo
-    // trocava para uma reserva gratuita (ou descartava sem reserva) -- trocando de saida ou
-    // reconectando o gateway a toa, exatamente o bug do issue #122 do standalone. A morte REAL
-    // do Tor aparece no trafego vivo (serveRequest, protegido pelo TOR_RELAY_TIMEOUT_MS bem
-    // mais largo) e vira dropExit ali. O pote de gratuitas fica parado neste ciclo -- sem
-    // problema, ele so importa se a pessoa sair do Tor.
-    if (active !== null && isTorProxy(active)) {
+    // Tor pode demorar durante rotacao de circuito. Um probe curto falhando e apenas
+    // informativo: o trafego vivo usa o prazo Tor mais largo e decide a morte real.
+    if (isTorProxy(active)) {
         const ok = await reachesGateway(active, TOR_HEARTBEAT_TIMEOUT_MS);
         if (!ok) log(`batimento do Tor (${safeProxy(active)}) falhou -- circuito reconstruindo? mantendo a saida`);
         return;
     }
 
-    const stored = readPool();
-
-    // A ativa entra na rodada mesmo estando fora do pote: proxy do campo e Tor local nunca sao
-    // guardados, e sao exatamente os que a pessoa mais sente quando caem.
-    const targets = [...new Set([...(active === null ? [] : [active]), ...stored.map(entry => entry.proxy)])];
-    if (targets.length === 0) return huntReserves(0);
-
-    const beats = await Promise.all(targets.map(async proxy => ({ proxy, ok: await reachesGateway(proxy, HEARTBEAT_TIMEOUT_MS) })));
-
-    const dead = new Set<string>();
-    for (const { proxy, ok } of beats) {
-        if (ok) {
-            missed.delete(proxy);
-            continue;
-        }
-
-        const count = (missed.get(proxy) ?? 0) + 1;
-        missed.set(proxy, count);
-        if (count >= MAX_MISSED_BEATS) dead.add(proxy);
+    // Proxy personalizado e explicitamente confiado pelo usuario. Sem reservas publicas,
+    // duas falhas consecutivas apenas fazem o seletor tentar ESSA configuracao novamente.
+    const ok = await reachesGateway(active, HEARTBEAT_TIMEOUT_MS);
+    if (ok) {
+        missed.delete(active);
+        return;
     }
 
-    if (dead.size > 0) {
-        const survivors = stored.filter(entry => !dead.has(entry.proxy));
-        if (survivors.length !== stored.length) {
-            log(`fora do pote: ${[...dead].map(safeProxy).join(", ")} (sem resposta em ${MAX_MISSED_BEATS} batimentos)`);
-            writePool(survivors);
-        }
+    const count = (missed.get(active) ?? 0) + 1;
+    missed.set(active, count);
+    if (count < MAX_MISSED_BEATS) return;
 
-        for (const proxy of dead) missed.delete(proxy);
-    }
-
-    const live = beats.filter(entry => entry.ok).map(entry => entry.proxy);
-
-    // A ativa e trocada no primeiro erro, nao no segundo: trocar nao custa nada -- socket que ja
-    // esta de pe continua no tunel antigo, so conexao nova nasce pela reserva -- e a proxima
-    // conexao do gateway pode ser a reconexao que decide a transmissao.
-    if (active !== null && !live.includes(active)) {
-        const reserve = live.find(proxy => proxy !== active);
-        if (reserve === undefined) {
-            log(`${safeProxy(active)} perdeu o batimento e nao ha reserva viva`);
-            dropExit(active);
-        } else {
-            log(`${safeProxy(active)} perdeu o batimento, assumindo a reserva ${safeProxy(reserve)}`);
-            exit = reserve;
-        }
-    }
-
-    huntReserves(live.filter(proxy => proxy !== exit).length);
-}
-
-// A busca cara nunca acontece dentro do batimento: ela e solta em segundo plano e o pote so
-// muda quando ela volta, entao um batimento continua custando o mesmo com o pote vazio.
-function huntReserves(liveReserves: number) {
-    if (liveReserves >= MIN_LIVE_RESERVES) return;
-    if (Date.now() - lastHunt < HUNT_COOLDOWN_MS) return;
-
-    lastHunt = Date.now();
-    log(`o pote esta com ${liveReserves} reserva(s) viva(s), procurando mais em segundo plano`);
-
-    sharedFreeExit(excludedCountries(), POOL_SIZE).then(found => {
-        const known = new Set(readPool().map(entry => entry.proxy));
-        const fresh = found.filter(entry => !known.has(entry.proxy));
-        if (fresh.length === 0) return;
-
-        writePool([...readPool(), ...fresh]);
-        log(`${fresh.length} reserva(s) nova(s) no pote`);
-    }).catch(() => { });
+    missed.delete(active);
+    log(`${safeProxy(active)} perdeu ${MAX_MISSED_BEATS} batimentos; nenhuma reserva publica sera usada`);
+    dropExit(active);
 }
 
 // ------------------------------------------------------------------ o roteador local
@@ -1152,25 +920,8 @@ async function serveRequest(client: Socket, request: Buffer | null) {
         const prazoAtiva = isTorProxy(through) ? TOR_RELAY_TIMEOUT_MS : RELAY_TUNNEL_TIMEOUT_MS;
         upstream = await openTunnel(through, target.host, target.port, prazoAtiva);
 
-        // Trocar para uma reserva ja testada custa uma conexao; esperar a proxima abertura do
-        // Discord custa a sessao inteira sem bypass. As reservas correm juntas em vez de uma
-        // por vez: com 2,5s de prazo cada, a fila somava mais de dez segundos com o gateway
-        // reconectando, tempo de sobra para o Chromium desistir do roteador.
-        if (upstream === null) {
-            const won = await firstTunnel(
-                readPool().map(entry => entry.proxy).filter(proxy => proxy !== through),
-                target.host, target.port, RELAY_TUNNEL_TIMEOUT_MS
-            );
-
-            if (won !== null) {
-                log(`${safeProxy(through)} falhou, usando a reserva ${safeProxy(won.proxy)}`);
-                writePool(readPool().filter(entry => entry.proxy !== through));
-                missed.delete(through);
-                exit = won.proxy;
-                upstream = won.socket;
-            }
-        }
-
+        // Enhanced nao troca silenciosamente para reservas publicas. Se a saida
+        // escolhida falhar, o seletor tenta apenas Tor/proxy configurada.
         if (upstream === null) {
             dropExit(through);
             upstream = isLoginHost ? null : await openDirect(target.host, target.port, RELAY_DIRECT_TIMEOUT_MS);
@@ -1325,7 +1076,10 @@ async function stopRouter() {
 // dividirem uma unica subida em vez de duas.
 let enabling: Promise<{ success: boolean; }> | null = null;
 
-export function enable(_?: IpcMainInvokeEvent) {
+export function enable(event?: IpcMainInvokeEvent) {
+    // Vencord/Equicord keeps its own app.asar and plugins. Enhanced RTC recovery
+    // attaches through the plugin native bridge instead of replacing that injection.
+    startRtcRecovery(event?.sender, log);
     enabling ??= enableOnce().finally(() => { enabling = null; });
     return enabling;
 }
@@ -1383,21 +1137,20 @@ async function enableOnce() {
 // Versoes anteriores guardavam uma saida so, em verifiedProxy. Aproveitar ela como semente do
 // pote poupa uma busca inteira no primeiro boot depois da atualizacao.
 function migrateLegacyPool() {
-    const stored: unknown = NativeSettings.plain.plugins?.GoLiveBypass?.verifiedProxy;
-    if (typeof stored !== "object" || stored === null) return;
-
-    const { proxy, at } = stored as { proxy?: unknown; at?: unknown; };
-    if (typeof proxy === "string" && parseProxy(proxy) !== null && typeof at === "number"
-        && Date.now() - at < POOL_MAX_AGE_MS && readPool().length === 0) {
-        writePool([{ proxy, country: "?", ms: 0, at }]);
-        log("saida guardada pela versao anterior aproveitada no pote");
-    }
-
+    // Versoes antigas persistiam proxies publicas em pool/verifiedProxy. Elas nao fazem
+    // parte do enhanced: apaga somente chaves do proprio GoLiveBypass para que uma atualizacao
+    // nunca possa reutilizar silenciosamente uma saida de terceiro.
     try {
-        if (NativeSettings.store.plugins.GoLiveBypass)
-            delete NativeSettings.store.plugins.GoLiveBypass.verifiedProxy;
+        const store = NativeSettings.store.plugins.GoLiveBypass;
+        if (!store) return;
+
+        const hadLegacy = Array.isArray((store as any).pool) || (store as any).verifiedProxy !== undefined;
+        delete (store as any).pool;
+        delete (store as any).verifiedProxy;
+        if (hadLegacy) log("estado legado de proxies publicas removido; enhanced usa somente Tor/proxy configurada");
     } catch {
-        // sobra inofensiva: a leitura acima e a unica que conhece a chave antiga
+        // Falha de persistencia nao deve derrubar o processo principal. Os caminhos ativos
+        // abaixo nunca leem o pool legado, portanto ele fica inerte mesmo se nao puder apagar.
     }
 }
 
@@ -1425,6 +1178,7 @@ async function installPacWithScope(next: Scope) {
 }
 
 export async function shutdown(_: IpcMainInvokeEvent) {
+    stopRtcRecovery();
     await stopRouter();
     settleExit(null);
     // Drenados os que esperavam, a proxima ativacao precisa segurar o gateway de novo ate
@@ -1438,7 +1192,9 @@ export function getActiveProxy(_: IpcMainInvokeEvent) {
 }
 
 export function getLog(_: IpcMainInvokeEvent) {
-    return history.join("\n");
+    const rtc = rtcRecoveryStatus();
+    const rtcLine = `rtc.enhanced.status | active=${rtc.active ? "sim" : "nao"} pending=${rtc.pending ? rtc.pending.role + ":" + rtc.pending.level : "nenhum"} attempts=${rtc.attempts} blocked=${rtc.blocked ? "sim" : "nao"}`;
+    return history.concat([rtcLine]).join("\n");
 }
 
 export function sessionWorked(_: IpcMainInvokeEvent) {
@@ -1473,11 +1229,16 @@ export async function retryWithProxy(event: IpcMainInvokeEvent, excludedCountrie
     // Se a saida no ar ainda responde, foi corrida: o gateway nasceu antes dela e saiu direto.
     // Recarregar conserta sem reinstalar a rota.
     let through = exit;
-    if (through !== null && await measure(through, PROBE_TIMEOUT_MS) === null) {
+    const throughOk = through === null
+        ? false
+        : isTorProxy(through)
+            ? await torReachable(through, TOR_HEARTBEAT_TIMEOUT_MS)
+            : await measure(through, PROBE_TIMEOUT_MS) !== null;
+    if (through !== null && !throughOk) {
         log(`${safeProxy(through)} parou de responder no meio da sessao`);
         dropExit(through, excluded);
 
-        // Le de volta em vez de assumir null: o trafego vivo pode ja ter achado outra saida.
+        // Le de volta em vez de assumir null: o seletor pode ja ter recuperado o Tor/proxy.
         through = exit;
     }
 

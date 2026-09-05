@@ -1,34 +1,52 @@
-# GoLiveBypass — plugin do Vencord/Equicord
+# GoLiveBypassEnhanced — plugin do Vencord/Equicord
 
-Este zip traz os **3 arquivos fonte** do plugin (`index.tsx`, `native.ts` e
-`manifest.json`). Ele não é um instalador: os arquivos entram dentro de um
-**checkout (código-fonte) do Equicord ou do Vencord**, que compila o plugin.
+Esta pasta traz os **5 arquivos fonte** do plugin Enhanced:
 
-## Instalação resumida
+- `index.tsx`
+- `native.ts`
+- `rtcRecovery.ts`
+- `rtcShim.ts`
+- `manifest.json`
 
-1. Tenha o **Git**, **Node.js 22+** e **pnpm** instalados.
-2. Baixe o código do Equicord (ou Vencord):
-   `git clone https://github.com/Equicord/Equicord` (ou Vencord/Vencord)
-3. Copie **esta pasta** (`goLiveBypass`) para dentro de `src/userplugins/`
-   do checkout. Se a pasta `userplugins` não existir dentro de `src/`,
-   **crie ela** — ela fica **ao lado** de `src/plugins`, nunca dentro.
-   No final o caminho deve ser exatamente:
-   `src/userplugins/goLiveBypass/index.tsx`
-4. No checkout: `pnpm install`, depois `pnpm build` e `pnpm inject`
-   (escolha o seu Discord quando perguntar).
-5. Reinicie o Discord por completo e ative **GoLiveBypass** nas
-   configurações de plugins.
+O caminho recomendado no Windows é o instalador Enhanced: ele detecta Vencord/Equicord, preserva os outros plugins/settings, migra instalações antigas, compila o plugin e provisiona/valida o Tor.
 
-## Tutorial completo
+```powershell
+$ErrorActionPreference='Stop'; $b='enhanced/rtc-viewer-recovery-v1'; $u='https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/'+[Uri]::EscapeDataString($b); $r=irm $u -Headers @{'User-Agent'='GoLiveBypassEnhanced-Installer'}; if([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$'){throw 'GitHub nao devolveu um commit valido'}; $env:GOLIVE_ENHANCED_REF=[string]$r.sha; $s=irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s
+```
 
-O README do projeto tem o passo a passo detalhado (com prints de erro
-comuns) na seção **"Instalação: passo a passo completo"**:
-https://github.com/bezumiya/GoLiveBypass#instala%C3%A7%C3%A3o-passo-a-passo-completo
+## Instalação manual
 
-## Já tenho o Vencord instalado pelo instalador oficial — e agora?
+Use o fluxo manual somente se você quiser controlar o checkout/build por conta própria.
 
-O plugin **convive** com o seu Vencord/Equicord atual, mas o caminho acima
-compila tudo do zero: seus plugins atuais ficam salvos e você os reativa nas
-configurações depois do build. Se não quiser compilar, a alternativa é
-continuar usando o **standalone** (que substitui o mod — e aí você perde os
-plugins dele).
+1. Tenha Node.js e pnpm. Git é conveniente, mas o instalador Enhanced também suporta source archive.
+2. Baixe o código do Equicord ou Vencord.
+3. Copie **a pasta inteira** `goLiveBypass` para `src/userplugins/` do checkout. Não copie por cima de uma versão antiga arquivo por arquivo; remova/substitua a pasta anterior para não deixar TypeScript obsoleto.
+4. O caminho final deve conter todos os cinco arquivos, por exemplo:
+   `src/userplugins/goLiveBypass/rtcRecovery.ts`.
+5. Na raiz do mod, rode `pnpm install`, `pnpm build` e `pnpm inject`.
+6. Reinicie o Discord por completo e ative **GoLiveBypass**.
+
+## Rede
+
+O Enhanced usa **Tor local por padrão**. Deixar o campo Proxy vazio significa “usar Tor”; não significa procurar uma proxy pública.
+
+Se você quiser uma saída própria, configure explicitamente uma proxy SOCKS5/HTTP de confiança. O Enhanced não cai silenciosamente para listas públicas.
+
+## Já tenho Vencord/Equicord ou usei outro GoLiveBypass
+
+Prefira o instalador Enhanced acima. Ele foi feito para este caso:
+
+- identifica o mod ativo, inclusive quando um standalone antigo está mascarando a injeção;
+- faz backup das configurações;
+- remove somente estado legado do próprio GoLiveBypass;
+- substitui a pasta do userplugin de forma staged/atômica;
+- preserva plugins e settings não relacionados;
+- recompila e confirma marcadores Enhanced no bundle;
+- reinjeta o mesmo Vencord/Equicord;
+- configura e valida Tor em `127.0.0.1:9060`.
+
+Evite instalar o standalone por cima de Vencord/Equicord. Ele existe para Discord puro; o userplugin é o caminho compatível com mods.
+
+## Projeto Enhanced
+
+https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced

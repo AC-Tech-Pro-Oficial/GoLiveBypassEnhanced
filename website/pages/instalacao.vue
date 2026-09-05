@@ -42,12 +42,12 @@ onMounted(() => {
         <NuxtLink class="decision-card" to="#gui">
           <span class="decision-card__index">01</span>
           <strong>Quero uma janela para ativar</strong>
-          <span>Use a GUI para Windows, macOS ou Linux.</span>
+          <span>A GUI publicada ainda é upstream/legada; use-a somente se não precisa das correções Enhanced.</span>
           <BaseIcon name="arrow-right" :size="16" />
         </NuxtLink>
         <NuxtLink class="decision-card" to="#terminal">
           <span class="decision-card__index">02</span>
-          <strong>Prefiro executar comandos</strong>
+          <strong>Quero o Enhanced Beta recomendado</strong>
           <span>Use o instalador automático pelo PowerShell ou shell POSIX.</span>
           <BaseIcon name="arrow-right" :size="16" />
         </NuxtLink>
@@ -70,9 +70,9 @@ onMounted(() => {
       <div class="section-heading">
         <div>
           <span class="eyebrow">CAMINHO 01</span>
-          <h2 id="install-gui-title">GUI para desktop</h2>
+          <h2 id="install-gui-title">GUI upstream/legada</h2>
         </div>
-        <p>A interface gráfica é o caminho mais curto para quem não quer lidar com arquivos de configuração ou comandos.</p>
+        <p>O fork ainda não publicou sua própria GUI assinada. Estes binários pertencem ao upstream e não devem ser usados para validar o comportamento Enhanced.</p>
       </div>
       <div class="prose-grid">
         <div class="prose-block">
@@ -80,7 +80,7 @@ onMounted(() => {
           <ol class="numbered-list">
             <li><span>01</span><p>Baixe o arquivo da sua plataforma na <NuxtLink to="/downloads">página de downloads</NuxtLink>.</p></li>
             <li><span>02</span><p>Abra o aplicativo e aguarde a detecção do Discord.</p></li>
-            <li><span>03</span><p>Escolha o modo de saída e clique para ativar.</p></li>
+            <li><span>03</span><p>Na GUI legada, prefira Tor. Para o comportamento Tor-only e migração Enhanced, use o caminho por comando.</p></li>
             <li><span>04</span><p>O Discord será reiniciado quando a injeção terminar.</p></li>
           </ol>
         </div>
@@ -114,8 +114,8 @@ onMounted(() => {
         <CommandPathCard
           icon="code"
           kicker="VENCORD / EQUICORD"
-          title="Plugin do Discord"
-          description="Use para preservar Vencord ou Equicord e os outros plugins. Sem flags, o instalador abre a TUI e detecta ou instala o mod escolhido."
+          title="Plugin Enhanced"
+          description="Use para preservar Vencord ou Equicord e os outros plugins. No Windows, o comando recomendado detecta o mod, migra estado legado, valida Tor e verifica o build final."
           :platform="installPlatform === 'windows' ? 'Windows · PowerShell' : 'Linux · shell POSIX'"
           :tui-command="activeInstallCommands.plugin.tui"
           :direct-command="activeInstallCommands.plugin.direct"
@@ -200,13 +200,13 @@ onMounted(() => {
           <span class="eyebrow">CAMINHO AVANÇADO</span>
           <h2 id="install-plugin-title">Plugin manual para Vencord e Equicord</h2>
         </div>
-        <p>O instalador por comando acima é o caminho recomendado. Use este fluxo apenas se quiser baixar o ZIP e fazer cada etapa manualmente.</p>
+        <p>O instalador por comando acima é o caminho recomendado. Use este fluxo apenas se quiser copiar a pasta-fonte do plugin e fazer cada etapa manualmente.</p>
       </div>
       <div class="plugin-layout">
         <div class="prose-block">
           <h3>Passo a passo</h3>
           <ol class="numbered-list numbered-list--plain">
-            <li><span>01</span><p>Baixe o <a :href="downloads.plugin" target="_blank" rel="noopener noreferrer">ZIP do plugin</a> e extraia a pasta <code>goLiveBypass</code>.</p></li>
+            <li><span>01</span><p>Abra a <a :href="downloads.plugin" target="_blank" rel="noopener noreferrer">pasta-fonte Enhanced do plugin</a> e copie a pasta <code>goLiveBypass</code> completa (5 arquivos).</p></li>
             <li><span>02</span><p>Copie-a para <code>src/userplugins/goLiveBypass</code> dentro do seu clone do Vencord ou Equicord. A pasta <code>userplugins</code> fica ao lado de <code>plugins</code>.</p></li>
             <li><span>03</span><p>Na raiz do mod, rode <code>pnpm install</code> e <code>pnpm build</code>.</p></li>
             <li><span>04</span><p>Feche o Discord, rode <code>pnpm inject</code> e abra o Discord novamente. No Vesktop, aponte o campo <strong>Vencord Location</strong> para a pasta <code>dist</code> em vez de usar <code>pnpm inject</code>.</p></li>
@@ -217,7 +217,7 @@ onMounted(() => {
           <div>
             <strong>Não misture os caminhos.</strong>
             <p>O standalone ocupa o lugar do mod e pode remover outros plugins. Se Vencord ou Equicord já estiver instalado, use o instalador do plugin ou este fluxo manual — nunca o standalone.</p>
-            <a class="text-link" :href="githubReleasePageUrl" target="_blank" rel="noopener noreferrer">Ver release e checksums <BaseIcon name="external" :size="15" /></a>
+            <a class="text-link" href="https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced" target="_blank" rel="noopener noreferrer">Abrir fork Enhanced <BaseIcon name="external" :size="15" /></a>
           </div>
         </div>
       </div>

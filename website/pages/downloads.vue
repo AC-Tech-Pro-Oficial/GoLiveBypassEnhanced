@@ -35,14 +35,14 @@ onMounted(() => {
     <PageIntro
       eyebrow="BAIXAR O PROJETO"
       title="Escolha a ferramenta para a sua máquina."
-      description="A GUI vem diretamente da release do GitHub. Para terminal, standalone e plugin, copie o comando oficial correspondente ao seu sistema."
+      description="O Enhanced Beta é instalado pelos scripts deste fork. As GUIs binárias abaixo ainda são releases upstream/legadas até o primeiro release assinado do Enhanced."
     />
 
     <section id="gui" class="release-banner reveal reveal--first">
       <div class="release-banner__copy">
-        <span class="release-banner__label"><span class="status-dot" aria-hidden="true"></span> Release estável</span>
+        <span class="release-banner__label"><span class="status-dot" aria-hidden="true"></span> GUI upstream · legado</span>
         <h2>GoLiveBypass <code>v{{ release.version }}</code></h2>
-        <p>Uma versão para cada sistema desktop. O download abre o arquivo oficial na release correspondente.</p>
+        <p>Estes binários são do upstream e não representam a branch Enhanced. Para testar as correções Enhanced, use a instalação por comando abaixo.</p>
       </div>
       <a class="text-link" :href="githubReleasePageUrl" target="_blank" rel="noopener noreferrer">
         Ver release no GitHub
@@ -54,9 +54,9 @@ onMounted(() => {
       <div class="section-heading section-heading--compact">
         <div>
           <span class="eyebrow">INTERFACE GRÁFICA</span>
-          <h2 id="gui-title">Baixe a GUI</h2>
+          <h2 id="gui-title">GUI legada do upstream</h2>
         </div>
-        <p>Escolhemos uma sugestão com base no seu navegador. As três plataformas continuam disponíveis.</p>
+        <p>Disponível para referência/uso legado. Não use estes binários para validar bugs ou recursos exclusivos do Enhanced.</p>
       </div>
 
       <PlatformTabs v-model="selectedPlatform" />
@@ -66,7 +66,7 @@ onMounted(() => {
           icon="windows"
           kicker="WINDOWS"
           title="Aplicativo para Windows"
-          description="Abra o executável, escolha a configuração e deixe a GUI cuidar da ativação do Discord."
+          description="GUI upstream legada. Para Enhanced Beta no Windows, use o instalador de um comando na seção seguinte."
           :meta="`GoLiveBypass-${release.version}.exe · release ${release.channel}`"
           primary-label="Baixar para Windows"
           :primary-href="downloads.windowsGui"
@@ -85,7 +85,7 @@ onMounted(() => {
           icon="apple"
           kicker="MACOS"
           title="Aplicativo para macOS"
-          description="Use o instalador DMG ou escolha o ZIP para abrir o mesmo aplicativo no macOS."
+          description="GUI upstream legada. O Enhanced ainda não publicou um binário macOS assinado/notarizado."
           :meta="`GoLiveBypass.dmg ou GoLiveBypass.zip · release ${release.channel}`"
           primary-label="Baixar DMG"
           :primary-href="downloads.macDmg"
@@ -103,7 +103,7 @@ onMounted(() => {
           icon="linux"
           kicker="LINUX"
           title="AppImage para Linux"
-          description="Um arquivo portátil para Debian, Ubuntu, Fedora, Arch e outras distribuições compatíveis."
+          description="AppImage upstream legado. O código Enhanced possui instaladores Linux atualizados, mas ainda não há AppImage Enhanced publicado."
           :meta="`GoLiveBypass-${release.version}.AppImage · release ${release.channel}`"
           primary-label="Baixar AppImage"
           :primary-href="downloads.linuxGui"
@@ -121,9 +121,9 @@ onMounted(() => {
       <div class="section-heading">
         <div>
           <span class="eyebrow">INSTALAÇÃO POR COMANDO</span>
-          <h2 id="command-title">Copie e cole no terminal.</h2>
+          <h2 id="command-title">Instale o Enhanced Beta.</h2>
         </div>
-        <p>Terminal, standalone e plugin não são downloads de aplicativo. Cada caminho baixa o instalador oficial e oferece uma versão com TUI e outra sem TUI.</p>
+        <p>No Windows, o primeiro comando usa o migrador Enhanced que preserva Vencord/Equicord, valida Tor e recupera instalações antigas. Linux usa os scripts Enhanced desta mesma branch.</p>
       </div>
 
       <PlatformTabs
@@ -136,8 +136,8 @@ onMounted(() => {
         <CommandPathCard
           icon="code"
           kicker="VENCORD / EQUICORD"
-          title="Plugin do Discord"
-          description="Use quando você já usa Vencord ou Equicord. A TUI detecta o mod e guia a instalação; o modo direto instala com Equicord sem abrir o menu."
+          title="Plugin Enhanced"
+          description="Use quando você já usa Vencord ou Equicord — ou mesmo numa máquina limpa. No Windows, o comando principal detecta/migra o mod, instala dependências quando preciso e valida Tor."
           :platform="commandPlatform === 'windows' ? 'Windows · PowerShell' : 'Linux · shell POSIX'"
           :tui-command="activeTerminalCommands.plugin.tui"
           :direct-command="activeTerminalCommands.plugin.direct"
@@ -168,8 +168,8 @@ onMounted(() => {
       <div class="command-section-footnote">
         <span class="icon-frame icon-frame--muted"><BaseIcon name="lock" :size="17" /></span>
         <div>
-          <strong>O comando roda os scripts oficiais do repositório.</strong>
-          <p>O modo TUI abre o menu interativo. O modo sem TUI usa as flags de automação. Se preferir instalar o plugin manualmente, o <a :href="downloads.plugin" target="_blank" rel="noopener noreferrer">ZIP do plugin</a> continua disponível como caminho avançado.</p>
+          <strong>Os comandos de código apontam para o fork Enhanced.</strong>
+          <p>A GUI acima continua explicitamente upstream até existir release Enhanced. Para instalação manual, abra a <a :href="downloads.plugin" target="_blank" rel="noopener noreferrer">pasta-fonte Enhanced do plugin</a> e siga o guia incluído.</p>
         </div>
       </div>
     </section>
@@ -177,8 +177,8 @@ onMounted(() => {
     <section class="info-note reveal reveal--third">
       <span class="icon-frame icon-frame--muted"><BaseIcon name="lock" :size="18" /></span>
       <div>
-        <strong>Links e comandos sem API do GitHub</strong>
-        <p>A página usa links estáticos para a release e para os scripts oficiais. Se uma versão mudar, a tag, os assets e os comandos ficam centralizados nos arquivos de dados do site.</p>
+        <strong>Proveniência explícita</strong>
+        <p>Scripts e fontes usam AC-Tech-Pro-Oficial/GoLiveBypassEnhanced. Os binários gráficos continuam marcados como upstream/legado até o primeiro release Enhanced, evitando download falso ou downgrade silencioso.</p>
       </div>
     </section>
 

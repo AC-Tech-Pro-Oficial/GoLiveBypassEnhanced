@@ -90,6 +90,7 @@ interface Resumo {
 
 interface VoiceStatsResumo {
   statsOk: boolean;
+  role?: "broadcaster" | "viewer" | "unknown";
   sampleHa: number;
   entradaHa: number;
   saidaHa: number;
@@ -97,6 +98,10 @@ interface VoiceStatsResumo {
   inputFrameRate: number | null;
   framesEncoded: number | null;
   encodeFrameRate: number | null;
+  videoExpected?: boolean;
+  framesDecoded?: number | null;
+  decodeFrameRate?: number | null;
+  decodeHa?: number;
 }
 
 interface VoiceContexto {
@@ -217,6 +222,8 @@ function rodarEscada(): (ctx: CtxRevive) => { acao: string; motivo: string } {
 function rodarGatilhoVideoNativo(): (ctx: VoiceContexto | null) => string | null {
   const codigo =
     "const VOICE_STREAM_AQUECIMENTO_MS = (" + extrairConst("VOICE_STREAM_AQUECIMENTO_MS") + ");\n" +
+    "const VOICE_VIEWER_AQUECIMENTO_MS = (" + extrairConst("VOICE_VIEWER_AQUECIMENTO_MS") + ");\n" +
+    "const VOICE_VIEWER_PARADO_MS = (" + extrairConst("VOICE_VIEWER_PARADO_MS") + ");\n" +
     "const VOICE_DEMANDA_GRACA_MS = (" + extrairConst("VOICE_DEMANDA_GRACA_MS") + ");\n" +
     "const VOICE_ENTRADA_VIVA_MS = (" + extrairConst("VOICE_ENTRADA_VIVA_MS") + ");\n" +
     "const VOICE_SAIDA_PARADA_MS = (" + extrairConst("VOICE_SAIDA_PARADA_MS") + ");\n" +
@@ -487,7 +494,29 @@ describe("gatilho de video nativo travado no transmissor (issue #164)", () => {
   };
 
   it("captura viva + espectador + encoder parado por 20s confirma o zumbi", () => {
-    expect(g(base)).toBe("video-nativo-travado");
+    expect(g(base)).toBe("transmissor-video-parado");
+  });
+
+  it("viewer reentrando com decoder em zero confirma o zumbi do receptor", () => {
+    const viewer: VoiceContexto = {
+      ...base,
+      voice: {
+        ...base.voice,
+        connections: [{
+          id: 8, kind: "stream", destroyed: false, createdHa: 30_000,
+          stats: {
+            statsOk: true, role: "viewer", sampleHa: 0, entradaHa: -1, saidaHa: -1,
+            captureFrames: null, inputFrameRate: null, framesEncoded: null, encodeFrameRate: null,
+            videoExpected: true, framesDecoded: 0, decodeFrameRate: 0, decodeHa: 15_000,
+          },
+        }],
+      },
+    };
+    expect(g(viewer)).toBe("viewer-video-parado");
+    const stream = viewer.voice.connections[0];
+    expect(g({ ...viewer, voice: { ...viewer.voice, connections: [{
+      ...stream, stats: { ...stream.stats, framesDecoded: 8215, decodeFrameRate: 30, decodeHa: 0 },
+    }] } })).toBeNull();
   });
 
   it("oscilacao curta de 3s nao dispara", () => {
@@ -783,7 +812,7 @@ describe("pill de recuperacao + wiring no script", () => {
     expect(src).toContain("function avaliarRtcNativo");
     expect(src).toContain("executeJavaScriptInIsolatedWorld");
     expect(src).toContain("window.__goliveVoiceRecuperar");
-    expect(src).toContain("window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0");
+    expect(src).not.toContain("window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0");
     expect(src).toContain("voice.probe |");
     expect(src).toContain("golivebypass-video");
     // o detector de bytes da beta.3 foi removido de verdade

@@ -145,7 +145,7 @@ fail() {
 banner() {
     printf '\n  %sGoLiveBypass%s\n' "$C_CYAN$C_BOLD" "$C_OFF"
     printf '  %sGo Live e camera de volta no Discord%s\n' "$C_DIM" "$C_OFF"
-    printf '  %shttps://github.com/bezumiya/GoLiveBypass%s\n\n' "$C_DIM" "$C_OFF"
+    printf '  %shttps://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced%s\n\n' "$C_DIM" "$C_OFF"
 }
 
 confirm() {
@@ -161,11 +161,10 @@ confirm() {
 
 # =========================================================================== Report de bugs
 # Quando o instalador falha, monta um diagnostico (versao, OS, log sanitizado) e chama
-# a mesma API de bugs da GUI. A issue abre automaticamente no bezumiya/GoLiveBypass.
+# a mesma API publica e rate-limited da GUI. Nenhum segredo de cliente e distribuido.
 # O envio NUNCA bloqueia o fluxo.
 
 BUG_API_URL="https://api.skyplaceia.com/bugs/v1/reports"
-BUG_API_TOKEN="c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511"
 
 report_sanitize() {
     local texto="$1"
@@ -173,6 +172,21 @@ report_sanitize() {
     texto="$(printf '%s' "$texto" | sed -E 's/\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b/***/g')"
     texto="$(printf '%s' "$texto" | sed -E 's#(https://gateway[^ ?]+)\?[^ ]*#\1?<params>#g')"
     printf '%s' "$texto"
+}
+
+report_json_quote() {
+    # JSON string POSIX: escapa barra/aspas/CR/TAB e transforma linhas em \\n.
+    # O sender antigo escapava so aspas; diagnostico multiline virava JSON invalido.
+    awk 'BEGIN { ORS=""; printf "\"" }
+         {
+           gsub(/\\/, "\\\\");
+           gsub(/"/, "\\"");
+           gsub(/\r/, "\\r");
+           gsub(/\t/, "\\t");
+           if (NR > 1) printf "\\n";
+           printf "%s", $0
+         }
+         END { printf "\"" }'
 }
 
 report_send() {
@@ -199,20 +213,38 @@ report_send() {
         printf '%s %s\n' "$sig" "$(date +%s)" > "$state" 2>/dev/null || true
     fi
 
+    local corpo title_json desc_json json
     corpo="$(report_sanitize "$descricao")"
-    json="$(printf '{"title":"%s","description":"%s","includeLogs":true}' \
-        "$(printf '%s' "$titulo" | sed 's/"/\\"/g')" \
-        "$(printf '%s' "$corpo" | sed 's/"/\\"/g')")"
+    title_json="$(printf '%s' "$titulo" | report_json_quote)"
+    desc_json="$(printf '%s' "$corpo" | report_json_quote)"
+    json="{\"title\":$title_json,\"description\":$desc_json}"
+
     if have curl; then
-        curl -fsS -X POST "$BUG_API_URL" -H "Authorization: Bearer $BUG_API_TOKEN" -H "Content-Type: application/json" -d "$json" >/dev/null 2>&1 && return 0
+        curl -fsS --max-time 15 -X POST "$BUG_API_URL" \
+            -H "Content-Type: application/json" \
+            -d "$json" >/dev/null 2>&1 && return 0
     elif have wget; then
-        echo "$json" | wget -qO- --post-data=- --header="Authorization: Bearer $BUG_API_TOKEN" --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
+        echo "$json" | wget -qO- --timeout=15 --post-data=- \
+            --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
     fi
     return 1
 }
 
 report_error() {
-    local titulo="$1" desc=""
+    local titulo="$1"
+
+    # O destino e uma issue publica. Sem TTY/consentimento, nada sai da maquina.
+    [ "${ASSUME_YES:-0}" -eq 1 ] && return 1
+    [ -t 0 ] || return 1
+    printf '  Enviar diagnostico sanitizado para uma issue publica do GoLiveBypassEnhanced? [s/N] ' >&2
+    local consent
+    read -r consent || return 1
+    case "$consent" in [sSyY]*) ;; *)
+        printf '  %s[i]%s Relatorio nao enviado.\n' "$C_DIM" "$C_OFF" >&2
+        return 0
+        ;;
+    esac
+    local desc=""
     # INSTALL_DIR nao eh setado neste script (era de uma versao antiga da GUI). O log
     # do bypass fica em ${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/golivebypass.log,
     # o mesmo que a GUI e o standalone usam. Fallback para o path do log se existir.
@@ -613,10 +645,10 @@ hide_proxy_secret() {
 }
 
 # ----------------------------------------------------------------------------- Tor embutido
-# Mesmo bundle 13.5 e mesmos hashes da GUI (golive-gui/electron/main.ts), na porta dedicada
+# Mesmo bundle 15.0.21 e mesmos hashes da GUI (golive-gui/electron/main.ts), na porta dedicada
 # 9060. A rotina e idempotente: se um Tor ja atende (nosso, da GUI, do sistema), reusa.
 
-TOR_BUNDLE_VERSION="13.5"
+TOR_BUNDLE_VERSION="15.0.21"
 TOR_PORT="9060"
 TOR_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/Tor"
 TOR_EXE="$TOR_BASE/tor/tor"
@@ -628,8 +660,8 @@ TOR_TORRC="$TOR_BASE/torrc"
 # GUI Electron ja faz em golive-gui/electron/main.ts).
 TOR_LIBDIR="$TOR_BASE/tor"
 TOR_TARBALL="tor-expert-bundle-linux-x86_64-$TOR_BUNDLE_VERSION.tar.gz"
-TOR_URL="https://archive.torproject.org/tor-package-archive/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
-TOR_SHA256="147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d"
+TOR_URL="https://dist.torproject.org/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
+TOR_SHA256="40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11"
 TOR_SERVICE="golivebypass-tor.service"
 
 tor_base() { printf '%s\n' "$TOR_BASE"; }
@@ -1954,73 +1986,55 @@ select_target() {
 
 select_proxy() {
     if tui_is_interactive; then
-        local tui_choice
+        local tui_choice manual
         tui_choice="$(tui_menu "Como o bypass vai sair para fora do Brasil?" \
-            "Proxy gratuita (escolhida e testada sozinha)" \
-            "Tor automatico (baixa e sobe sozinho)" \
+            "Tor automatico (recomendado, baixa e sobe sozinho)" \
             "Proxy minha (socks5://host:porta)")"
-        case "$tui_choice" in
-            2)
-                if ! ensure_tor; then
-                    warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
-                    printf '\n'
-                    return 0
-                fi
-                printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
-                ;;
-            3)
-                local manual
-                manual="$(tui_input "Endereco da proxy")"
-                case "$manual" in
-                    socks5://*|https://*|http://*)
-                        printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
-                    *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
-                esac
-                printf '%s\n' "$manual"
-                ;;
-            *) printf '\n' ;;
-        esac
-        return 0
-    fi
-
-    printf '\n  %sComo o bypass vai sair para fora do Brasil?%s\n\n' "$C_BOLD" "$C_OFF" >&2
-    printf '    %s[1] Proxy gratuita, escolhida e testada sozinha%s\n' "$C_GREEN" "$C_OFF" >&2
-    printf '  %s      Nao precisa instalar nada. O plugin testa varias e usa a que passar.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '    %s[2] Tor automatico%s\n' "$C_CYAN" "$C_OFF" >&2
-    printf '  %s      Baixa e instala o Tor sozinho (uma vez) e deixa ele sempre rodando.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '    %s[3] Proxy minha%s\n' "$C_CYAN" "$C_OFF" >&2
-    printf '  %s      Voce informa o endereco, no formato socks5://host:porta.%s\n\n' "$C_DIM" "$C_OFF" >&2
-
-    local choice manual
-    printf '%s' "  Escolha: " >&2
-    read -r choice
-    case "$choice" in
-        2)
-            if ! ensure_tor; then
-                warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
-                printf '\n'
-                return 0
-            fi
-            printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
-            ;;
-        3)
-            printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
-            printf '  %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A)%s\n' "$C_DIM" "$C_OFF" >&2
-            printf '%s' "  Endereco da proxy: " >&2
-            read -r manual
-            # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
-            # : codificados. Recusar aqui deixaria o suporte a login existindo so no plugin.
-            # O mesmo casamento do =~ do bash, com case. O trecho antes do @ e opcional.
+        if [ "$tui_choice" = "2" ]; then
+            manual="$(tui_input "Endereco da proxy")"
             case "$manual" in
                 socks5://*|https://*|http://*)
-                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' \
+                        || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
                     ;;
                 *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
             esac
             printf '%s\n' "$manual"
-            ;;
-        *) printf '\n' ;;
-    esac
+            return 0
+        fi
+
+        ensure_tor || fail "Tor nao conseguiu entregar gateway.discord.gg. Nao vou usar proxy publica."
+        printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
+        return 0
+    fi
+
+    printf '\n  %sComo o bypass vai sair para fora do Brasil?%s\n\n' "$C_BOLD" "$C_OFF" >&2
+    printf '    %s[1] Tor automatico (recomendado)%s\n' "$C_GREEN" "$C_OFF" >&2
+    printf '  %s      Baixa, valida e deixa o daemon rodando sem janela.%s\n' "$C_DIM" "$C_OFF" >&2
+    printf '    %s[2] Proxy minha%s\n' "$C_CYAN" "$C_OFF" >&2
+    printf '  %s      socks5://host:porta ou https://host:porta%s\n' "$C_DIM" "$C_OFF" >&2
+    printf '  %sO Enhanced nunca escolhe proxy publica por conta propria.%s\n\n' "$C_DIM" "$C_OFF" >&2
+
+    local choice manual
+    printf '%s' "  Escolha: " >&2
+    read -r choice
+    if [ "$choice" = "2" ]; then
+        printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
+        printf '%s' "  Endereco da proxy: " >&2
+        read -r manual
+        case "$manual" in
+            socks5://*|https://*|http://*)
+                printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' \
+                    || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
+                ;;
+            *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
+        esac
+        printf '%s\n' "$manual"
+        return 0
+    fi
+
+    ensure_tor || fail "Tor nao conseguiu entregar gateway.discord.gg. Nao vou usar proxy publica."
+    printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
 }
 
 select_persistence() {
@@ -2404,13 +2418,10 @@ do_install() {
 
     printf '\n'
     ok "Pronto. O plugin ja vem ativado, nao precisa mexer em nada."
-    if [ -n "$proxy" ]; then
-        # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
-        # deu certo.
-        printf '  %sProxy: %s%s\n' "$C_DIM" "$(hide_proxy_secret "$proxy")" "$C_OFF"
-    else
-        printf '  %sProxy: gratuita, escolhida e testada sozinha a cada abertura%s\n' "$C_DIM" "$C_OFF"
-    fi
+    [ -n "$proxy" ] || fail "Instalacao terminou sem uma saida confiavel configurada."
+    # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
+    # deu certo.
+    printf '  %sSaida confiavel: %s%s\n' "$C_DIM" "$(hide_proxy_secret "$proxy")" "$C_OFF"
     printf '  %sEntre numa call e use Go Live ou a camera.%s\n' "$C_DIM" "$C_OFF"
 
     # O deploy do flatpak e refeito do zero a cada atualizacao, e a injecao mora dentro dele.

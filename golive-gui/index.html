@@ -3,18 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
     <title>GoLiveBypass</title>
-    <script>
-      // Aplica o tema antes do CSS carregar para nao piscar claro.
-      // Padrao: dark; respeita o que o usuario salvou.
-      try {
-        var t = localStorage.getItem("golivebypass-theme");
-        document.documentElement.dataset.theme =
-          t === "light" ? "light" : "dark";
-      } catch (e) {
-        document.documentElement.dataset.theme = "dark";
-      }
-    </script>
+    <script src="./theme-init.js"></script>
   </head>
   <body>
     <div id="app">
@@ -141,9 +135,9 @@
               Tutorial: instalar o plugin sem perder o Vencord/Equicord
             </a>
             <p class="conflict-hint">
-              O zip da release traz os 3 arquivos do plugin — ele entra dentro do
-              seu Vencord/Equicord (o tutorial acima mostra o passo a passo
-              completo, incluindo onde extrair). Se preferir substituir o mod
+              O instalador enhanced coloca o plugin completo dentro do seu
+              Vencord/Equicord sem apagar os outros plugins (o tutorial acima
+              mostra o fluxo e os arquivos atuais). Se preferir substituir o mod
               mesmo assim (perde o Vencord e os plugins dele), clique em
               <em>Sobrescrever</em> abaixo e confirme no próximo diálogo.
             </p>
@@ -205,17 +199,6 @@
             <button
               type="button"
               class="seg-btn"
-              data-mode="free"
-              role="radio"
-              aria-checked="false"
-            >
-              <span class="seg-badge seg-badge--insta" aria-hidden="true">instável</span>
-              <span class="seg-label">Gratuitas</span>
-              <span class="seg-hint">proxies da lista</span>
-            </button>
-            <button
-              type="button"
-              class="seg-btn"
               data-mode="manual"
               role="radio"
               aria-checked="false"
@@ -248,6 +231,10 @@
                 aria-live="polite"
               ></small>
             </div>
+            <small class="proxy-privacy-note">
+              Se você usar usuário/senha, essa URL fica salva localmente nas configurações do app/mod.
+              Ela é removida dos relatórios de bug, mas não é guardada em um cofre do Windows/macOS.
+            </small>
             <details class="vps-guide">
               <summary>Como montar uma VPS (saída estável)</summary>
               <ol>
@@ -406,7 +393,7 @@
           <div class="bug-dialog__backdrop" id="bugBackdrop"></div>
           <div class="bug-dialog__panel" role="document">
             <h2 id="bugDialogTitle" class="bug-dialog__title">Reportar bug</h2>
-            <p class="bug-dialog__hint">Descreva o problema. Logs da sessão são incluídos automaticamente — sua proxy é removida antes de enviar.</p>
+            <p class="bug-dialog__hint">Descreva o problema. O envio cria uma <strong>issue pública no GitHub</strong>. Logs da sessão vêm marcados por padrão; credenciais/proxy são redigidas antes do envio e você pode desmarcar os logs.</p>
             <div id="bugForm">
               <label class="bug-field">
                 <span>Resumo *</span>

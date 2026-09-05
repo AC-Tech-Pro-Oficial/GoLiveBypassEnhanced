@@ -10,7 +10,7 @@ import { compararVersoes, escolherRelease, type ReleaseCandidata } from "../elec
 function release(parcial: Partial<ReleaseCandidata>): ReleaseCandidata {
   return {
     tag: "v1.1.12",
-    url: "https://github.com/bezumiya/GoLiveBypass/releases/download/x/GoLiveBypass-1.1.12.exe",
+    url: "https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/releases/download/x/GoLiveBypass-1.1.12.exe",
     digest: "sha256:abc",
     prerelease: false,
     ...parcial,
@@ -18,7 +18,7 @@ function release(parcial: Partial<ReleaseCandidata>): ReleaseCandidata {
 }
 
 function urlDa(tag: string): string {
-  return "https://github.com/bezumiya/GoLiveBypass/releases/download/x/" + tag + ".exe";
+  return "https://github.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/releases/download/x/" + tag + ".exe";
 }
 
 describe("compararVersoes (semver minimo do projeto)", () => {

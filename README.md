@@ -5,9 +5,17 @@
   <a href="https://discord.gg/7cWbtr82rG"><img src="https://img.shields.io/badge/💬_Discord-Entrar_na_comunidade-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Entrar no Discord"></a>
 </p>
 
-Feito por um desenvolvedor brasileiro, o GoLiveBypass **devolve o Go Live e a câmera para usuários brasileiros** no Discord para computador. Escolha a forma de instalação que combina com você — a GUI é o caminho mais simples.
+Feito por um desenvolvedor brasileiro, o GoLiveBypass **devolve o Go Live e a câmera para usuários brasileiros** no Discord para computador.
 
-Por dentro, só o WebSocket de gateway do Discord passa por uma proxy fora do Brasil — todo o resto sai direto, na sua velocidade normal. Os detalhes técnicos ficam [mais abaixo](#como-funciona).
+> **Enhanced beta:** este fork está testando a arquitetura recomendada **Discord + Vencord/Equicord + userplugin enhanced + Tor local**. Ela preserva mods/plugins existentes, migra instalações antigas e **nunca cai silenciosamente para listas públicas de proxies**. Enquanto o fork ainda não tem uma release binária própria, o caminho recomendado no Windows é o instalador de um comando:
+>
+> ```powershell
+> $ErrorActionPreference='Stop'; $b='enhanced/rtc-viewer-recovery-v1'; $u='https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/'+[Uri]::EscapeDataString($b); $r=irm $u -Headers @{'User-Agent'='GoLiveBypassEnhanced-Installer'}; if([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$'){throw 'GitHub nao devolveu um commit valido'}; $env:GOLIVE_ENHANCED_REF=[string]$r.sha; $s=irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/'+$r.sha+'/installer/Install-Enhanced.ps1'); iex $s
+> ```
+>
+> Os executáveis das releases de `bezumiya/GoLiveBypass` são o **upstream/legado** e não contêm necessariamente as correções Enhanced desta branch.
+
+Por dentro, só o WebSocket de gateway do Discord precisa da saída fora do Brasil; mídia/arquivos continuam diretos. No Enhanced, a saída intermediária é **Tor local por padrão** ou uma proxy privada que você configurou explicitamente. Os detalhes técnicos ficam [mais abaixo](#como-funciona).
 
 > **English summary below / Resumo em inglês no final.**
 
@@ -32,7 +40,8 @@ Criamos um aplicativo completo que faz todo o trabalho de forma **100% automáti
 </p>
 
 ### Como Baixar e Instalar
-1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)** aqui no GitHub.
+> **Nota Enhanced:** este fork ainda não publicou uma GUI binária própria. A release abaixo é do projeto upstream e deve ser tratada como **legada**, não como a build Enhanced desta branch.
+1. Se você quer a GUI legada, vá na **[última release upstream](https://github.com/bezumiya/GoLiveBypass/releases/latest)**.
 2. Baixe o arquivo da sua plataforma, na lista no fim da página:
    - **Windows:** `GoLiveBypass.exe` (portátil, roda direto sem instalar)
    - **macOS (Apple Silicon):** `GoLiveBypass.dmg`, ou o `GoLiveBypass.zip` se preferir
@@ -69,7 +78,8 @@ A mesma interface gráfica do Windows, **agora para Linux**, empacotada como **A
 Assim como a versão Windows, ela é **portátil**: ativa o GoLiveBypass ao clicar e fica na **bandeja** do sistema — fechar a janela só a esconde, e o **Sair** pelo ícone da bandeja é o que reverte tudo ao normal. Por baixo, ela chama o [modo standalone](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord) (POSIX, funciona em qualquer shell), então toda a lógica de detecção — Discord nativo, flatpak, bootstrap novo, snap — é a mesma dos scripts, com o progresso aparecendo na tela.
 
 ### Como Baixar e Instalar
-1. Vá na **[última release](https://github.com/bezumiya/GoLiveBypass/releases/latest)**.
+> **Nota Enhanced:** ainda não existe AppImage publicado por este fork. O link abaixo é a GUI upstream/legada.
+1. Vá na **[última release upstream](https://github.com/bezumiya/GoLiveBypass/releases/latest)**.
 2. Baixe o **`GoLiveBypass-*.AppImage`**.
 3. Dê permissão de execução e abra:
 
@@ -209,7 +219,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb.ps1" -Source 
 **Linux:**
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/golivebypass-installer.sh
+curl -fsSLO https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/golivebypass-installer.sh
 chmod +x golivebypass-installer.sh
 ./golivebypass-installer.sh
 ```
@@ -231,12 +241,12 @@ Ao abrir, ele mostra o que encontrou e um menu:
     [0] Sair
 ```
 
-Escolhendo instalar, ele pergunta três coisas: **onde** (usar o mod que já está aí ou baixar outro), **como sair do Brasil** (proxy gratuita testada sozinha, Tor local, ou uma proxy sua) e **por quanto tempo** (permanente, ou temporário — que desfaz a injeção quando você fechar o Discord).
+Escolhendo instalar, ele preserva ou prepara o mod escolhido e configura a saída confiável. No Enhanced, o padrão é **Tor local**; você também pode usar uma **proxy privada sua** quando fizer a configuração manual. Listas públicas de proxies não fazem parte do caminho Enhanced.
 
 **Pelo PowerShell:**
 
 ```powershell
-irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile GoLiveBypass-Installer.ps1
+irm https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/enhanced/rtc-viewer-recovery-v1/installer/GoLiveBypass-Installer.ps1 -OutFile GoLiveBypass-Installer.ps1
 powershell -ExecutionPolicy Bypass -File .\GoLiveBypass-Installer.ps1
 ```
 
@@ -424,7 +434,7 @@ Nenhum dos dois roda comando com sudo sem perguntar antes, e o comando exato apa
 ## Uso
 
 1. Abra o Discord normalmente. O roteador local sobe antes do gateway conectar e a saída é escolhida em seguida.
-2. Se você escolheu Tor no instalador, deixe o Tor aberto antes; com proxy gratuita não precisa fazer nada.
+2. No Enhanced, o instalador gerencia o Tor local e valida um túnel até o gateway antes de concluir. Se você configurou uma proxy privada, mantenha essa saída disponível.
 3. Espere o toast. `Go Live is unlocked on this session` significa que o servidor liberou — só o gateway fica na proxy, todo o resto sai direto. `GoLiveBypass could not unlock this session` significa que mesmo recarregando o servidor manteve o bloqueio: confira o registro e, se usa proxy própria, verifique se ela está no ar.
 4. Entre na call e transmita.
 
@@ -442,18 +452,18 @@ Nas settings do plugin:
 - **Session routing**: o que atravessa a proxy. `Gateway only` (padrão) roteia só o WebSocket do gateway, que é o que libera o Go Live, e deixa o resto do Discord na velocidade máxima. `Gateway and login` também roteia a autenticação, escondendo seu IP real na hora do login — ao custo de uma abertura mais lenta. Nesse modo, se a saída falhar durante o login a conexão **não** cai para a direta: vazar o IP real no login seria o oposto do que a opção promete.
 - **Proxy**: proxy que carrega o gateway, no formato `esquema://host:porta` (`socks5`, `http` ou `https`). Se a sua pedir login, use `esquema://usuario:senha@host:porta`.
   - Tor, se você usa: `socks5://127.0.0.1:9150` com o **Tor Browser** aberto, ou `socks5://127.0.0.1:9050` para o **daemon** `tor`.
-  - **Deixe vazio** para o plugin detectar um Tor local automaticamente e, se não achar, buscar uma proxy gratuita validada.
-- **Excluded countries**: códigos de país de duas letras separados por vírgula que nunca são usados (padrão: `BR`). O país conferido é o de **saída real**, medido através da proxy, não o que a lista afirma.
+  - **Deixe vazio** para o plugin detectar/usar somente um Tor local. Se o Tor não estiver disponível, o Enhanced **não** procura uma proxy pública.
+- **Excluded countries**: códigos de país de duas letras separados por vírgula que não devem ser usados como saída (padrão: `BR`). Para Tor, a checagem de país é best-effort; para uma proxy privada, o teste mede a saída real.
 
 ## Solução de problemas
 
-- **Discord carregando infinitamente**: não deveria acontecer — sem saída pronta, o roteador segura o gateway por no máximo 12s e depois o solta para a conexão direta. Se mesmo assim persistir, com o Discord fechado abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`; no Linux `~/.config/Equicord/settings/settings.json`, e com Discord por Flatpak `~/.var/app/com.discordapp.Discord/config/Equicord/settings/settings.json`) e coloque `"GoLiveBypass": { "enabled": false }`. Em `native-settings.json` a única chave deste plugin é `pool` (as saídas guardadas); apagá-la devolve tudo ao estado inicial. Se você usou uma versão anterior, apague também `verifiedProxy`, `bootPending` e `lastKnownProxy`, que não são mais lidas.
+- **Discord carregando infinitamente**: não deveria acontecer — sem saída pronta, o roteador segura o gateway por no máximo 12s e depois o solta para a conexão direta. Se mesmo assim persistir, com o Discord fechado abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`; no Linux `~/.config/Equicord/settings/settings.json`, e com Discord por Flatpak `~/.var/app/com.discordapp.Discord/config/Equicord/settings/settings.json`) e coloque `"GoLiveBypass": { "enabled": false }`. Versões Enhanced atuais removem automaticamente o estado legado de proxies públicas (`pool`, `verifiedProxy`, `bootPending`, `lastKnownProxy`) sem apagar configurações de outros plugins. Se uma migração antiga ficou incompleta, rode novamente o instalador Enhanced em vez de editar o arquivo inteiro.
 - **"GoLiveBypass is reconnecting behind the proxy"**: a saída ficou pronta depois de o gateway já ter conectado, então a sessão nasceu desprotegida e o servidor manteve o bloqueio. O plugin procura uma saída que responda e recarrega o cliente sozinho para a sessão renascer atrás dela. São no máximo duas tentativas: sem esse teto, um bloqueio que a proxy não resolve viraria recarregamento sem fim.
 - **Meu proxy pede usuário e senha**: coloque no próprio endereço, `socks5://usuario:senha@host:porta`. Funciona para SOCKS5 e para proxy HTTP. Se a senha tiver `@` ou `:`, codifique esses caracteres (`@` vira `%40`, `:` vira `%3A`) — sem isso não dá para saber onde a senha termina. A senha nunca aparece no registro.
 - **"GoLiveBypass could not unlock this session"**: depois das recargas automáticas o servidor continuou bloqueando. O motivo vem junto, entre parênteses: `nenhuma saida respondeu` (nenhuma candidata passou no teste TLS real naquele momento — tente de novo, ou use Tor / uma proxy sua), `tentativas esgotadas` (duas recargas não bastaram), `roteador desligado` (a regra de rota não pegou — veja o registro).
 - **Quer ver o que aconteceu**: rode `/golivebypass` em qualquer canal, ou abra o arquivo em `%LOCALAPPDATA%\GoLiveBypass\golivebypass.log` (veja [O registro](#o-registro-o-que-o-plugin-anotou)). Ele copia um diagnóstico com o estado das travas, da transmissão, da região e o registro do processo principal — qual proxy foi testada, quanto tempo levou, em que país ela sai e por que foi recusada.
 - **A região da call não mudou**: saia e entre de novo no canal. Canais de servidor com região fixada por um admin ignoram sua preferência, e numa call que já está rolando a região já foi decidida.
-- **Captcha ou verificação de telefone no login**: o Discord marca muitos IPs de proxies públicas. Use Tor ou outra proxy.
+- **Captcha ou verificação de telefone no login**: alguns IPs de saída podem ter reputação ruim. Prefira o Tor gerenciado ou uma proxy privada estável.
 - **`Cannot find matching keyid` ao instalar as dependências**: é o corepack, não o plugin. Ele cria o atalho do `pnpm` antes de saber que versão usar, e na primeira execução busca essa versão no registro do npm conferindo a assinatura com chaves embutidas nele — as que vêm no Node 22 estão vencidas. O instalador detecta isso e instala o pnpm pelo npm. Se estiver fazendo à mão, rode `npm install -g pnpm` e siga com `pnpm install`.
 - **Erro de build `Could not resolve "./plugins/userplugins"`**: você copiou a pasta para dentro de `src/plugins/` por engano. O caminho certo é `src/userplugins/goLiveBypass` — a pasta `userplugins` fica em `src/`, **ao lado** de `plugins`, e pode ser necessário criá-la.
 - **Plugin não aparece na lista**: confirme que a pasta está em `src/userplugins/goLiveBypass` (com `index.tsx` e `native.ts`) e que você rodou `pnpm build` + `pnpm inject` e reiniciou o Discord.
@@ -489,10 +499,8 @@ abrindo | win32 x64 | electron 42.7.1 | chrome 148.0.7778.280
 configuracao | proxy automatico | roteamento gateway | regiao de call automatica | paises fora BR
 roteador local de pe na porta 51234
 rota aplicada: gateway.discord.gg, remote-auth-gateway.discord.gg pelo roteador local, o resto em DIRECT
-25 candidatas depois do ranqueamento
-socks5://... recusada: saida em BR
-socks5://... passou: 1535ms, saida em DE
-saida escolhida: socks5://...
+Tor local encontrado em socks5://127.0.0.1:9060
+saida confiavel respondeu e entregou gateway.discord.gg
 sessao aberta | atribuicao do video guard: null
   o cliente aceita video? supports true | supportsInApp true | desktop true
 o servidor liberou video nesta sessao, gateway por socks5://...
@@ -502,27 +510,20 @@ A linha que importa é `atribuicao do video guard: null`. **`null` significa que
 
 ## Reportar um bug (GUI)
 
-O app gráfico tem um botão **Reportar bug** no rodapé. Ele abre um diálogo onde você descreve o problema e envia um pacote de diagnóstico que vira uma issue no GitHub — sem precisar copiar logs na mão.
+O app gráfico tem um botão **Reportar bug**. O relato pode virar uma issue pública no repositório Enhanced sem você precisar copiar logs manualmente.
 
 **O que é enviado:**
-- **Resumo e descrição** que você digita (até 200 e 8 KB).
-- **Logs da sessão** — cauda do `gui.log`, do `golivebypass.log` (do Discord injetado) e o ring buffer em memória — cortados para 256 KB, mantendo o fim (o mais recente importa mais).
-- **Metadados técnicos** — versão do app, plataforma, modo de roteamento (Tor/gratuitas/personalizado), status do bypass, se o Tor embutido está ativo e em qual porta, uptime.
+- **Resumo e descrição** que você digita (até 200 caracteres e 8 KB).
+- **Logs da sessão**, quando você autoriza: caudas do `gui.log`/`golivebypass.log` e ring buffer, com limite local e limite adicional no servidor.
+- **Metadados técnicos limitados**, como versão, plataforma, modo de rota, status do bypass e estado do Tor.
 
-Depois do envio o app mostra o link da **issue criada** (ex.: `https://github.com/bezumiya/GoLiveBypass/issues/123`). Se preferir, abra direto em `https://github.com/bezumiya/GoLiveBypass/issues`.
+A issue é criada em `AC-Tech-Pro-Oficial/GoLiveBypassEnhanced`; o app mostra o link depois do envio.
 
-**Privacidade — o que NUNCA sai da sua máquina:**
-Sua proxy personalizada (`socks5://usuario:senha@host:porta`) é tratada como segredo. Antes de enviar, o app passa o pacote por três camadas:
+**Privacidade:** a proxy personalizada (`socks5://usuario:senha@host:porta`) é tratada como segredo. O cliente aplica redação por padrões conhecidos, remove ocorrências literais dos segredos configurados e faz uma varredura final: se um segredo conhecido sobreviver, o report é bloqueado localmente. Hosts técnicos do Discord e informações não-secretas de diagnóstico podem aparecer porque são necessários para investigar rota/RTC.
 
-- **L1 — padrões conhecidos:** credenciais embutidas em URL (`usuario:***@host`), cabeçalhos `authorization`, tokens do Discord (`mfa.*`) e query string do gateway.
-- **L2 — segredos literais:** qualquer ocorrência exata de usuário, senha, `host:porta` e da URL inteira configurada em `settings.json` vira `<proxy-pessoal>` — mesmo fora de um padrão.
-- **L3 — varredura final:** se algum segredo sobreviveu, **nada é enviado** e o app avisa “proxy apareceu nos logs”. O token da API (`api.skyplaceia.com`) também sai por L2 e trava em L3 se ficar.
+**Modelo de segurança da API:** não existe mais um “segredo do cliente” embutido no aplicativo. Um bearer token distribuído em um binário desktop seria extraível e não autenticaria usuários de verdade. O endpoint `POST https://api.skyplaceia.com/bugs/v1/reports` é deliberadamente público e protegido no servidor por limites de corpo/metadados, neutralização de `@mentions`, rate limit de **3 reports/min por IP** e bloqueio padrão de **600 s** ao exceder a janela. O PAT que cria issues no GitHub fica somente no servidor.
 
-Hosts do Discord (`gateway.discord.gg`) e do país de saída podem aparecer — são necessários para diagnosticar rota e latência. Senha e `host:porta` da sua proxy nunca.
-
-**Operação:** o botão chama `POST https://api.skyplaceia.com/bugs/v1/reports` com `Authorization: Bearer <token>` embutido no app (escopo: só criar issue, com rate limit). Rate limit: **1 issue/min por IP** — o 2º envio no mesmo minuto recebe `429` e bloqueia o IP por **300s** (`Retry-After` + `GET /v1/block-status` informam o tempo restante; a GUI mostra a mensagem de bloqueio com contagem regressiva). O corpo é limitado a 512 KB; o campo `log` é cortado em 256 KB. Logs locais nunca excedem 2 MB por arquivo nem 128 KB em memória.
-
-Sem GUI, compartilhe o arquivo de [O registro](#o-registro-o-que-o-plugin-anotou) manualmente numa issue.
+Sem GUI, compartilhe o arquivo de [O registro](#o-registro-o-que-o-plugin-anotou) manualmente numa issue do fork Enhanced.
 
 ---
 
@@ -550,17 +551,17 @@ Ou seja, o fluxo do GoLiveBypass — **o gateway nasce atrás da proxy e fica ne
 
 **Ressalvas honestas:**
 
-- Se a saída morrer no meio da sessão, o batimento de 30 em 30 segundos costuma perceber antes da sua transmissão e já troca por uma reserva viva — a reconexão do gateway nasce atrás dela e a liberação sobrevive. Só quando *nenhuma* reserva responde é que a conexão cai para a direta, e aí a próxima entrada em canal de voz volta a ser avaliada como BR: o bypass procura outra saída, o plugin detecta o bloqueio na próxima abertura de sessão e recarrega sozinho. Um **Ctrl+R** resolve na hora se você não quiser esperar.
+- Se a saída confiável morrer no meio da sessão, o batimento detecta a falha e tenta novamente **somente Tor local ou a proxy personalizada que você escolheu**. O Enhanced não troca para listas públicas/reservas desconhecidas. Se a saída confiável não voltar dentro do orçamento, o gateway pode seguir direto para manter o Discord utilizável; nessa situação o bypass pode deixar de valer até a rota confiável se recuperar/reconectar.
 - Isso depende de comportamento atual do Discord, que pode mudar a qualquer momento.
 - Usar proxy/VPN para contornar a restrição pode violar os Termos de Serviço do Discord. Risco de punição à conta é baixo, mas existe — considere usar uma conta secundária.
 
 ## Avisos importantes
 
 - **Só funciona no Discord para computador** com Equicord ou Vencord injetado, incluindo o Discord instalado por Flatpak. **Vesktop** tem suporte manual — veja [Instalação no Vesktop](#instalação-no-vesktop). Equibop e Snap não: o Equibop traz o mod embutido e não carrega de um checkout, e o Snap fica dentro de um squashfs somente leitura. Não funciona na versão de navegador/extensão.
-- **Proxies gratuitas são fracas para anonimato**: o operador da proxy vê seus metadados de conexão, muitas estão mortas ou lentas, e o Discord pode pedir captcha para IPs de proxies públicas. Para anonimato real, **use Tor**.
+- O Enhanced **não usa listas públicas de proxies**. O operador de uma proxy controla um ponto sensível da rota; por isso a automação aceita apenas o Tor local ou uma proxy que você configurou conscientemente.
 - Usar clientes modificados viola os Termos de Serviço do Discord. Use por sua conta e risco.
 - A proxy carrega **só o gateway** (e também o login, se você ativar isso na configuração). Todo o resto — API, CDN, anexos, atualizações e a mídia das calls — sai direto com seu IP real o tempo todo.
-- **O plugin nunca te deixa sem Discord.** Quem conversa com a proxy é um roteador local do plugin: se a saída falhar, aquela conexão cai para a direta e a busca por outra recomeça em segundo plano. O pior caso é abrir o Discord *sem* Go Live, nunca ficar sem conseguir abrir.
+- O roteador local preserva a usabilidade sem trocar silenciosamente de confiança. Para o gateway, uma saída indisponível pode terminar em conexão direta após o orçamento de espera; no escopo opcional de login, a falha continua **fail-closed** para não vazar o IP real contrariando a opção escolhida.
 
 ## Como funciona
 
@@ -579,29 +580,26 @@ Destravar o cliente não basta: o servidor decide separadamente se você pode tr
 Por isso o plugin proxia **só o gateway**:
 
 1. Na abertura do app, o plugin sobe um **roteador SOCKS local** (só escuta em `127.0.0.1`) e instala uma regra PAC que aponta unicamente os hosts de gateway para ele. Todo o resto segue a regra que o seu sistema já usava.
-2. O roteador escolhe a saída — a sua proxy, um Tor local, ou uma gratuita testada — e segura o gateway por **até 12 segundos** enquanto isso. Estourado o prazo, aquela conexão sai direta: perde-se o Go Live daquela sessão, nunca o Discord.
-3. O gateway nasce atrás da saída e **permanece roteado pela sessão inteira**: se a rede oscilar e o WebSocket reconectar, ele renasce pela mesma saída e a liberação sobrevive. Enquanto a sessão está de pé, um **batimento a cada 30 segundos** reconfere a saída ativa e as reservas e promove uma reserva viva assim que a ativa falha — antes de a reconexão precisar dela. Só se nada responder é que a conexão cai para a direta, e tudo isso vai para o registro.
+2. O roteador usa **Tor local** quando não existe proxy privada explícita. Ele nunca interpreta “Tor indisponível” como permissão para buscar um intermediário público desconhecido.
+3. O gateway permanece na saída confiável durante a sessão. O batimento observa a saúde da saída; Tor recebe tolerância maior durante rotação de circuitos e uma proxy privada é retestada sem procurar reservas públicas.
 4. Cerca de 1,5s depois da sessão abrir (a atribuição do experimento só é reavaliada alguns ticks após o `CONNECTION_OPEN`), o plugin confere o veredito no servidor e te diz num toast se a sessão ficou liberada de verdade. Se não ficou, ele recarrega o cliente atrás da saída — no máximo duas vezes, para nunca virar tela de carregamento infinita.
 
 O momento ainda importa, mas a corrida mudou de lado: quem espera é o socket do gateway, segurado pelo roteador, e não a abertura inteira do app.
 
-### Como as proxies gratuitas são escolhidas
+### Política de confiança da saída
 
-- A lista da ProxyScrape já traz `alive`, `uptime` e `timeout`. O plugin **ranqueia por esses campos** (uptime >= 90, timeout <= 1500ms) em vez de sortear a lista.
-- Descarta a porta 4145: numa amostra medida, 14 de 14 proxies nessa porta interceptavam TLS com certificado forjado.
-- Testa as candidatas **em lotes de 12 correndo juntas, e a primeira que responde bem ganha** — testar uma por uma somava dezenas de segundos bem na janela em que o gateway conecta.
-- O teste é um **handshake TLS real através do túnel**: o `cdn-cgi/trace` da Cloudflare prova túnel, certificado válido, **país de saída real** e IP de saída numa conexão só; em seguida uma conexão ao `gateway.discord.gg` prova que o Discord é alcançável por ela (qualquer resposta HTTP serve — o gateway responde 404 a um GET comum, e 404 já prova o caminho).
-- O país conferido é o de **saída real**, medido através da proxy, porque o `countryCode` da lista descreve o IP de entrada, que frequentemente é diferente do de saída.
-
-Medido: escolher aleatoriamente e testar só o handshake acerta 12% das vezes; ranquear e exigir TLS real acerta 60%. Ainda assim, um Tor local ganha de qualquer lista gratuita, e é por isso que o plugin o prefere.
+- **Tor local é o padrão** e é automaticamente detectado/gerenciado pelo caminho Enhanced.
+- Uma **proxy personalizada** só é usada quando você a configurou explicitamente.
+- Instalações antigas podem conter caches de proxies públicas; a migração Enhanced os remove e os caminhos ativos não os consultam.
+- O plugin mantém a mídia (`*.discord.media`) fora do proxy; a saída confiável é usada para o gateway e, opcionalmente, para login quando você pede esse escopo.
 
 ### Proteções contra travar o Discord
 
 - **Quem decide o fallback é o roteador, não o Chromium.** A regra PAC não tem alternativa do tipo `PROXY;DIRECT`: se a saída falha, a conexão cai para a direta *dentro* do roteador, com registro. Um proxy morto nunca deixa o Discord preso na tela de abertura — e nunca faz o Chromium desistir da regra em silêncio.
 - **Orçamento de espera por conexão**: o gateway aguarda uma saída por no máximo 12s; estourado, sai direto. Só o socket do gateway espera — a abertura do app nunca é segurada.
-- **Reservas mantidas vivas (batimento)**: até 5 saídas ficam guardadas num pote em `native-settings.json`, sob `pool`. A cada **30 segundos**, com a sessão já aberta, a saída ativa e todas as reservas são reconferidas com um túnel de verdade até o gateway do Discord. Quem erra o batimento perde a vez na hora: a ativa é trocada por uma reserva **testada há 30 segundos** no primeiro erro, e sai do pote no segundo erro seguido (um erro solto costuma ser congestionamento, não morte). Quando sobra menos de uma reserva viva de folga, o pote é reabastecido em segundo plano — sem trocar a saída ativa, que é o IP que o servidor já aceitou nesta sessão.
-- **Reservas correndo juntas, não em fila**: quando a saída ativa não entrega uma conexão, todas as reservas são tentadas **ao mesmo tempo** e a primeira que responder leva. Em fila, com 2,5s de prazo cada, a troca podia somar mais de dez segundos — tempo de sobra para o Chromium desistir do roteador.
-- **Reutilizar só depois de testar de novo**: no boot, as saídas guardadas são revalidadas (orçamento de 2,5s) antes de valerem. Descobrir uma do zero leva de 8 a 23 segundos; o que causava o travamento antigo era reaplicar uma proxy morta às cegas, e isso não acontece mais.
+- **Batimento da saída confiável**: a cada 30 segundos o runtime verifica a saída ativa. Tor recebe tolerância maior durante rotação de circuitos; uma proxy personalizada precisa falhar repetidamente antes de ser descartada/retestada.
+- **Sem reservas públicas**: não existe pote de proxies públicas no Enhanced. Uma falha nunca autoriza automaticamente um terceiro desconhecido a carregar o gateway/login.
+- **Recuperação conservadora**: conexões novas tentam apenas a saída explicitamente confiada. Login configurado para passar pela proxy falha fechado; gateway tem um fallback direto limitado para evitar transformar uma falha de Tor em Discord eternamente preso na abertura.
 - **A regra de proxy do sistema é respeitada**: se ela varia por host (proxy corporativo ou PAC de verdade), o plugin se recusa a ligar o roteador em vez de atropelar a política da rede.
 
 ## Dependências: o que baixar e como instalar
@@ -660,11 +658,9 @@ O plugin **só funciona no app de computador** (ele usa recursos do Electron que
 - **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido. Os instaladores daqui não mexem neles, mas o **Vesktop tem suporte manual** — veja [Instalação no Vesktop](#instalação-no-vesktop).
 - **Não funciona** no Discord aberto no navegador nem no celular.
 
-### Opcional: Tor — só se você quiser mais estabilidade
+### Tor — padrão recomendado do Enhanced
 
-**Não é necessário.** Por padrão o plugin escolhe e testa uma proxy gratuita sozinho, sem nenhuma dependência extra.
-
-O Tor é só uma opção para quem quer mais estabilidade: ele é mais rápido e não morre no meio do caminho como as proxies públicas. Se você já tiver o [Tor Browser](https://www.torproject.org/download/) aberto, o plugin detecta sozinho em `127.0.0.1:9150`; o daemon `tor` fica em `9050`.
+No instalador Enhanced do Windows, o Tor é provisionado e validado automaticamente na porta dedicada `127.0.0.1:9060`, com inicialização invisível. O plugin também consegue detectar instalações locais conhecidas (por exemplo Tor Browser em `9150` ou daemon em `9050`). Se você preferir uma saída própria, configure explicitamente uma proxy privada.
 
 ## Instalação: passo a passo completo
 
@@ -806,11 +802,10 @@ Isso gera a pasta `dist/` com o Vencord modificado já incluindo o plugin.
 
 ```
 goLiveBypass/
-├── index.tsx                      # renderer: patches do video guard e do stream, seletor de região,
-│                                  #   override do RTCRegionStore, veredito da sessão, eventos de fluxo
-└── native.ts                      # processo principal: roteador SOCKS local em 127.0.0.1, PAC por host,
-                                   #   escolha da saída com teste TLS real, pote de reservas, registro,
-                                   #   nova tentativa com recarga
+├── index.tsx                      # renderer: patches do video guard/stream, regiões e diagnóstico
+├── native.ts                      # processo principal: roteador SOCKS local, PAC, Tor/proxy confiável e logs
+├── rtcShim.ts                     # instrumentação privada discord_voice/decoder/encoder, sem IDs em logs
+└── rtcRecovery.ts                 # detector + escada conservadora de recuperação broadcaster/viewer
 
 installer/
 ├── GoLiveBypass-Installer.bat     # Windows: dois cliques, libera a execução e chama o .ps1
@@ -907,18 +902,15 @@ aparecem medindo, não lendo.
 
 # English
 
-**GoLiveBypass** is an **Equicord/Vencord** plugin, made by a Brazilian developer, that **restores Go Live and camera for Brazilian Discord users**. On every launch it brings up a small local SOCKS router (loopback only) and points only Discord's gateway WebSocket hosts at it; the router carries that traffic through an exit outside Brazil — your own proxy, a local Tor, or a free proxy picked and tested for you — while **everything else stays direct at full speed**. Discord's region gate, evaluated once at voice-channel join from the gateway origin IP and never re-evaluated mid-call, then unlocks Go Live and camera. As a bonus, the login itself can optionally be routed too, hiding your real IP during authentication.
+**GoLiveBypassEnhanced** keeps the original Equicord/Vencord architecture but hardens installation, routing and native RTC recovery. Only Discord gateway/signaling traffic that needs the bypass is routed; media remains direct. The Enhanced trust policy is **local Tor by default or an explicitly configured private proxy — never an automatic public-proxy list**. Existing Vencord/Equicord installations and unrelated plugin settings are preserved during migration.
 
-It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). Because the gateway stays routed for the whole session, reconnects are born behind the same exit and the unlock survives network hiccups; if the exit dies, the router fails over to a tested reserve or fails open to a direct connection — never leaving you unable to open Discord. If the server still reports the session blocked, the plugin reloads the client behind the exit, at most twice. Bypassing the restriction may violate Discord's ToS.
+The Enhanced Windows installer can bootstrap Discord, a mod checkout, a checksum-verified portable Node.js toolchain, the enhanced userplugin and hidden Tor. It also migrates known standalone/legacy GoLiveBypass state and verifies that the compiled bundle contains the Enhanced RTC recovery markers before declaring success.
 
-- Desktop Discord with Equicord or Vencord injected, Flatpak included. **Vesktop is supported manually** — see [Instalação no Vesktop](#instalação-no-vesktop). Equibop and Snap are not: Equibop bundles the mod instead of loading it from a checkout, and Snap lives in a read-only squashfs. Not available on the browser extension.
-- Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client. Tor is optional, not required: by default the plugin picks and validates a free proxy on its own.
-- **Your calls stay on the region you pick.** Creating the session abroad makes Discord rank foreign voice servers, so the plugin overrides the three `RTCRegionStore` getters that feed `preferred_region` / `preferred_regions` in the gateway `VOICE_STATE_UPDATE`. The override is evaluated at read time, so Discord's latency test cannot undo it, and it writes nothing into Discord's persisted state, so the region is not left pinned after you remove the plugin. Restored on `stop()`.
-- Proxy order: your manual proxy, then the exits saved from last boots (revalidated), then a local Tor (`127.0.0.1:9150` for Tor Browser, `9050` for the daemon), then a validated free proxy.
-- Free proxies are weak for anonymity — prefer Tor.
-- Free proxies are ranked by the `alive` / `uptime` / `timeout` metadata the list already returns, port 4145 is dropped (measured 14/14 TLS interception), candidates race in batches of 12 and the first good one wins, and the test is a real TLS handshake through the tunnel against Cloudflare's trace (proving tunnel, valid certificate, real exit country and exit IP in one connection) followed by a reachability check against `gateway.discord.gg`. Up to 5 verified exits are kept for 24h in a pool. Measured: random pick with a handshake-only test works 12% of the time, ranked with a real TLS test works 60%.
-- It cannot leave you unable to open Discord: the fallback decision lives inside the local router, not in the PAC (no `PROXY;DIRECT` for Chromium to silently prefer), a per-connection 12s stall budget fails open to direct, reserve exits take over mid-session, and a system proxy policy that varies per host (corporate PAC) makes the plugin refuse to enable rather than trample it.
-- Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings. On **Vesktop**, skip `pnpm inject` and point Vesktop's *Vencord Location* at your build's `dist` folder instead (see [Instalação no Vesktop](#instalação-no-vesktop)).
+- Desktop Discord with Equicord or Vencord is the recommended architecture. Existing installs are detected and preserved.
+- Tor is the default trusted exit. A custom proxy is used only when explicitly configured; no public-proxy fallback is permitted.
+- Viewer and broadcaster RTC recovery are role-aware and fail closed when telemetry is insufficient. Recovery success requires actual encoder/decoder progress, not merely a new socket.
+- Calls/media stay direct; only the gateway (and optionally login when selected) is routed.
+- Install manually by copying the five plugin files in `goLiveBypass` to `src/userplugins/goLiveBypass`, then `pnpm install && pnpm build && pnpm inject`. The automatic installer is recommended because it also performs migration and verification.
 - Made by **bezumiya** — [GitHub](https://github.com/bezumiya/GoLiveBypass), [Twitter](https://twitter.com/obezumiya), Discord `1366453661970071633`.
 - Thanks to **[mazxxy](https://github.com/mazxxy)** for the idea that became the project's backbone: a local SOCKS5 with an embedded PAC routing only the gateway through the proxy ([#3](https://github.com/bezumiya/GoLiveBypass/pull/3), merged for authorship — the lines were later rewritten, but the design is his).
 - Thanks to **[mazxxy](https://github.com/mazxxy)** for the idea this project is built on: he was the first to notice that `session.setProxy` applies to the whole session, and proposed the design still in use — a local SOCKS5 with an embedded PAC routing **only the gateway** through the proxy. Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[gabrigode](https://github.com/gabrigode)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override. Thanks to **[StellaThimoty](https://github.com/StellaThimoty)** for finding and testing the manual Vesktop path, and to **[pdl-clay](https://github.com/pdl-clay)** for turning it into the step-by-step guide in this README. Thanks to **[Victor Mello](https://github.com/victorsvart)** for the [GUI-MacOS](https://github.com/victorsvart/GoLiveBypass-GUI-MacOS) fork: He ported the GUI app to MacOS. Thanks to **[Claude](https://claude.com/claude-code)** for the hand on the code: much of this was written and debugged alongside it, mostly the bugs that only show up when you measure instead of read.

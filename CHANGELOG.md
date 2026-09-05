@@ -1,5 +1,36 @@
 # Changelog
 
+- Aligns Windows Discord discovery with Equilotl by selecting only the newest usable `app-*` directory for each Discord channel. Stale Squirrel versions no longer force a needless reinjection of the already-patched active version.
+- Fixes recognized-checkout cleanup for the normal `Equicord\dist\desktop` and `Vencord\dist\desktop` paths, while preserving the fail-closed guard for unrelated injectors or missing `_app.asar` backups.
+- Fixes Windows reinstalls when Discord already points to another recognized Vencord/Equicord checkout. The installer now safely restores the validated `_app.asar` before reinjection instead of entering Equilotl's failing `Unpatching first` path.
+- Fixes the RTC recovery path against Discord's current native voice ABI. Viewer streams are now identified from `connectionOptions.context` even though Discord creates them through the generic voice factory, private local/stream identities are retained only inside the isolated preload, and viewer resubscription calls the live `setDisableLocalVideo` method.
+- Removes the outbound broadcaster-demand requirement from viewer stall detection. Discord's `video-stream-receiver-ready-timeout` can now trigger the targeted UDP reconnect and video resubscription while broadcaster recovery keeps its stricter remote-demand guard.
+- Registers the RTC preload before renderer IPC is available, replaces the misleading "shim active" signal with sanitized hook/connection readiness, rejects recovery actions for stale connection generations, and cancels escalation if the observed stream is replaced or intentionally stopped.
+- Adds executable regressions for cached native factories, generic-factory viewer classification, the current bound-wrapper ABI, disabled-video suppression, viewer recovery without broadcaster demand, and stale-generation rejection.
+- Changes the Windows one-line splash to a full-terminal `KINGCIR` frame for two seconds, with a compact fallback for redirected/non-interactive output.
+- Hardens the Electron GUI boundary: `nodeIntegration: false`, `contextIsolation: true`, `contextBridge` preload API, trusted external-link allowlist, and wrapped IPC notifications that do not expose Electron event objects.
+- Redacts local user/home paths from public bug reports and blocks submission if a known local path survives the final privacy scan.
+- Adds an explicit GUI tests + TypeScript/Vite compile job to the enhanced verification workflow.
+
+## Enhanced fork — RTC recovery v1
+
+### Changed
+- Replaces destructive native RTC recovery with role-aware state machines. Broadcaster stalls replay/clear+replay the exact captured desktop source on the same native connection; viewer stalls use `fastUdpReconnect()` then a targeted `setLocalVideoDisabled(streamUserId, true/false)` resubscription.
+- Adds decoder telemetry and a regression for issue #186: a viewer that previously decoded ~30 FPS can re-enter with `fps_dec=0` / `dec=0`; replacement sockets alone no longer count as recovery.
+- Recovery success now requires 10 seconds of sustained encoded/decoded frame progress. Voice, `discord.media`, gateway and renderer are preserved by automatic RTC recovery.
+- Fixes a broadcaster-start failure captured in a real Windows log: capture remained alive at ~30 FPS while encoded FPS/frames stayed at zero; after level-1 source replay, Discord dropped the remote-demand signal and the old controller incorrectly cancelled just before level 2. Pending broadcaster recovery now survives that demand drop only while the same native stream still owns a sanitized cached desktop source. A voluntary `clearDesktopSource()` clears that ownership bit and still cancels recovery, preventing a stopped share from being resurrected.
+- Adds sanitized `fonte=sim/nao` / source-age diagnostics to the standalone/GUI voice probe so future broadcaster failures show whether the desktop source is still logically selected without exposing source IDs or arguments.
+- Ports the same role-aware RTC shim/controller into the Vencord/Equicord userplugin; clean current Vencord and Equicord checkouts are compiled in CI.
+- Reworks the one-click Windows path to preserve/reinject Vencord or Equicord instead of replacing their `app.asar` with the standalone injector. Existing mod settings/plugins are backed up and verified after installation, with rollback/reinjection on failure.
+- Makes the same one-liner a zero-to-ready bootstrap on clean Windows machines: if no compatible Discord client exists, it downloads the current official Discord Stable installer from Discord, validates its Authenticode signature, installs it silently, then clones/builds Equicord by default (or Vencord when explicitly selected), installs the enhanced plugin, and provisions hidden Tor before the first normal Discord launch.
+- Adds explicit legacy/conflict migration: restores known old standalone injections, transactionally replaces stale GoLiveBypass userplugin source, clears only GoLiveBypass native routing/cache state, resets migrated voice/stream regions to Automatic, preserves unrelated mod/plugin state, and verifies enhanced RTC markers in the compiled bundle before declaring success.
+- Recovers the active Vencord/Equicord identity from the standalone `_app.asar` backup when both source checkouts exist, and backs up/disables a known competing `DiscordGoLiveBypass` Windows autostart without deleting that third-party executable.
+- Uses a full-terminal `KINGCIR` frame for two seconds in the public one-click installer, with a compact non-interactive fallback.
+- Keeps Tor as the trusted gateway route and leaves bulk media direct. Explicit/unattended Tor never falls through to the public proxy pool.
+- Replaces the obsolete Tor Browser 13.5 / Tor 0.4.8 Expert Bundle with Tor Browser 15.0.21 / Tor 0.4.9.11. Tor Project intentionally ended 0.4.8 network compatibility on 2026-09-01.
+- Pins the official Expert Bundle SHA-256, migrates old managed Tor binaries through a version marker, verifies the extracted `tor.exe` generation and `torrc`, and requires a real SOCKS5 + TLS path to `gateway.discord.gg` before installation succeeds.
+- Fixes Windows Tor startup where file logging itself could abort Tor 0.4.9; managed startup uses stdout/stderr capture for diagnostics instead.
+
 Todas as mudanças notáveis deste projeto são documentadas aqui. O formato segue
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
@@ -853,3 +884,35 @@ funcionar de ponta a ponta.
 ## [1.1.7] e anteriores
 
 Veja o histórico de tags e commits para o que veio antes.
+## Enhanced fork — native viewer demand and recovery ownership
+
+- Diagnostic schema 2 includes existing recovery actions plus allowlisted native codec initialization and encryption counters, with fixed-format timestamps. This distinguishes an unexecuted recovery from recovery that ran without restoring video; it does not alter Discord settings or media behavior.
+- Fixes broadcaster recovery remaining disarmed when Discord logs viewer demand in the renderer but the observer runs in an isolated preload. Demand now comes from the current stream's native `setTransportOptions.remoteSinkWantsPixelCount`, preserving the original call and its arguments.
+- Prevents delayed recovery from restoring an old source after a source switch or re-enabling video after a user toggle. Ported to standalone and the generated GUI payload.
+- Adds fixed numeric plugin stream counters and a read-only `installer/Get-StreamDiagnostics.ps1` collector. It emits no raw log lines, IDs, proxy credentials or addresses.
+- Validation covers native observer behavior without console messages, zero demand, stream replacement, delayed user changes, and diagnostic filtering. Error 2012 remains a viewer timeout symptom; these checks do not establish successful streaming on the affected friend's computer.
+- Still outside this fix: simultaneous-stream scheduling, capture/transport failures unrelated to frozen encoding, and live verification on the affected sender and viewer.
+## Enhanced fork — inactive native encoder recovery
+
+- Reproduced capture at 30 FPS with native simulcast inactive, zero encoded frames and growing encoder-queue drops on the local Windows sender. AV1, H.265, H.264 and VP8 all stalled. Setting a one-second keyframe interval together with `alwaysSendVideo` restored sustained AV1 encoding and encryption; restoring the prior setting reproduced the stall.
+- Level-one broadcaster recovery now applies that transport repair when the prior values are known. It preserves codec selection and the gateway, holds the repair for the selected source, and restores the latest original settings on source change or stop. It may keep encoding while that share has no viewers; it does not start a share or select a source.
+- Ported to standalone and regenerated GUI payload. Added executable restoration and caller-options preservation tests. Receiver-visible video/audio and a fresh installed-session check remain separate validation requirements.
+- The installed Equicord StreamingCodecDisabler references removed `setAv1Enabled`/`setH265Enabled`/`setH264Enabled` methods. Its checkbox was not proof of a negotiated codec change. No codec-disabler dependency is introduced by this repair.
+# Unreleased — first-frame recovery deadline
+
+- Keep retry budgets and cooldowns separate for viewer and broadcaster roles.
+  Failed viewing attempts no longer prevent recovery of a newly started share.
+  Each role retains its two-attempt limit across stream generations for thirty
+  minutes. A replaced pending stream no longer delays evaluating its replacement.
+
+- Correct native viewer statistics filter to INBOUND=4 (ALL=7 for unknown
+  roles). Live inspection confirmed the previous filters never requested
+  incoming video statistics. This repairs viewer observability and detection;
+  it does not establish successful media delivery.
+
+- Plugin and standalone: detect a live selected source with zero encoded frames
+  after five seconds, polling every two seconds, so the existing encoder repair
+  can run before the observed receiver timeout. Established-stream stalls keep
+  their twenty-second threshold. GUI includes the regenerated standalone payload.
+- Paired logs confirmed the previous repair ran after the viewer had timed out.
+  Receiver-visible success remains unverified; this is not an end-to-end fix claim.

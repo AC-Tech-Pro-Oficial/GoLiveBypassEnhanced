@@ -8,6 +8,9 @@ import {
   Tray,
   shell,
   clipboard,
+  session,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
 } from "electron";
 import path, { dirname } from "path";
 import { fileURLToPath } from "url";
@@ -116,6 +119,56 @@ let logWindow: BrowserWindow | null = null;
 let suppressLogClosedNotify = false;
 let tray: Tray | null = null;
 
+type TrustedIpcEvent = IpcMainInvokeEvent | IpcMainEvent;
+
+function isTopFrameFrom(win: BrowserWindow | null, event: TrustedIpcEvent): boolean {
+  if (!win || win.isDestroyed() || event.sender !== win.webContents) return false;
+  try {
+    return event.senderFrame === event.sender.mainFrame;
+  } catch {
+    return false;
+  }
+}
+
+function assertIpcSender(event: TrustedIpcEvent, scope: "main" | "ui") {
+  const fromMain = isTopFrameFrom(mainWindow, event);
+  const fromLogs = scope === "ui" && isTopFrameFrom(logWindow, event);
+  if (!fromMain && !fromLogs) {
+    console.warn("[security] IPC recusado de renderer nao autorizado:", event.sender.getURL());
+    throw new Error("IPC sender nao autorizado");
+  }
+}
+
+function handleMain(
+  channel: string,
+  handler: (event: IpcMainInvokeEvent, ...args: any[]) => any,
+) {
+  ipcMain.handle(channel, (event, ...args) => {
+    assertIpcSender(event, "main");
+    return handler(event, ...args);
+  });
+}
+
+function handleUi(
+  channel: string,
+  handler: (event: IpcMainInvokeEvent, ...args: any[]) => any,
+) {
+  ipcMain.handle(channel, (event, ...args) => {
+    assertIpcSender(event, "ui");
+    return handler(event, ...args);
+  });
+}
+
+function onMain(
+  channel: string,
+  handler: (event: IpcMainEvent, ...args: any[]) => void,
+) {
+  ipcMain.on(channel, (event, ...args) => {
+    assertIpcSender(event, "main");
+    handler(event, ...args);
+  });
+}
+
 // Fechar a janela esconde na bandeja (Windows) / barra de menus (Mac); so o Sair do menu
 // desliga o app (e reverte o bypass, como o fechar da janela fazia antes). Sem a trava, o X
 // derrubaria o app e a pessoa nem notaria que a janela foi parar junto do relogio.
@@ -159,6 +212,46 @@ function openAppManagementSettings() {
   void shell.openExternal(
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles",
   );
+}
+
+const TRUSTED_EXTERNAL_HOSTS = new Set(["github.com", "discord.gg"]);
+
+function isTrustedExternalUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && TRUSTED_EXTERNAL_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+async function openTrustedExternal(raw: string): Promise<boolean> {
+  if (!isTrustedExternalUrl(raw)) {
+    console.warn("[security] bloqueei URL externa nao confiavel:", raw);
+    return false;
+  }
+  await shell.openExternal(raw);
+  return true;
+}
+
+function hardenWindowNavigation(win: BrowserWindow) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void openTrustedExternal(url);
+    return { action: "deny" };
+  });
+
+  win.webContents.on("will-navigate", (event, url) => {
+    // Navegacao da propria pagina local/dev continua permitida; links externos sao
+    // sempre tirados do renderer e abertos no navegador padrao se estiverem na allowlist.
+    try {
+      const parsed = new URL(url);
+      const current = new URL(win.webContents.getURL() || url);
+      if (parsed.protocol === "file:" || parsed.origin === current.origin) return;
+    } catch { }
+
+    event.preventDefault();
+    void openTrustedExternal(url);
+  });
 }
 
 function writeError(targetPath: string) {
@@ -216,8 +309,9 @@ function createWindow() {
     icon: loadAsset('icon.png'),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
     },
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
@@ -235,10 +329,7 @@ function createWindow() {
   // a pessoa nao ve para onde esta indo, e nao tem como voltar. Vale para o botao do Discord,
   // que ja existia, e para os creditos.
   mainWindow.setTitle(`GoLiveBypass v${app.getVersion()}`);
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https:\/\//.test(url)) void shell.openExternal(url);
-    return { action: "deny" };
-  });
+  hardenWindowNavigation(mainWindow);
 
   mainWindow.on("close", (event) => {
     if (quitting || isQuittingForUpdate()) return;
@@ -307,9 +398,10 @@ function openLogWindow() {
     resizable: true,
     icon: loadAsset("icon.png"),
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      nodeIntegration: true,
-      contextIsolation: false,
+      preload: path.join(__dirname, "preload-logs.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
     },
     autoHideMenuBar: true,
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
@@ -319,10 +411,7 @@ function openLogWindow() {
   });
 
   logWindow.setTitle("GoLiveBypass — Logs");
-  logWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https:\/\//.test(url)) void shell.openExternal(url);
-    return { action: "deny" };
-  });
+  hardenWindowNavigation(logWindow);
 
   logWindow.on("closed", () => {
     logWindow = null;
@@ -521,6 +610,12 @@ if (!gotLock) {
   app.on("second-instance", () => showWindow());
 
   app.whenReady().then(() => {
+    // A GUI local nao precisa de nenhuma permissao web privilegiada. Negar no nivel da
+    // session evita que uma futura regressao no renderer consiga pedir camera, microfone,
+    // geolocalizacao, USB, MIDI, notificacoes etc. O Discord e outro processo/session.
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.defaultSession.setPermissionCheckHandler(() => false);
+
     // Logger proprio: arquivo + ring buffer, captura console do main process.
     // O gui.log mora em <settingsDir>/logs/ — pasta estavel, sobrevive a updates.
     try {
@@ -1467,7 +1562,7 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
 // tambem remontam o menu ao terminar.
-ipcMain.handle("activate", async (event, proxyAddress: string = "", confirmOverride: boolean = false) => {
+handleMain("activate", async (event, proxyAddress: string = "", confirmOverride: boolean = false) => {
   if (IS_LINUX) {
     // No Linux, a GUI delega pro script standalone; o script.sh ja tem a heuristica
     // de deteccao de outromod e pede Confirm-Action quando acha Vencord/Equicord
@@ -1481,7 +1576,7 @@ ipcMain.handle("activate", async (event, proxyAddress: string = "", confirmOverr
   }
   refreshTray().catch(() => {});
 });
-ipcMain.handle("deactivate", async (event) => {
+handleMain("deactivate", async (event) => {
   // Deactivate EXPLICITO (botao/bandeja): o usuario nao quer mais — zera a flag de
   // auto-injecao do boot. O quit limpo NAO passa aqui (la a injecao e removida mas o
   // usuario so fechou o app; o boot seguinte re-injeta pela flag).
@@ -1493,14 +1588,14 @@ ipcMain.handle("deactivate", async (event) => {
   }
   refreshTray().catch(() => {});
 });
-ipcMain.handle("get-platform", () => (IS_LINUX ? "linux" : isMac ? "mac" : "windows"));
-ipcMain.handle("get-app-version", () => app.getVersion());
-ipcMain.handle("get-status", async () => {
+handleMain("get-platform", () => (IS_LINUX ? "linux" : isMac ? "mac" : "windows"));
+handleMain("get-app-version", () => app.getVersion());
+handleUi("get-status", async () => {
   if (IS_LINUX) return linuxStatus();
   return getStatus();
 });
-ipcMain.handle("get-startup", () => getStartup());
-ipcMain.handle("set-startup", (_event, enabled: unknown) => {
+handleMain("get-startup", () => getStartup());
+handleMain("set-startup", (_event, enabled: unknown) => {
   setStartup(enabled === true);
   refreshTray().catch(() => {});
 });
@@ -1687,16 +1782,19 @@ async function revertOrphanedInjection() {
 // O "modo Tor" da GUI pode funcionar sem o Tor instalado: baixa o daemon oficial do
 // Tor Project, extrai para a pasta do GoLiveBypass e sobe como processo filho.
 //
-// O asset com o daemon SOZINHO (sem o navegador inteiro) e o "expert bundle" — hospedado no
-// archive oficial (archive.torproject.org), versao "13.5", que foi a ultima serie a publicar
-// esse pacote (~31MB, com geoip e as libs compartilhadas do tor). O dist.torproject.org
-// atual (15.x/16.x) so publica o navegador inteiro (~137MB), pesado demais para isso.
+// O asset com o daemon SOZINHO (sem o navegador inteiro) e o Expert Bundle oficial.
+// Tor 0.4.8 e anteriores deixaram de funcionar na rede em 2026-09-01; por isso o enhanced
+// fork fixa Tor Browser 15.0.21, que contem Tor 0.4.9.11.
 
-const TOR_BUNDLE = "13.5";
+const TOR_BUNDLE = "15.0.21";
 const TOR_PORTA = 9060; // dedicada, para nao conflitar com um Tor do sistema (9050)
 
 function torDir() {
   return path.join(settingsDir(), "tor");
+}
+
+function torBundleMarkerPath() {
+  return path.join(torDir(), "bundle-version.txt");
 }
 
 function torExePath() {
@@ -1706,25 +1804,25 @@ function torExePath() {
     : path.join(torDir(), "tor", "tor");
 }
 
-// sha256 de cada pacote, do sha256sums-unsigned-build.txt publicado pelo Tor Project junto da
-// serie 13.5. A versao esta fixada, entao estes arquivos nao mudam mais e o hash pode morar
+// sha256 de cada pacote, do sha256sums-signed-build.txt publicado pelo Tor Project junto da
+// serie 15.0.21. A versao esta fixada, entao estes arquivos nao mudam mais e o hash pode morar
 // aqui. Sem esta conferencia o app baixava um .tar.gz, dava chmod +x e executava o que viesse:
 // bastaria o archive sair do ar e um certificado indevido para virar execucao de codigo em
 // quem usa o modo Tor. Ao trocar TOR_BUNDLE, troque os quatro hashes junto.
 const TOR_SHA256: Record<string, string> = {
-  "tor-expert-bundle-linux-x86_64-13.5.tar.gz":
-    "147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d",
-  "tor-expert-bundle-windows-x86_64-13.5.tar.gz":
-    "5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb",
-  "tor-expert-bundle-macos-aarch64-13.5.tar.gz":
-    "e18f749fbe6114c918735e950b28c1f476a5c9d8bf224f5ec26e6bffa1222d49",
-  "tor-expert-bundle-macos-x86_64-13.5.tar.gz":
-    "9e23c21a4e45dc45b599e723373530ef7cabef106367b43677a534fae099b10d",
+  "tor-expert-bundle-linux-x86_64-15.0.21.tar.gz":
+    "40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11",
+  "tor-expert-bundle-windows-x86_64-15.0.21.tar.gz":
+    "f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490",
+  "tor-expert-bundle-macos-aarch64-15.0.21.tar.gz":
+    "83dec16412c1d97b91af603229481dd29f578e1485620ecffd9ac4aabcf6fb46",
+  "tor-expert-bundle-macos-x86_64-15.0.21.tar.gz":
+    "7e21f5dab4c627e2ff8e894b2039fa49bdd78d12b025f96893d4d6238c6577e4",
 };
 
 // URL e hash saem juntos de proposito: separados, era facil trocar um e esquecer o outro.
 function torAsset(): { url: string; sha256: string | undefined; nome: string } {
-  const base = "https://archive.torproject.org/tor-package-archive/torbrowser";
+  const base = "https://dist.torproject.org/torbrowser";
   let nome: string;
   if (process.platform === "win32") {
     nome = `tor-expert-bundle-windows-x86_64-${TOR_BUNDLE}.tar.gz`;
@@ -2171,7 +2269,31 @@ function avisarTorReiniciado() {
 async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
   try {
     const exe = torExePath();
-    if (fs.existsSync(exe)) return { ok: true };
+    const marker = torBundleMarkerPath();
+
+    let installedBundle = "";
+    try {
+      if (fs.existsSync(marker)) installedBundle = fs.readFileSync(marker, "utf8").trim();
+    } catch {
+      installedBundle = "";
+    }
+
+    if (fs.existsSync(exe) && installedBundle === TOR_BUNDLE) return { ok: true };
+
+    if (fs.existsSync(exe) && installedBundle !== TOR_BUNDLE) {
+      console.log("[tor] bundle antigo detectado; atualizando para", TOR_BUNDLE);
+      stopTor();
+      try {
+        fs.rmSync(path.join(torDir(), "tor"), { recursive: true, force: true });
+        fs.rmSync(path.join(torDir(), "data"), { recursive: true, force: true });
+        fs.rmSync(marker, { force: true });
+      } catch (error) {
+        return {
+          ok: false,
+          error: "nao consegui substituir o Tor antigo: " + (error instanceof Error ? error.message : String(error)),
+        };
+      }
+    }
 
     const dir = torDir();
     fs.mkdirSync(dir, { recursive: true });
@@ -2256,6 +2378,8 @@ async function ensureTor(): Promise<{ ok: boolean; error?: string }> {
     } catch {
       // windows: chmod nao aplica
     }
+
+    fs.writeFileSync(marker, TOR_BUNDLE, "utf8");
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2307,9 +2431,8 @@ function saveTorAddr(addr: string) {
   updateSharedSettings({ torAddr: addr });
 }
 
-// Modo de rede escolhido (persistido no settings.json junto da proxy): "auto" | "tor" | "free".
-// "auto" com proxy preenchida = personalizado (o bypass usa a proxy do campo). O PADRAO e
-// "tor": o app baixa e usa o Tor sempre, para nunca cair no IP brasileiro.
+// Modo de rede escolhido: "tor" ou "auto" com proxy preenchida (personalizado).
+// Valores "free" de versoes antigas migram para Tor; enhanced nao usa listas publicas.
 function saveNetMode(mode: string) {
   updateSharedSettings({ routeMode: mode });
 }
@@ -2317,15 +2440,11 @@ function saveNetMode(mode: string) {
 function readNetMode(): string {
   try {
     const file = path.join(settingsDir(), "settings.json");
-    // Padrao "tor". Saida gratuita e instavel por natureza -- morre no meio da sessao, tem RTT
-    // alto e obriga o pool a ficar trocando -- enquanto o Tor entrega uma rota que fica de pe.
-    // O custo aparece so na primeira vez (o pacote de 22MB e o bootstrap), e o modo agora so e
-    // liberado depois de um tunel provado, entao o Discord nao nasce apontando para uma porta
-    // que ainda nao serve.
     if (!fs.existsSync(file)) return "tor";
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
     const m = typeof data.routeMode === "string" ? data.routeMode : "";
-    if (m === "tor" || m === "free" || m === "auto") return m;
+    if (m === "auto" && typeof data.proxy === "string" && data.proxy.trim() !== "") return "auto";
+    // Inclui migracao de "free", "auto" vazio e qualquer valor desconhecido.
     return "tor";
   } catch {
     return "tor";
@@ -2385,8 +2504,8 @@ export function readAutoRevive(): boolean {
 // Detecta Tor disponivel: o embutido (porta dedicada) ou um Tor do sistema (portas classicas).
 
 // IPC de autoUpdate
-ipcMain.handle("get-auto-update", () => readAutoUpdate());
-ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
+handleMain("get-auto-update", () => readAutoUpdate());
+handleMain("set-auto-update", (_event, enabled: unknown) => {
   saveAutoUpdate(enabled !== false);
   refreshTray().catch(() => {});
 });
@@ -2394,31 +2513,31 @@ ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
 // IPC do revive automatico (zumbi: issues #145/#149/#153). No Windows/macOS a copia
 // dentro do asar injetado acompanha o toggle — o runtime le o settings do asar, nao o
 // compartilhado.
-ipcMain.handle("get-auto-revive", () => readAutoRevive());
-ipcMain.handle("set-auto-revive", (_event, enabled: unknown) => {
+handleMain("get-auto-revive", () => readAutoRevive());
+handleMain("set-auto-revive", (_event, enabled: unknown) => {
   saveAutoRevive(enabled !== false);
   updateInjectedAutoRevive(enabled !== false);
 });
 
 // IPC do canal de atualizacao (stable | beta). Nao vai para o asar injetado: e
 // preferencia do updater da GUI, o bypass injetado nao lê isso.
-ipcMain.handle("get-update-channel", () => readUpdateChannel());
-ipcMain.handle("set-update-channel", (_event, canal: unknown) => {
+handleMain("get-update-channel", () => readUpdateChannel());
+handleMain("set-update-channel", (_event, canal: unknown) => {
   saveUpdateChannel(typeof canal === "string" ? canal : "stable");
 });
 
 // IPC do modo de rede + Tor embutido.
-ipcMain.handle("get-net-mode", () => readNetMode());
-ipcMain.handle("set-net-mode", (_event, mode: unknown) => {
+handleMain("get-net-mode", () => readNetMode());
+handleMain("set-net-mode", (_event, mode: unknown) => {
   // A UI manda "auto" para o modo Personalizado (o campo de proxy define a saida).
-  const m = typeof mode === "string" && ["auto", "tor", "free"].includes(mode) ? mode : "tor";
+  const m = typeof mode === "string" && ["auto", "tor"].includes(mode) ? mode : "tor";
   saveNetMode(m);
   // No modo tor so reescrevo a injecao com o Tor de pe: apontar o runtime pra uma
   // porta morta faria o gateway segurar (recusa direta) ate o Tor subir.
   const reescritos = m !== "tor" || torVerificado ? updateInjectedNetSettings(m) : 0;
   return { mode: m, reescritos };
 });
-ipcMain.handle("get-tor-status", async () => {
+handleMain("get-tor-status", async () => {
   // "Presente" cobre os dois casos em que nao ha nada a baixar: o nosso ja extraido e um tor
   // instalado no sistema.
   //
@@ -2432,7 +2551,7 @@ ipcMain.handle("get-tor-status", async () => {
     porta: torPortaEmUso,
   };
 });
-ipcMain.handle("install-tor", async () => {
+handleMain("install-tor", async () => {
   // Nao baixa nada quando ja ha um Tor de pe ou instalado: o garantirTor tenta, nessa ordem,
   // reaproveitar quem ja atende, subir o nosso ja extraido, subir o do sistema e, so entao,
   // baixar o pacote oficial.
@@ -2672,7 +2791,7 @@ async function exitCountryViaSocks(
   return null;
 }
 
-ipcMain.handle("test-proxy", async (_event, proxyRaw: unknown) => {
+handleMain("test-proxy", async (_event, proxyRaw: unknown) => {
   const raw = typeof proxyRaw === "string" ? proxyRaw.trim() : "";
   if (raw === "") {
     return { ok: false, error: "Cole o endereco da proxy (socks5://host:porta)." };
@@ -2894,17 +3013,17 @@ function startLogWatch() {
   });
 }
 
-ipcMain.handle("start-log-watch", () => {
+handleUi("start-log-watch", () => {
   startLogWatch();
   return { path: logFilePath() };
 });
 
-ipcMain.handle("stop-log-watch", () => {
+handleUi("stop-log-watch", () => {
   stopLogWatch();
   return true;
 });
 
-ipcMain.handle("get-diagnostic", (_event, payload: unknown) => {
+handleUi("get-diagnostic", (_event, payload: unknown) => {
   const p = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
   const status = typeof p.status === "string" ? p.status : "UNKNOWN";
   const note = typeof p.note === "string" ? p.note : "";
@@ -2915,11 +3034,10 @@ ipcMain.handle("get-diagnostic", (_event, payload: unknown) => {
   };
 });
 
-function readBugReportConfig(): { baseUrl: string; token: string } | null {
-  // Prioridade: settings.json da pasta compartilhada, depois env do processo.
-  // Sem os dois, o botao cai no form do GitHub (sem segredo embutido no binario).
+function readBugReportConfig(): { baseUrl: string } | null {
+  // A API de reports e publica e protegida por limites/rate limit no servidor.
+  // O antigo token compartilhado era extraivel do app e nao e mais usado.
   let url = (process.env.GOLIVE_BUG_API_URL || "").trim().replace(/\/$/, "");
-  let token = (process.env.GOLIVE_BUG_API_TOKEN || "").trim();
   try {
     const file = path.join(settingsDir(), "settings.json");
     if (fs.existsSync(file)) {
@@ -2927,19 +3045,21 @@ function readBugReportConfig(): { baseUrl: string; token: string } | null {
       if (typeof data.bugReportApiUrl === "string" && data.bugReportApiUrl.trim()) {
         url = data.bugReportApiUrl.trim().replace(/\/$/, "");
       }
-      if (typeof data.bugReportToken === "string" && data.bugReportToken.trim()) {
-        token = data.bugReportToken.trim();
-      }
     }
   } catch {
     /* ignore */
   }
-  if (!url || !token) return null;
-  return { baseUrl: url, token };
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return { baseUrl: url };
 }
-
 async function postBugReportToApi(
-  cfg: { baseUrl: string; token: string },
+  cfg: { baseUrl: string },
   title: string,
   description: string,
   status: string,
@@ -2963,7 +3083,6 @@ async function postBugReportToApi(
     const res = await fetch(endpoint, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${cfg.token}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
@@ -3005,7 +3124,7 @@ async function postBugReportToApi(
   }
 }
 
-ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
+handleUi("open-bug-report", async (_event, payload: unknown) => {
   const p = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
   const status = typeof p.status === "string" ? p.status : "UNKNOWN";
   const note =
@@ -3026,7 +3145,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
   if (apiCfg) {
     const posted = await postBugReportToApi(apiCfg, title, note, status);
     if (posted.ok) {
-      await shell.openExternal(posted.issueUrl);
+      await openTrustedExternal(posted.issueUrl);
       return {
         ok: true,
         via: "api" as const,
@@ -3048,7 +3167,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
       labels: ISSUE_LABELS.join(","),
     });
     const url = `https://github.com/${ISSUE_REPO}/issues/new?${params.toString()}`;
-    await shell.openExternal(url);
+    await openTrustedExternal(url);
     return {
       ok: true,
       via: "github" as const,
@@ -3072,7 +3191,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
     labels: ISSUE_LABELS.join(","),
   });
   const url = `https://github.com/${ISSUE_REPO}/issues/new?${params.toString()}`;
-  await shell.openExternal(url);
+  await openTrustedExternal(url);
 
   return {
     ok: true,
@@ -3083,14 +3202,14 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
   };
 });
 
-ipcMain.handle("open-log-folder", async () => {
+handleUi("open-log-folder", async () => {
   const dir = settingsDir();
   fs.mkdirSync(dir, { recursive: true });
   await shell.openPath(dir);
   return dir;
 });
 
-ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
+handleMain("set-dev-log-window", (_event, open: unknown) => {
   // Janela de logs e ferramenta de desenvolvimento: so existe em npm run dev.
   if (open === true && app.isPackaged) return false;
   if (open === true) {
@@ -3102,7 +3221,7 @@ ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
   return false;
 });
 
-ipcMain.handle("get-proxy", () => {
+handleMain("get-proxy", () => {
   const salva = readProxyFrom(path.join(settingsDir(), "settings.json"));
   if (salva !== "") return salva;
 
@@ -3180,7 +3299,7 @@ function readRuntimeAutoRevive(): boolean {
   return true;
 }
 
-ipcMain.handle("report-bug", async (_event, payload: unknown) => {
+handleMain("report-bug", async (_event, payload: unknown) => {
   const p = (payload ?? {}) as { title?: string; description?: string; includeLogs?: boolean };
   const netMode = readNetMode();
   // O modo que o runtime VAI ler (o que esta gravado na injecao), nao so o do
@@ -3206,7 +3325,7 @@ ipcMain.handle("report-bug", async (_event, payload: unknown) => {
 // A pagina reporta a ALTURA DO CONTEUDO. Com titleBarOverlay, setSize (janela externa)
 // nao casa com essa medida: a janela crescia no Personalizado e nao encolhia ao voltar.
 // setContentSize ajusta a area cliente — a mesma que o getBoundingClientRect mede.
-ipcMain.on("resize-window", (_event, height: unknown) => {
+onMain("resize-window", (_event, height: unknown) => {
   const h = Math.round(Number(height));
   if (!mainWindow || mainWindow.isDestroyed() || !Number.isFinite(h) || h <= 0) return;
   const [, contentH] = mainWindow.getContentSize();
@@ -3216,7 +3335,7 @@ ipcMain.on("resize-window", (_event, height: unknown) => {
 
 // O renderer avisa quando o tema muda para o overlay da barra de titulo
 // (Windows) acompanhar; no Mac e Linux nao ha overlay a ajustar.
-ipcMain.on('set-theme', (_event, value: unknown) => {
+onMain("set-theme", (_event, value: unknown) => {
   if (value !== 'light' && value !== 'dark') return;
   theme = value;
   applyTitlebarTheme();

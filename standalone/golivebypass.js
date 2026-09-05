@@ -353,10 +353,12 @@ const excludedCountries = new Set(
         .split(",").map(code => code.trim().toUpperCase()).filter(code => /^[A-Z]{2}$/.test(code))
 );
 
-// Rede de saida escolhida na GUI. "auto" (ou vazio) = comportamento classico: Tor local se
-// houver, senao gratuitas. "tor" = SO o Tor (a GUI sobe o proprio). "free" = pula o Tor e
-// vai so as gratuitas (para quem nao quer Tor).
-const routeMode = typeof settings.routeMode === "string" ? settings.routeMode : "auto";
+// Enhanced trust policy: sem proxy explicita, a unica saida intermediaria permitida e Tor.
+// Valores legados "auto"/"free" nao reativam listas publicas. Com proxy personalizada,
+// "auto" continua sendo usado internamente apenas para permitir o fallback DIRETO do gateway
+// se a saida escolhida estiver indisponivel; nunca significa procurar terceiros.
+const hasExplicitProxy = typeof settings.proxy === "string" && settings.proxy.trim() !== "";
+const routeMode = hasExplicitProxy ? "auto" : "tor";
 // O endereco do Tor pode vir das settings (a GUI sobe o proprio numa porta dedicada).
 const TOR_ADDR = typeof settings.torAddr === "string" && settings.torAddr !== ""
     ? settings.torAddr
@@ -1118,14 +1120,10 @@ async function cachedExit() {
 async function chooseExit() {
     const manual = manualProxy();
     if (manual === null) {
-        log("o endereco em proxy nao e valido, ignorando");
+        log("o endereco em proxy nao e valido; ignorando e usando somente Tor local");
     } else if (manual !== "") {
-        // Saida escolhida e gravada pela pessoa nas settings: usar NA HORA, sem probe.
-        // O probe completo (TLS ate o Discord) gasta ~1s, e o gateway conecta em menos —
-        // com a escolha devagar a corrida morre e a sessao nasce direta pelo IP brasileiro
-        // (o "carregando infinitamente" no video). Com a saida na mao em milissegundos o
-        // gateway ja nasce roteado; o batimento valida a cada 30s, e se ela estiver morta
-        // o trafego vivo cai para reserva/cache/lista antes de ir direto.
+        // Proxy personalizada e uma decisao explicita de confianca. Usa na hora para o
+        // gateway nascer roteado; o probe em segundo plano so produz diagnostico.
         log("usando a saida que voce configurou: " + safeProxy(manual));
         probe(manual, 2500).then(ok => {
             if (ok === null) {
@@ -1139,33 +1137,11 @@ async function chooseExit() {
         return manual;
     }
 
-    const cached = await cachedExit();
-    if (cached !== null) return cached;
-
-    // Modo "tor": SO o Tor conta. Sem Tor nao ha saida — o gateway fica segurado (nunca
-    // vaza direto para o IP brasileiro), e o refresh continua tentando ate o Tor voltar.
-    if (routeMode === "tor") {
-        const tor = await detectTor();
-        if (tor !== null) return tor;
-        log("modo tor: nenhum Tor respondeu em " + TOR_ADDR + ", segurando o gateway (sem saida direta)");
-        return null;
-    }
-
-    // Modo "free": pula o Tor (quem escolheu gratuitas nao quer depender de Tor).
-    if (routeMode === "free") {
-        const free = await pickFreeExit();
-        if (free !== null) return free;
-        // Sem gratuitas vivas (lista toda morta e o cache vazio): a sessao morreria
-        // direto pelo IP brasileiro, que e EXATAMENTE o "load infinito" da issue #85.
-        // Tenta o Tor como ultimo recurso antes de desistir -- o Tor ja esta rodando
-        // (a GUI sobe na inicializacao do modo tor e nao desliga se o usuario trocou
-        // para gratuitas), e com o fix de pais (PR #82) garante que exits BR sao
-        // recusados. Melhor um Tor lento que um Discord travado.
-        log("nenhuma gratuita viva, tentando o Tor local como fallback");
-        return await detectTor();
-    }
-
-    return await detectTor() || await pickFreeExit();
+    // Nao consulta state.json/pool: ele pode conter saidas publicas de versoes antigas.
+    const tor = await detectTor();
+    if (tor !== null) return tor;
+    log("enhanced: nenhum Tor respondeu em " + TOR_ADDR + "; nenhuma proxy publica sera usada");
+    return null;
 }
 
 let lastExitAt = 0; // quando a saida atual foi escolhida (para o log do gateway visto)
@@ -1283,6 +1259,8 @@ function ensureReserveThenReload(exit) {
         win.webContents.reload();
     };
 
+    // Enhanced nao estoca terceiros. Tor/proxy explicita recarregam sem exigir reserva publica.
+    if (routeMode === "tor" || usingManualProxy) return tryReload();
     if (liveReserveCount() >= RELOAD_MIN_RESERVES) return tryReload();
 
     // Sem reserva: busca em background e espera um pouco. A sessao ja esta bloqueada, entao
@@ -1425,10 +1403,6 @@ function instalarVoiceShim() {
         connections: [],
         seen: new WeakMap(),
         modules: new WeakSet(),
-        demandKnown: false,
-        demandActive: false,
-        demandAt: 0,
-        demandChangedAt: 0,
         retry: 0,
     };
     window.__goliveVoiceShim = state;
@@ -1479,6 +1453,7 @@ function instalarVoiceShim() {
         if (!parsed || typeof parsed !== 'object') {
             return { ok: false, reason: 'formato', shape: shape(parsed, 0, new WeakSet()) };
         }
+
         var outbound = parsed.outbound;
         var video = outbound && outbound.video;
         if ((!video || typeof video !== 'object') && outbound && Array.isArray(outbound.videos)) {
@@ -1488,6 +1463,7 @@ function instalarVoiceShim() {
                 if (!video || (finite(candidate.framesEncoded) || 0) > (finite(video.framesEncoded) || 0)) video = candidate;
             }
         }
+
         var screenshare = parsed.screenshare;
         var captureFrames = null;
         if (screenshare && typeof screenshare === 'object') {
@@ -1497,9 +1473,6 @@ function instalarVoiceShim() {
             try { captureKeys = Object.keys(screenshare); } catch (e) { captureKeys = []; }
             for (var ci = 0; ci < captureKeys.length; ci++) {
                 var captureKey = captureKeys[ci];
-                // pipewireFrames/x11Frames sao os campos atuais no Linux. O
-                // padrao tambem aceita os backends equivalentes de Win/macOS,
-                // mas exclui contadores de descarte/falha/saida.
                 if (!/frames$/i.test(captureKey) || /(drop|fail|encode|sent|receive)/i.test(captureKey)) continue;
                 var captureValue = finite(screenshare[captureKey]);
                 if (captureValue === null) continue;
@@ -1508,48 +1481,124 @@ function instalarVoiceShim() {
             }
             if (captureFound) captureFrames = captureTotal;
         }
-        if (!video || typeof video !== 'object') {
-            return { ok: false, reason: 'sem-video', shape: shape(parsed, 0, new WeakSet()) };
+
+        var inputFrameRate = video && typeof video === 'object' ? finite(video.inputFrameRate) : null;
+        var framesEncoded = video && typeof video === 'object' ? finite(video.framesEncoded) : null;
+        var encodeFrameRate = video && typeof video === 'object' ? finite(video.encodeFrameRate) : null;
+        var broadcasterReady = (captureFrames !== null || inputFrameRate !== null) &&
+            framesEncoded !== null && encodeFrameRate !== null;
+
+        function decoderNode(value, depth) {
+            if (!value || typeof value !== 'object' || depth > 5) return null;
+            var decoded = finite(value.framesDecoded);
+            var rate = finite(value.decodeFrameRate);
+            if (rate === null) rate = finite(value.decodedFrameRate);
+            if (rate === null) rate = finite(value.decodeFps);
+            if (rate === null) rate = finite(value.framesPerSecond);
+            var received = finite(value.framesReceived);
+            if (decoded !== null || rate !== null) {
+                return {
+                    framesDecoded: decoded,
+                    decodeFrameRate: rate,
+                    framesReceived: received,
+                };
+            }
+            var keys;
+            try { keys = Object.keys(value).slice(0, 120); } catch (e) { return null; }
+            for (var di = 0; di < keys.length; di++) {
+                var key = keys[di];
+                if (depth > 1 && !/(inbound|video|receiver|decode|remote|rtp)/i.test(key)) continue;
+                var child;
+                try { child = value[key]; } catch (e) { continue; }
+                if (Array.isArray(child)) {
+                    for (var ai = 0; ai < child.length; ai++) {
+                        var fromArray = decoderNode(child[ai], depth + 1);
+                        if (fromArray) return fromArray;
+                    }
+                } else {
+                    var nested = decoderNode(child, depth + 1);
+                    if (nested) return nested;
+                }
+            }
+            return null;
         }
-        var inputFrameRate = finite(video.inputFrameRate);
-        var framesEncoded = finite(video.framesEncoded);
-        var encodeFrameRate = finite(video.encodeFrameRate);
-        if ((captureFrames === null && inputFrameRate === null) || framesEncoded === null || encodeFrameRate === null) {
+
+        var decodedVideo = decoderNode(parsed.inbound || parsed, 0);
+        var framesDecoded = decodedVideo ? decodedVideo.framesDecoded : null;
+        var decodeFrameRate = decodedVideo ? decodedVideo.decodeFrameRate : null;
+        var framesReceived = decodedVideo ? decodedVideo.framesReceived : null;
+        var viewerReady = framesDecoded !== null && decodeFrameRate !== null;
+
+        if (!broadcasterReady && !viewerReady) {
             return { ok: false, reason: 'campos', shape: shape(parsed, 0, new WeakSet()) };
         }
         return {
             ok: true,
+            broadcasterReady: broadcasterReady,
+            viewerReady: viewerReady,
             captureFrames: captureFrames,
             inputFrameRate: inputFrameRate,
             framesEncoded: framesEncoded,
             encodeFrameRate: encodeFrameRate,
-            mediaBitrate: finite(video.mediaBitrate),
-            targetMediaBitrate: finite(video.targetMediaBitrate),
-            width: Array.isArray(video.substreams) && video.substreams[0] ? finite(video.substreams[0].width) : null,
-            height: Array.isArray(video.substreams) && video.substreams[0] ? finite(video.substreams[0].height) : null,
-            suspended: video.suspended === true,
+            mediaBitrate: video && typeof video === 'object' ? finite(video.mediaBitrate) : null,
+            targetMediaBitrate: video && typeof video === 'object' ? finite(video.targetMediaBitrate) : null,
+            width: video && Array.isArray(video.substreams) && video.substreams[0] ? finite(video.substreams[0].width) : null,
+            height: video && Array.isArray(video.substreams) && video.substreams[0] ? finite(video.substreams[0].height) : null,
+            suspended: !!(video && video.suspended === true),
+            framesDecoded: framesDecoded,
+            decodeFrameRate: decodeFrameRate,
+            framesReceived: framesReceived,
+            videoExpected: viewerReady,
         };
+    }
+
+    function connectionRoleHint(rec) {
+        if (!rec || !rec.conn || rec.kind !== 'stream') return 'unknown';
+        if (rec.sourceReplay) return 'broadcaster';
+        try { if (typeof rec.conn.hasDesktopSource === 'function' && rec.conn.hasDesktopSource() === true) return 'broadcaster'; } catch (e) { }
+        try {
+            var local = rec.localUser;
+            var remote = rec.streamUser;
+            if (typeof remote === 'string' && remote.length > 0 && typeof local === 'string' && local.length > 0) {
+                return remote === local ? 'broadcaster' : 'viewer';
+            }
+        } catch (e) { }
+        return 'unknown';
     }
 
     function updateProgress(rec, stats) {
         var now = Date.now();
+        var role = connectionRoleHint(rec);
+        if (role === 'unknown') {
+            if (stats.broadcasterReady && !stats.viewerReady) role = 'broadcaster';
+            else if (stats.viewerReady && !stats.broadcasterReady) role = 'viewer';
+        }
+        rec.lastRole = role;
         if (!rec.progress) {
             rec.progress = {
                 inputValue: stats.captureFrames,
                 outputValue: stats.framesEncoded,
+                decodedValue: stats.framesDecoded,
                 inputAt: now,
                 outputAt: now,
+                decodedAt: now,
             };
         } else {
             if ((stats.captureFrames !== null && stats.captureFrames !== rec.progress.inputValue) ||
                 (stats.inputFrameRate !== null && stats.inputFrameRate > 0)) rec.progress.inputAt = now;
-            if (stats.framesEncoded !== rec.progress.outputValue ||
+            if ((stats.framesEncoded !== null && stats.framesEncoded !== rec.progress.outputValue) ||
                 (stats.encodeFrameRate !== null && stats.encodeFrameRate > 0)) rec.progress.outputAt = now;
+            if ((stats.framesDecoded !== null && stats.framesDecoded !== rec.progress.decodedValue) ||
+                (stats.decodeFrameRate !== null && stats.decodeFrameRate > 0)) rec.progress.decodedAt = now;
             rec.progress.inputValue = stats.captureFrames;
             rec.progress.outputValue = stats.framesEncoded;
+            rec.progress.decodedValue = stats.framesDecoded;
         }
+        var relevantOk = role === 'broadcaster' ? stats.broadcasterReady :
+            (role === 'viewer' ? stats.viewerReady : false);
         return {
-            statsOk: true,
+            statsOk: relevantOk,
+            role: role,
             captureFrames: stats.captureFrames,
             framesEncoded: stats.framesEncoded,
             inputFrameRate: stats.inputFrameRate,
@@ -1559,17 +1608,29 @@ function instalarVoiceShim() {
             width: stats.width,
             height: stats.height,
             suspended: stats.suspended,
-            entradaHa: now - rec.progress.inputAt,
-            saidaHa: now - rec.progress.outputAt,
+            entradaHa: role === 'broadcaster' ? now - rec.progress.inputAt : -1,
+            saidaHa: role === 'broadcaster' ? now - rec.progress.outputAt : -1,
+            framesDecoded: stats.framesDecoded,
+            decodeFrameRate: stats.decodeFrameRate,
+            framesReceived: stats.framesReceived,
+            decodeHa: role === 'viewer' ? now - rec.progress.decodedAt : -1,
+            videoExpected: role === 'viewer' ? stats.videoExpected === true && !rec.localVideoDisabled : false,
             sampleHa: 0,
         };
     }
 
-    function registerConnection(kind, creator, options, conn) {
+    function registerConnection(kind, creator, options, conn, localUser) {
         if (!conn || (typeof conn !== 'object' && typeof conn !== 'function')) return conn;
+        // Viewer streams use createVoiceConnectionWithOptions in current Discord.
+        // The options context is authoritative; the returned native wrapper does
+        // not expose userId/streamUserId properties.
+        if (options && options.context === 'stream') kind = 'stream';
+        else if (options && options.context === 'default') kind = 'voice';
         var existing = state.seen.get(conn);
         if (existing) {
             if (kind === 'stream') existing.kind = 'stream';
+            if (typeof localUser === 'string') existing.localUser = localUser;
+            if (options && typeof options.streamUserId === 'string') existing.streamUser = options.streamUserId;
             return conn;
         }
         var rec = {
@@ -1580,6 +1641,15 @@ function instalarVoiceShim() {
             destroyedAt: 0,
             optionShape: shape(options, 0, new WeakSet()),
             conn: conn,
+            localUser: typeof localUser === 'string' ? localUser : conn.userId,
+            streamUser: options && typeof options.streamUserId === 'string' ? options.streamUserId : conn.streamUserId,
+            localVideoDisabled: false,
+            localVideoRevision: 0,
+            sourceReplay: null,
+            sourceAt: 0,
+            replayingSource: false,
+            recoveryClearingSource: false,
+            lastRole: 'unknown',
         };
         state.seen.set(conn, rec);
         state.connections.push(rec);
@@ -1589,10 +1659,95 @@ function instalarVoiceShim() {
                 var originalDestroy = conn.destroy;
                 conn.destroy = function () {
                     rec.destroyedAt = Date.now();
+                    rec.sourceReplay = null;
+                    rec.sourceAt = 0;
                     return originalDestroy.apply(this, arguments);
                 };
             }
         } catch (e) { }
+
+        if (kind === 'stream') {
+            // Discord forwards effective remote viewer demand through this native
+            // method. Renderer console messages live in a different JS world.
+            // Read only the numeric pixel count; never retain transport options.
+            rec.keyframeRepair = false;
+            rec.keyframeBaseline = null;
+            rec.alwaysSendBaseline = null;
+            rec.restoreKeyframeRepair = function () {
+                if (!rec.keyframeRepair) return;
+                originalTransport.call(conn, { keyframeInterval: rec.keyframeBaseline, alwaysSendVideo: rec.alwaysSendBaseline });
+                rec.keyframeRepair = false;
+            };
+            rec.demandKnown = false;
+            rec.demandActive = false;
+            rec.demandAt = 0;
+            rec.demandChangedAt = 0;
+            try {
+                var originalTransport = conn.setTransportOptions;
+                if (typeof originalTransport === 'function') {
+                    conn.setTransportOptions = function (options) {
+                        var effective = options;
+                        if (options && typeof options === 'object') {
+                            if (finite(options.keyframeInterval) !== null) rec.keyframeBaseline = options.keyframeInterval;
+                            if (typeof options.alwaysSendVideo === 'boolean') rec.alwaysSendBaseline = options.alwaysSendVideo;
+                            if (rec.keyframeRepair) effective = Object.assign({}, options, { keyframeInterval: 1000, alwaysSendVideo: true });
+                        }
+                        var forwarded = Array.prototype.slice.call(arguments);
+                        forwarded[0] = effective;
+                        var result = originalTransport.apply(this, forwarded);
+                        var pixels = options && finite(options.remoteSinkWantsPixelCount);
+                        if (pixels !== null && pixels !== undefined && pixels >= 0) {
+                            var now = Date.now();
+                            var active = pixels > 0;
+                            if (!rec.demandKnown || rec.demandActive !== active) rec.demandChangedAt = now;
+                            rec.demandKnown = true;
+                            rec.demandActive = active;
+                            if (active) rec.demandAt = now;
+                        }
+                        return result;
+                    };
+                }
+            } catch (e) { }
+            try {
+                var originalDisable = conn.setDisableLocalVideo;
+                if (typeof originalDisable === 'function') {
+                    conn.setDisableLocalVideo = function (userId, disabled) {
+                        if (userId === rec.streamUser) {
+                            rec.localVideoDisabled = disabled === true;
+                            rec.localVideoRevision++;
+                        }
+                        return originalDisable.apply(this, arguments);
+                    };
+                }
+            } catch (e) { }
+            ['setDesktopSource', 'setDesktopSourceWithOptions'].forEach(function (name) {
+                try {
+                    var original = conn[name];
+                    if (typeof original !== 'function') return;
+                    conn[name] = function () {
+                        if (!rec.replayingSource) {
+                            rec.restoreKeyframeRepair();
+                            rec.sourceReplay = { name: name, args: Array.prototype.slice.call(arguments) };
+                            rec.sourceAt = Date.now();
+                        }
+                        return original.apply(this, arguments);
+                    };
+                } catch (e) { }
+            });
+            try {
+                var originalClear = conn.clearDesktopSource;
+                if (typeof originalClear === 'function') {
+                    conn.clearDesktopSource = function () {
+                        if (!rec.recoveryClearingSource) {
+                            rec.restoreKeyframeRepair();
+                            rec.sourceReplay = null;
+                            rec.sourceAt = 0;
+                        }
+                        return originalClear.apply(this, arguments);
+                    };
+                }
+            } catch (e) { }
+        }
         return conn;
     }
 
@@ -1614,7 +1769,7 @@ function instalarVoiceShim() {
                     var conn;
                     try { conn = original.apply(this, arguments); }
                     finally { state.pendingKind = null; }
-                    return registerConnection(kind, name, arguments[1], conn);
+                    return registerConnection(kind, name, arguments[1], conn, arguments[0]);
                 };
             })(creators[i][0], creators[i][1]);
         }
@@ -1629,7 +1784,7 @@ function instalarVoiceShim() {
                 function GoliveVoiceConnection() {
                     var args = Array.prototype.slice.call(arguments);
                     var instance = Reflect.construct(OriginalVoiceConnection, args, OriginalVoiceConnection);
-                    if (!state.pendingKind) registerConnection('unknown', 'VoiceConnection', args[1], instance);
+                    if (!state.pendingKind) registerConnection('unknown', 'VoiceConnection', args[1], instance, args[0]);
                     return instance;
                 }
                 Object.setPrototypeOf(GoliveVoiceConnection, OriginalVoiceConnection);
@@ -1666,96 +1821,68 @@ function instalarVoiceShim() {
         }
     }
 
-    function noteDemand(args) {
-        try {
-            var joined = Array.prototype.map.call(args, function (value) {
-                return typeof value === 'string' ? value : '';
-            }).join(' ');
-            var marker = 'Remote media sink wants:';
-            var at = joined.indexOf(marker);
-            if (at < 0) return;
-            var payload = JSON.parse(joined.slice(at + marker.length).trim());
-            var positive = false;
-            function walk(value) {
-                if (positive || value === null || value === undefined) return;
-                if (typeof value === 'number') { if (value > 0) positive = true; return; }
-                if (typeof value === 'object') {
-                    var values = Object.values(value);
-                    for (var i = 0; i < values.length; i++) walk(values[i]);
-                }
-            }
-            walk(payload && payload.pixelCounts);
-            if (!positive && payload && typeof payload === 'object') {
-                var entries = Object.entries(payload);
-                for (var i = 0; i < entries.length; i++) {
-                    var key = entries[i][0], value = entries[i][1];
-                    if (key !== 'any' && key !== 'pixelCounts' && typeof value === 'number' && value > 0) positive = true;
-                }
-            }
-            var now = Date.now();
-            if (!state.demandKnown || state.demandActive !== positive) state.demandChangedAt = now;
-            state.demandKnown = true;
-            state.demandActive = positive;
-            if (positive) state.demandAt = now;
-        } catch (e) { }
-    }
-
-    ['log', 'info', 'debug'].forEach(function (method) {
-        try {
-            var original = console[method];
-            if (typeof original !== 'function') return;
-            console[method] = function () {
-                noteDemand(arguments);
-                return original.apply(this, arguments);
-            };
-        } catch (e) { }
-    });
-
     function sample(rec) {
         return new Promise(function (resolve) {
             if (rec.destroyedAt > 0 || !rec.conn) return resolve({ statsOk: false, reason: 'destruida' });
             if (rec.kind !== 'stream') return resolve({ statsOk: false, reason: 'tipo' });
-            var method = null;
-            var filtered = false;
-            if (typeof rec.conn.getFilteredStats === 'function') {
-                method = rec.conn.getFilteredStats;
-                filtered = true;
-            } else if (typeof rec.conn.getStats === 'function') {
-                // Compatibilidade com addons antigos. O atual sempre segue o
-                // ramo filtrado acima, evitando o metodo stale do index.js.
-                method = rec.conn.getStats;
+            if (typeof rec.conn.getFilteredStats !== 'function') {
+                return resolve({ statsOk: false, reason: 'sem-metodo' });
             }
-            if (!method) return resolve({ statsOk: false, reason: 'sem-metodo' });
+            var hint = connectionRoleHint(rec);
+            // Native bitmask: TRANSPORT=1, OUTBOUND=2, INBOUND=4, ALL=7.
+            var filters = hint === 'viewer' ? [4] : (hint === 'broadcaster' ? [2] : [7]);
             var done = false;
-            var timer = null;
-            function finish(raw) {
+            var lastFailure = { statsOk: false, reason: 'campos' };
+
+            function finish(value) {
                 if (done) return;
                 done = true;
-                if (timer !== null) clearTimeout(timer);
-                var normalized = normalizeStats(raw);
-                if (!normalized.ok) {
-                    resolve({ statsOk: false, reason: normalized.reason, statsShape: normalized.shape });
-                    return;
-                }
-                resolve(updateProgress(rec, normalized));
+                resolve(value);
             }
-            timer = setTimeout(function () { finish({}); }, 2500);
-            try {
-                var returned = filtered
-                    ? method.call(rec.conn, 2, function (raw) { finish(raw); })
-                    : method.call(rec.conn, function (raw) { finish(raw); });
-                if (returned && typeof returned.then === 'function') returned.then(finish, function () { finish({}); });
-            } catch (e) { finish({}); return; }
+
+            function attempt(index) {
+                if (done) return;
+                if (index >= filters.length) return finish(lastFailure);
+                var settled = false;
+                var timer = setTimeout(function () {
+                    if (settled || done) return;
+                    settled = true;
+                    attempt(index + 1);
+                }, 800);
+                function receive(raw) {
+                    if (settled || done) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    var normalized = normalizeStats(raw);
+                    if (normalized.ok) return finish(updateProgress(rec, normalized));
+                    lastFailure = { statsOk: false, reason: normalized.reason, statsShape: normalized.shape };
+                    attempt(index + 1);
+                }
+                try {
+                    var returned = rec.conn.getFilteredStats(filters[index], function (raw) { receive(raw); });
+                    if (returned && typeof returned.then === 'function') returned.then(receive, function () { attempt(index + 1); });
+                } catch (e) {
+                    clearTimeout(timer);
+                    settled = true;
+                    attempt(index + 1);
+                }
+            }
+            attempt(0);
         });
     }
 
     window.__goliveVoiceDemandaResumo = function () {
         var now = Date.now();
+        var rec = null;
+        for (var i = state.connections.length - 1; i >= 0; i--) {
+            var candidate = state.connections[i];
+            if (candidate.kind === 'stream' && !candidate.destroyedAt) { rec = candidate; break; }
+        }
         return {
-            known: state.demandKnown,
-            active: state.demandActive,
-            demandHa: state.demandAt > 0 ? now - state.demandAt : -1,
-            changedHa: state.demandChangedAt > 0 ? now - state.demandChangedAt : -1,
+            known: !!(rec && rec.demandKnown),
+            active: !!(rec && rec.demandActive),
+            demandHa: rec && rec.demandAt > 0 ? now - rec.demandAt : -1,
+            changedHa: rec && rec.demandChangedAt > 0 ? now - rec.demandChangedAt : -1,
         };
     };
 
@@ -1770,6 +1897,9 @@ function instalarVoiceShim() {
                     createdHa: now - rec.createdAt,
                     destroyed: rec.destroyedAt > 0,
                     optionShape: rec.optionShape,
+                    roleHint: connectionRoleHint(rec),
+                    sourceCached: !!rec.sourceReplay,
+                    sourceHa: rec.sourceReplay && rec.sourceAt > 0 ? now - rec.sourceAt : -1,
                     stats: sampled,
                 };
             });
@@ -1778,45 +1908,112 @@ function instalarVoiceShim() {
                 installed: state.installed,
                 voiceHooked: state.voiceHooked,
                 instanceId: state.instanceId,
-                demandKnown: state.demandKnown,
-                demandActive: state.demandActive,
-                demandHa: state.demandAt > 0 ? Date.now() - state.demandAt : -1,
+                demandKnown: window.__goliveVoiceDemandaResumo().known,
+                demandActive: window.__goliveVoiceDemandaResumo().active,
+                demandHa: window.__goliveVoiceDemandaResumo().demandHa,
                 connections: connections,
             };
         });
     };
 
-    // A decisao e feita no main. Aqui so executamos o nivel explicitamente
-    // pedido, sempre em conexoes classificadas pelo factory exato; unknown
-    // jamais entra na lista de destruicao.
-    window.__goliveVoiceRecuperar = function (level) {
-        if (level !== 1 && level !== 2) return { ok: false, level: 0, streams: 0, voices: 0 };
-        var active = state.connections.filter(function (rec) {
-            return !rec.destroyedAt && rec.conn && (rec.kind === 'stream' || rec.kind === 'voice');
-        });
-        var targets = [];
+    // A decisao e feita no main. O preload executa apenas a acao segura
+    // correspondente ao papel sanitizado da stream; IDs e argumentos ficam no closure.
+    window.__goliveVoiceRecuperar = function (level, expectedInstanceId, expectedConnectionId) {
+        if (level !== 1 && level !== 2) return { ok: false, level: 0, role: 'unknown', action: 'invalid-level' };
         var latestStream = null;
-        for (var i = active.length - 1; i >= 0; i--) {
-            if (!latestStream && active[i].kind === 'stream') latestStream = active[i];
+        for (var i = state.connections.length - 1; i >= 0; i--) {
+            var rec = state.connections[i];
+            if (!rec || rec.destroyedAt || !rec.conn || rec.kind !== 'stream') continue;
+            latestStream = rec;
+            break;
         }
-        if (latestStream) targets.push(latestStream);
-        if (level === 2) {
-            for (var j = active.length - 1; j >= 0; j--) {
-                if (active[j].kind === 'voice') { targets.push(active[j]); break; }
+        if (!latestStream) return { ok: false, level: level, role: 'unknown', action: 'no-stream' };
+        if (String(state.instanceId) !== String(expectedInstanceId) ||
+            String(latestStream.id) !== String(expectedConnectionId)) {
+            return { ok: false, level: level, role: 'unknown', action: 'stale-generation' };
+        }
+        var role = latestStream.lastRole || connectionRoleHint(latestStream);
+        if (role === 'unknown') role = connectionRoleHint(latestStream);
+
+        if (role === 'broadcaster') {
+            var replay = latestStream.sourceReplay;
+            if (!replay || typeof latestStream.conn[replay.name] !== 'function') {
+                return { ok: false, level: level, role: role, action: 'source-unavailable' };
+            }
+            if (level === 1) {
+                try {
+                    latestStream.replayingSource = true;
+                    latestStream.conn[replay.name].apply(latestStream.conn, replay.args);
+                    // Capture can remain live while native simulcast is inactive.
+                    // A one-second keyframe interval plus alwaysSendVideo restarted
+                    // encoding in the live A/B test; codecs and gateway stay intact.
+                    // Only override known transport state, and only for this source.
+                    if (latestStream.keyframeBaseline !== null && latestStream.alwaysSendBaseline !== null &&
+                        typeof latestStream.conn.setTransportOptions === 'function') {
+                        latestStream.keyframeRepair = true;
+                        latestStream.conn.setTransportOptions({});
+                        return { ok: true, level: level, role: role, action: 'desktop-source-keyframe-rearm' };
+                    }
+                    return { ok: true, level: level, role: role, action: 'desktop-source-reapply' };
+                } catch (e) {
+                    return { ok: false, level: level, role: role, action: 'desktop-source-reapply-failed' };
+                } finally {
+                    latestStream.replayingSource = false;
+                }
+            }
+            if (typeof latestStream.conn.clearDesktopSource !== 'function') {
+                return { ok: false, level: level, role: role, action: 'source-clear-unavailable' };
+            }
+            try {
+                latestStream.recoveryClearingSource = true;
+                latestStream.conn.clearDesktopSource();
+            } catch (e) {
+                latestStream.recoveryClearingSource = false;
+                return { ok: false, level: level, role: role, action: 'desktop-source-clear-failed' };
+            }
+            latestStream.recoveryClearingSource = false;
+            setTimeout(function () {
+                if (latestStream.destroyedAt || latestStream.sourceReplay !== replay) return;
+                try {
+                    latestStream.replayingSource = true;
+                    latestStream.conn[replay.name].apply(latestStream.conn, replay.args);
+                } catch (e) { }
+                finally { latestStream.replayingSource = false; }
+            }, 200);
+            return { ok: true, level: level, role: role, action: 'desktop-source-clear-reapply' };
+        }
+
+        if (role === 'viewer') {
+            if (level === 1) {
+                try {
+                    if (typeof latestStream.conn.fastUdpReconnect !== 'function') {
+                        return { ok: false, level: level, role: role, action: 'fast-udp-unavailable' };
+                    }
+                    latestStream.conn.fastUdpReconnect();
+                    return { ok: true, level: level, role: role, action: 'viewer-fast-udp-reconnect' };
+                } catch (e) {
+                    return { ok: false, level: level, role: role, action: 'viewer-fast-udp-failed' };
+                }
+            }
+            var remoteUser = latestStream.streamUser;
+            if (typeof remoteUser !== 'string' || remoteUser.length === 0 ||
+                typeof latestStream.conn.setDisableLocalVideo !== 'function') {
+                return { ok: false, level: level, role: role, action: 'viewer-resubscribe-unavailable' };
+            }
+            try {
+                latestStream.conn.setDisableLocalVideo(remoteUser, true);
+                var videoRevision = latestStream.localVideoRevision;
+                if (typeof latestStream.conn.fastUdpReconnect === 'function') latestStream.conn.fastUdpReconnect();
+                setTimeout(function () {
+                    if (latestStream.destroyedAt || latestStream.localVideoRevision !== videoRevision) return;
+                    try { latestStream.conn.setDisableLocalVideo(remoteUser, false); } catch (e) { }
+                }, 200);
+                return { ok: true, level: level, role: role, action: 'viewer-video-resubscribe' };
+            } catch (e) {
+                return { ok: false, level: level, role: role, action: 'viewer-resubscribe-failed' };
             }
         }
-        var streams = 0, voices = 0;
-        for (var ti = 0; ti < targets.length; ti++) {
-            var target = targets[ti];
-            try {
-                if (typeof target.conn.destroy !== 'function') continue;
-                target.conn.destroy();
-                if (!target.destroyedAt) target.destroyedAt = Date.now();
-                if (target.kind === 'stream') streams++;
-                else if (target.kind === 'voice') voices++;
-            } catch (e) { }
-        }
-        return { ok: level === 1 ? streams > 0 : voices > 0, level: level, streams: streams, voices: voices };
+        return { ok: false, level: level, role: role, action: 'unknown-role' };
     };
 
     installNativeHook();
@@ -2267,22 +2464,21 @@ const GW_STREAM_LEAVE_MS = 15_000;
 // isolado 999. O main junta sua telemetria de discord_voice com a demanda e os
 // websockets observados no mundo principal; dado ausente nunca vira acao.
 const VOICE_ISOLATED_WORLD_ID = 999;
-const VOICE_PROBE_MS = 5_000;
+const VOICE_PROBE_MS = 2_000;
 const VOICE_PROBE_LOG_MS = 30_000;
 const VOICE_STREAM_AQUECIMENTO_MS = 20_000;
+const VOICE_VIEWER_AQUECIMENTO_MS = 10_000;
+const VOICE_VIEWER_PARADO_MS = 10_000;
 const VOICE_DEMANDA_GRACA_MS = 15_000;
 const VOICE_ENTRADA_VIVA_MS = 15_000;
 const VOICE_SAIDA_PARADA_MS = 20_000;
 const VOICE_SAMPLE_MAX_MS = 10_000;
 const VOICE_SAIDA_SUCESSO_MS = 8_000;
 const VOICE_SUCESSO_SUSTENTADO_MS = 10_000;
-// No ensaio ao vivo, destroy(stream) iniciou uma reconstrução tardia: a stream
-// sumiu na hora, voice/midia fecharam entre 25-50s e a nova stream codificou em
-// ~80s. Aos 60s distinguimos "voz ainda presa" de "teardown ja em curso".
-const VOICE_NIVEL1_ESPERA_MS = 60_000;
-const VOICE_RECONSTRUCAO_GRACA_MS = 45_000;
-const VOICE_NOVA_GERACAO_GRACA_MS = 30_000;
-const VOICE_NIVEL2_ESPERA_MS = 45_000;
+// Safe recovery preserves the native connection, so recovery windows now wait
+// for media progress rather than for teardown/recreation side effects.
+const VOICE_NIVEL1_ESPERA_MS = 20_000;
+const VOICE_NIVEL2_ESPERA_MS = 30_000;
 const VOICE_ACAO_COOLDOWN_MS = 30_000;
 const VOICE_TENTATIVAS = 2;
 const VOICE_JANELA_MS = 30 * 60_000;
@@ -2427,11 +2623,12 @@ function showZumbiBanner() {
 
 // Recuperacao do VIDEO DE SAIDA do transmissor (issue #164). O probe da beta
 // 10 observava RTCPeerConnection no Chromium e era cego (pcs=0): o Discord
-// desktop usa discord_voice. Agora a primeira acao destroi somente a conexao
-// stream nativa; se ela nao renascer saudavel, o nivel 2 destroi tambem voice e
-// fecha os ws de midia. Nunca ha reload automatico.
-let videoNativoTentativas = [];
-let videoNativoUltimaAcaoEm = 0;
+// desktop usa discord_voice. A recuperacao enhanced e role-aware: broadcaster
+// reaplica a fonte sem destruir RTC; viewer refresca transporte/subscricao de video.
+// Voice, media sockets e gateway permanecem intactos.
+// Retry limits survive stream changes, but viewer work cannot consume sender recovery.
+const videoNativoTentativas = { broadcaster: [], viewer: [] };
+const videoNativoUltimaAcaoEm = { broadcaster: 0, viewer: 0 };
 let videoNativoPendente = null;
 let videoNativoBloqueadoGeracao = '';
 let videoNativoBloqueadoEm = 0;
@@ -2486,39 +2683,74 @@ function geracaoNativa(voice, stream) {
     return String(voice.instanceId || 'legacy') + ':' + String(stream.id);
 }
 
-// Funcao pura e fail-closed. Todas as guardas precisam concordar: stream exata,
-// midia aberta, espectador positivo visto desde essa geracao, captura viva e
-// saida sem progredir por 20s. Uma renegociacao normal de 3s apenas envelhece
-// saidaHa por 3s e nunca chega perto do limiar.
+// Role-aware, fail-closed native RTC detector. Broadcaster stalls are capture-live /
+// encoder-dead; viewer stalls are established video with a decoder that never progresses.
 function avaliarRtcNativo(ctx) {
     if (!ctx || !ctx.voice || ctx.voice.installed !== true || ctx.voice.voiceHooked !== true) return null;
     if (!ctx.midia || ctx.midia.midiaAberta !== true) return null;
-    if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
     const stream = streamNativaAtiva(ctx.voice);
-    if (!stream || stream.createdHa < VOICE_STREAM_AQUECIMENTO_MS) return null;
-    if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
+    if (!stream) return null;
     const stats = stream.stats;
     if (!stats || stats.statsOk !== true) return null;
     if (stats.sampleHa < 0 || stats.sampleHa > VOICE_SAMPLE_MAX_MS) return null;
-    if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
-    if (!(typeof stats.captureFrames === 'number' || stats.inputFrameRate > 0)) return null;
-    if (typeof stats.framesEncoded !== 'number' || typeof stats.encodeFrameRate !== 'number') return null;
-    if (stats.saidaHa < VOICE_SAIDA_PARADA_MS) return null;
-    return 'video-nativo-travado';
+    const papel = stats.role ||
+        ((typeof stats.framesEncoded === 'number' && typeof stats.encodeFrameRate === 'number') ? 'broadcaster' :
+            ((typeof stats.framesDecoded === 'number' && typeof stats.decodeFrameRate === 'number') ? 'viewer' : 'unknown'));
+
+    if (papel === 'broadcaster') {
+        if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
+        if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
+        const startup = stream.sourceCached === true &&
+            typeof stream.sourceHa === 'number' && stream.sourceHa >= 5_000 &&
+            stats.framesEncoded === 0 && stats.encodeFrameRate === 0 && stats.inputFrameRate > 0;
+        const stallMs = startup ? 5_000 : VOICE_SAIDA_PARADA_MS;
+        if (stream.createdHa < (startup ? 5_000 : VOICE_STREAM_AQUECIMENTO_MS)) return null;
+        if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
+        if (!(typeof stats.captureFrames === 'number' || stats.inputFrameRate > 0)) return null;
+        if (typeof stats.framesEncoded !== 'number' || typeof stats.encodeFrameRate !== 'number') return null;
+        if (stats.saidaHa < stallMs) return null;
+        return 'transmissor-video-parado';
+    }
+
+    if (papel === 'viewer') {
+        if (stream.createdHa < VOICE_VIEWER_AQUECIMENTO_MS) return null;
+        if (stats.videoExpected !== true) return null;
+        if (typeof stats.framesDecoded !== 'number' || typeof stats.decodeFrameRate !== 'number') return null;
+        if (stats.decodeFrameRate > 0) return null;
+        if (stats.decodeHa < VOICE_VIEWER_PARADO_MS) return null;
+        return 'viewer-video-parado';
+    }
+    return null;
 }
 
-function rtcNativoSaudavel(ctx, geracaoAnterior) {
+function rtcNativoSaudavel(ctx, papelEsperado) {
     const stream = streamNativaAtiva(ctx && ctx.voice);
-    if (!stream || geracaoNativa(ctx.voice, stream) === geracaoAnterior) return null;
+    if (!stream) return null;
     const stats = stream.stats;
-    if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
     if (!ctx.midia || ctx.midia.midiaAberta !== true) return null;
-    if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
     if (!stats || stats.statsOk !== true || stats.sampleHa > VOICE_SAMPLE_MAX_MS) return null;
-    if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
-    if (stats.saidaHa < 0 || stats.saidaHa > VOICE_SAIDA_SUCESSO_MS) return null;
-    if (!(stats.encodeFrameRate > 0) || typeof stats.framesEncoded !== 'number') return null;
-    return stream;
+    let papel = stats.role;
+    if (papel !== 'broadcaster' && papel !== 'viewer') {
+        papel = (typeof stats.framesEncoded === 'number' && typeof stats.encodeFrameRate === 'number') ? 'broadcaster' :
+            ((typeof stats.framesDecoded === 'number' && typeof stats.decodeFrameRate === 'number') ? 'viewer' : 'unknown');
+    }
+    if (papelEsperado === 'broadcaster' || papelEsperado === 'viewer') {
+        if (papel !== papelEsperado) return null;
+    }
+    if (papel === 'broadcaster') {
+        if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
+        if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
+        if (stats.saidaHa < 0 || stats.saidaHa > VOICE_SAIDA_SUCESSO_MS) return null;
+        if (!(stats.encodeFrameRate > 0) || typeof stats.framesEncoded !== 'number') return null;
+        return stream;
+    }
+    if (papel === 'viewer') {
+        if (stats.videoExpected !== true) return null;
+        if (stats.decodeHa < 0 || stats.decodeHa > VOICE_SAIDA_SUCESSO_MS) return null;
+        if (!(stats.decodeFrameRate > 0) || typeof stats.framesDecoded !== 'number') return null;
+        return stream;
+    }
+    return null;
 }
 
 function executarVoiceIsolado(win, code) {
@@ -2553,63 +2785,84 @@ function falharRecuperacaoNativa(ctx, motivo) {
     if (!videoBannerAtivo) showVideoBanner();
 }
 
-function iniciarRecuperacaoNativa(ctx, nivel, geracaoAnterior) {
+function iniciarRecuperacaoNativa(ctx, nivel, sinal) {
     const agora = Date.now();
-    while (videoNativoTentativas.length > 0 && videoNativoTentativas[0] < agora - VOICE_JANELA_MS) {
-        videoNativoTentativas.shift();
+    for (const papel of ['broadcaster', 'viewer']) {
+        videoNativoTentativas[papel] = videoNativoTentativas[papel].filter(at => at >= agora - VOICE_JANELA_MS);
     }
-    if (videoNativoTentativas.length >= VOICE_TENTATIVAS) {
+    const stream = streamNativaAtiva(ctx.voice);
+    const stats = stream && stream.stats;
+    const papel = stats && stats.role ? stats.role : (sinal === 'viewer-video-parado' ? 'viewer' : 'broadcaster');
+    if (!stream || (papel !== 'viewer' && papel !== 'broadcaster')) {
+        falharRecuperacaoNativa(ctx, 'papel_indisponivel');
+        return;
+    }
+    const geracao = geracaoNativa(ctx.voice, stream);
+    if (videoNativoTentativas[papel].length >= VOICE_TENTATIVAS) {
         falharRecuperacaoNativa(ctx, 'teto_tentativas');
         return;
     }
-    const stream = streamNativaAtiva(ctx.voice);
-    const geracao = stream ? geracaoNativa(ctx.voice, stream) : String(geracaoAnterior || '');
-    videoNativoTentativas.push(agora);
-    videoNativoUltimaAcaoEm = agora;
-    const tentativa = { nivel, geracao, inicioEm: agora, sucessoEm: 0, renasceuEm: 0, confirmada: false };
+    videoNativoTentativas[papel].push(agora);
+    videoNativoUltimaAcaoEm[papel] = agora;
+    const tentativa = { nivel, geracao, papel, sinal, inicioEm: agora, sucessoEm: 0, confirmada: false, action: '', demandaBaixaLogada: false };
     videoNativoPendente = tentativa;
     sessaoRevives++;
-    log("gw.revive | video nativo: nivel=" + nivel +
-        (nivel === 1 ? " destruindo somente a stream nativa" : " reconstruindo voice+stream sem reload") +
-        " entrada_ha=" + idadeSeg(stream && stream.stats ? stream.stats.entradaHa : -1) +
-        " saida_ha=" + idadeSeg(stream && stream.stats ? stream.stats.saidaHa : -1));
+    log("gw.revive | rtc nativo: nivel=" + nivel + " papel=" + papel + " sinal=" + String(sinal || '?'));
     executarVoiceIsolado(ctx.win,
-        'window.__goliveVoiceRecuperar ? window.__goliveVoiceRecuperar(' + nivel + ') : null')
+        'window.__goliveVoiceRecuperar ? window.__goliveVoiceRecuperar(' + nivel + ', ' +
+        JSON.stringify(ctx.voice.instanceId) + ', ' + JSON.stringify(stream.id) + ') : null')
         .then(resultado => {
             if (videoNativoPendente !== tentativa) return;
-            if (!resultado || resultado.ok !== true) {
+            if (!resultado || resultado.ok !== true || resultado.role !== papel) {
                 falharRecuperacaoNativa(ctx, 'acao_nativa_indisponivel');
                 return;
             }
             tentativa.confirmada = true;
-            log("gw.revive | video nativo: nivel=" + nivel + " executado" +
-                " streams=" + Number(resultado.streams || 0) + " voices=" + Number(resultado.voices || 0));
-            if (nivel !== 2) return;
-            // A associacao URL -> stream nao e inequivoca, portanto o nivel 1
-            // nao toca ws algum. No nivel 2, ja assumimos o corte breve de voz e
-            // fechamos todos os discord.media para o controlador reconstruir.
-            ctx.win.webContents.executeJavaScript('window.__goliveMidiaFechar ? window.__goliveMidiaFechar() : 0')
-                .then(n => log("gw.revive | video nativo: nivel=2 fechou " + Number(n || 0) + " ws de midia"))
-                .catch(error => log("gw.revive | video nativo: falhei ao fechar midia: " + error.message));
+            tentativa.action = String(resultado.action || 'desconhecida');
+            log("gw.revive | rtc nativo: nivel=" + nivel + " papel=" + papel + " acao=" + tentativa.action);
         })
         .catch(error => {
-            if (videoNativoPendente === tentativa) {
-                falharRecuperacaoNativa(ctx, 'mundo_isolado: ' + error.message);
-            }
+            if (videoNativoPendente === tentativa) falharRecuperacaoNativa(ctx, 'mundo_isolado: ' + error.message);
         });
+}
+
+function broadcasterRecoveryStillOwned(ctx, pendente) {
+    if (!pendente || pendente.papel !== 'broadcaster') return false;
+    const stream = streamNativaAtiva(ctx && ctx.voice);
+    if (!stream || stream.destroyed === true) return false;
+    if (geracaoNativa(ctx.voice, stream) !== pendente.geracao) return false;
+
+    // sourceCached is deliberately sanitized. A voluntary clearDesktopSource() clears it,
+    // while our guarded level-2 clear keeps it. Therefore this is the strongest signal that
+    // the user still owns the same share without exposing source ids/arguments to main.
+    if (stream.sourceCached !== true) return false;
+
+    const stats = stream.stats;
+    if (!stats || stats.statsOk !== true) return true;
+    const papel = stats.role ||
+        ((typeof stats.framesEncoded === 'number' && typeof stats.encodeFrameRate === 'number')
+            ? 'broadcaster' : 'unknown');
+    return papel === 'broadcaster';
 }
 
 function acompanharRecuperacaoNativa(ctx) {
     const pendente = videoNativoPendente;
     if (!pendente) return false;
+    const streamAtual = streamNativaAtiva(ctx && ctx.voice);
+    if (!streamAtual || geracaoNativa(ctx.voice, streamAtual) !== pendente.geracao ||
+        (pendente.papel === 'broadcaster' && streamAtual.sourceCached !== true)) {
+        log("gw.revive | rtc nativo: tentativa cancelada, stream terminou ou mudou");
+        videoNativoPendente = null;
+        // A replacement stream can use its own detector and role budget now.
+        return !streamAtual || geracaoNativa(ctx.voice, streamAtual) === pendente.geracao;
+    }
     const agora = Date.now();
-    const streamSaudavel = rtcNativoSaudavel(ctx, pendente.geracao);
+    const streamSaudavel = rtcNativoSaudavel(ctx, pendente.papel);
     if (streamSaudavel) {
         if (pendente.sucessoEm === 0) pendente.sucessoEm = agora;
         if (agora - pendente.sucessoEm >= VOICE_SUCESSO_SUSTENTADO_MS) {
-            log("gw.revive | video nativo: sucesso nivel=" + pendente.nivel +
-                " geracao_nova=" + streamSaudavel.id + " por=" +
-                Math.round((agora - pendente.sucessoEm) / 1000) + "s");
+            log("gw.revive | rtc nativo: sucesso nivel=" + pendente.nivel + " papel=" + pendente.papel +
+                " acao=" + (pendente.action || '?') + " por=" + Math.round((agora - pendente.sucessoEm) / 1000) + "s");
             videoNativoPendente = null;
             videoNativoBloqueadoGeracao = '';
             videoNativoBloqueadoEm = 0;
@@ -2617,58 +2870,42 @@ function acompanharRecuperacaoNativa(ctx) {
         }
         return true;
     }
-    pendente.sucessoEm = 0; // pulso isolado nunca credita a cura
+    pendente.sucessoEm = 0;
 
-    // O novo addon pode nascer alguns segundos antes de o encoder/receiver
-    // assentar. Destrui-lo imediatamente repetiria a corrida que queremos
-    // curar; uma geracao realmente nova ganha seu proprio aquecimento.
-    const streamAtualAgora = streamNativaAtiva(ctx.voice);
-    if (streamAtualAgora && geracaoNativa(ctx.voice, streamAtualAgora) !== pendente.geracao) {
-        if (!pendente.renasceuEm) {
-            pendente.renasceuEm = agora;
-            log("gw.revive | video nativo: geracao nova nasceu; aguardando encoder aquecer");
+    if (pendente.papel === 'broadcaster' && ctx.demanda && ctx.demanda.known === true && ctx.demanda.active !== true && ctx.demanda.changedHa >= 15_000) {
+        if (pendente.papel === 'broadcaster' && broadcasterRecoveryStillOwned(ctx, pendente)) {
+            // His real failure showed this exact sequence: capture stayed at ~30 fps while
+            // encoded output remained zero, then demand fell and the old controller aborted
+            // before level 2. A cached source means the broadcaster did NOT voluntarily clear
+            // the share, so keep the bounded L1 -> L2 ladder alive.
+            if (!pendente.demandaBaixaLogada) {
+                pendente.demandaBaixaLogada = true;
+                log("gw.revive | rtc nativo: demanda caiu mas a fonte broadcaster continua ativa; mantendo recuperacao");
+            }
+        } else {
+            log("gw.revive | rtc nativo: tentativa cancelada, demanda terminou");
+            videoNativoPendente = null;
+            return true;
         }
-        if (agora - pendente.renasceuEm < VOICE_NOVA_GERACAO_GRACA_MS) return true;
-    }
-
-    // Se o espectador saiu durante a tentativa, nao ha mais problema a curar e
-    // sobretudo nao escalamos para destruir a call inteira.
-    if (ctx.demanda && ctx.demanda.known === true && ctx.demanda.active !== true &&
-        ctx.demanda.changedHa >= 15_000) {
-        log("gw.revive | video nativo: tentativa cancelada, demanda do espectador terminou");
-        videoNativoPendente = null;
-        return true;
     }
 
     const prazo = pendente.nivel === 1 ? VOICE_NIVEL1_ESPERA_MS : VOICE_NIVEL2_ESPERA_MS;
     if (agora - pendente.inicioEm < prazo) return true;
     if (pendente.nivel === 1) {
-        const streamAtual = streamNativaAtiva(ctx.voice);
-        const voiceAtual = voiceNativaAtiva(ctx.voice);
-        const teardownEmCurso = !streamAtual && (!voiceAtual || !ctx.midia || ctx.midia.midiaAberta !== true);
-        if (teardownEmCurso) {
-            if (!pendente.teardownEm) {
-                pendente.teardownEm = agora;
-                log("gw.revive | video nativo: nivel=1 iniciou teardown; aguardando o Discord reconstruir sozinho");
-            }
-            if (agora - pendente.teardownEm < VOICE_RECONSTRUCAO_GRACA_MS) return true;
-            falharRecuperacaoNativa(ctx, 'reconstrucao_nao_renasceu');
-            return true;
-        }
-        log("gw.revive | video nativo: nivel=1 nao curou em " + Math.round(prazo / 1000) + "s; subindo ao nivel=2");
-        const geracaoAnterior = pendente.geracao;
+        log("gw.revive | rtc nativo: nivel=1 nao retomou progresso; subindo ao nivel=2 papel=" + pendente.papel);
+        const sinal = pendente.sinal;
         videoNativoPendente = null;
-        iniciarRecuperacaoNativa(ctx, 2, geracaoAnterior);
+        iniciarRecuperacaoNativa(ctx, 2, sinal);
         return true;
     }
-    falharRecuperacaoNativa(ctx, 'nivel2_sem_cura');
+    falharRecuperacaoNativa(ctx, 'nivel2_sem_progresso');
     return true;
 }
 
 function processarRtcNativo(ctx) {
     const agora = Date.now();
-    while (videoNativoTentativas.length > 0 && videoNativoTentativas[0] < agora - VOICE_JANELA_MS) {
-        videoNativoTentativas.shift();
+    for (const papel of ['broadcaster', 'viewer']) {
+        videoNativoTentativas[papel] = videoNativoTentativas[papel].filter(at => at >= agora - VOICE_JANELA_MS);
     }
     if (acompanharRecuperacaoNativa(ctx)) return;
     const stream = streamNativaAtiva(ctx.voice);
@@ -2678,14 +2915,16 @@ function processarRtcNativo(ctx) {
         videoNativoBloqueadoEm = 0;
         hideVideoBanner(ctx.win);
     }
-    if (avaliarRtcNativo(ctx) !== 'video-nativo-travado') return;
+    const sinal = avaliarRtcNativo(ctx);
+    if (sinal === null) return;
     if (stream && geracaoNativa(ctx.voice, stream) === videoNativoBloqueadoGeracao) return;
     if (!autoRevive) {
         falharRecuperacaoNativa(ctx, 'autoRevive_desligado');
         return;
     }
-    if (videoNativoUltimaAcaoEm > 0 && agora - videoNativoUltimaAcaoEm < VOICE_ACAO_COOLDOWN_MS) return;
-    iniciarRecuperacaoNativa(ctx, 1);
+    const papel = sinal === 'viewer-video-parado' ? 'viewer' : 'broadcaster';
+    if (videoNativoUltimaAcaoEm[papel] > 0 && agora - videoNativoUltimaAcaoEm[papel] < VOICE_ACAO_COOLDOWN_MS) return;
+    iniciarRecuperacaoNativa(ctx, 1, sinal);
 }
 
 function logRtcNativo(ctx) {
@@ -2694,21 +2933,28 @@ function logRtcNativo(ctx) {
     const stats = stream && stream.stats;
     const assinatura = [
         !!(ctx.voice && ctx.voice.voiceHooked), stream ? stream.id : 0,
-        !!(ctx.demanda && ctx.demanda.active), stats ? !!stats.statsOk : false,
-        videoNativoPendente ? videoNativoPendente.nivel : 0,
+        stats && stats.role ? stats.role : '?', !!(ctx.demanda && ctx.demanda.active),
+        stats ? !!stats.statsOk : false, videoNativoPendente ? videoNativoPendente.nivel : 0,
     ].join(':');
     if (assinatura === voiceProbeUltimaAssinatura && agora - voiceProbeUltimoLogEm < VOICE_PROBE_LOG_MS) return;
     voiceProbeUltimaAssinatura = assinatura;
     voiceProbeUltimoLogEm = agora;
     log("voice.probe | hook=" + (ctx.voice && ctx.voice.voiceHooked ? "sim" : "nao") +
         " stream=" + (stream ? stream.id : "nenhuma") +
+        " papel=" + (stats && stats.role ? stats.role : "?") +
         " demanda=" + (ctx.demanda && ctx.demanda.known ? (ctx.demanda.active ? "sim" : "nao") : "?") +
         " demanda_ha=" + idadeSeg(ctx.demanda ? ctx.demanda.demandHa : -1) +
         " entrada_ha=" + idadeSeg(stats ? stats.entradaHa : -1) +
         " saida_ha=" + idadeSeg(stats ? stats.saidaHa : -1) +
+        " fonte=" + (stream ? (stream.sourceCached === true ? "sim" : "nao") : "?") +
+        " fonte_ha=" + idadeSeg(stream && typeof stream.sourceHa === 'number' ? stream.sourceHa : -1) +
+        " video=" + (stats && stats.videoExpected ? "sim" : "?") +
+        " video_ha=" + idadeSeg(stats ? stats.decodeHa : -1) +
         " fps_in=" + (stats && typeof stats.inputFrameRate === 'number' ? Math.round(stats.inputFrameRate) : "?") +
         " fps_out=" + (stats && typeof stats.encodeFrameRate === 'number' ? Math.round(stats.encodeFrameRate) : "?") +
+        " fps_dec=" + (stats && typeof stats.decodeFrameRate === 'number' ? Math.round(stats.decodeFrameRate) : "?") +
         " frames=" + (stats && typeof stats.framesEncoded === 'number' ? Math.round(stats.framesEncoded) : "?") +
+        " dec=" + (stats && typeof stats.framesDecoded === 'number' ? Math.round(stats.framesDecoded) : "?") +
         " stats=" + (stats && stats.statsOk ? "ok" : (stats && stats.reason ? stats.reason : "?")));
 }
 
@@ -3293,51 +3539,15 @@ function currentExit() {
     if (exitSettled) return Promise.resolve(chosenExit);
 
     return new Promise(resolve => {
-        // No modo "tor" o prazo e maior: o bootstrap do Tor leva ~20s, bem mais que o orcamento
-        // pensado para uma saida gratuita, e estourar o prazo aqui nao devolve conexao direta
-        // (o serveSocks recusa neste modo) -- devolve so uma reconexao a toa do gateway.
-        // O refresh (chamado pelo batimento quando a ativa caiu) usa probe com timeout
-        // curto (3s) para nao segurar o gateway por 12+ segundos quando o Tor oscila
-        // (issue #87: "loading infinito ao assistir a tela estando mto tempo com
-        // discord aberto"). Espera-se o refresh terminar ate TOR_HOLD_BUDGET_MS e so
-        // depois recusa-se: o refresh provavelmente ja terminou e o Tor ja voltou.
         const prazo = routeMode === "tor" ? TOR_HOLD_BUDGET_MS : HOLD_BUDGET_MS;
-        const refreshRunning = routeMode === "tor" ? refreshingExit : null;
+        const refreshRunning = refreshingExit;
 
         const timer = setTimeout(() => {
-            // Cold start no modo "gratuitas": com lista publica, as candidatas comumente
-            // nao ficam prontas dentro do prazo (#98: saida escolhida so aos 20s, conexao
-            // nasceu direta aos 13s). Em vez de nascer direta -- IP BR, sessao bloqueada,
-            // reload a toa -- tenta o MESMO fallback do #85: o Tor local. O detectTor so
-            // testa portas que ja existem (nunca sobe/para daemon); sem Tor, cai direta
-            // como sempre. A preferencia por gratuitas fica intacta: se o pickFreeExit em
-            // curso entregar uma saida depois, ela assume as conexoes novas sem religar
-            // a sessao ativa.
-            if (routeMode === "free" && poolFrio()) {
-                log("gratuitas nao ficaram prontas a tempo (" + Math.round(prazo / 1000) + "s); tentando o Tor local antes de sair direta");
-                detectTor(3000).then(tor => {
-                    if (exitSettled) return; // uma saida gratuita chegou nesse meio-tempo
-                    if (tor !== null) {
-                        settleExit(tor); // entrega pra quem espera e vira a saida ativa
-                        return;
-                    }
-                    log("sem Tor local tambem; esta conexao vai sair direta");
-                    const index = waitingForExit.indexOf(deliver);
-                    if (index >= 0) waitingForExit.splice(index, 1);
-                    resolve(null);
-                }).catch(() => {
-                    if (exitSettled) return;
-                    const index = waitingForExit.indexOf(deliver);
-                    if (index >= 0) waitingForExit.splice(index, 1);
-                    resolve(null);
-                });
-                return;
-            }
             const index = waitingForExit.indexOf(deliver);
             if (index >= 0) waitingForExit.splice(index, 1);
             log(routeMode === "tor"
-                ? "a saida nao ficou pronta a tempo; no modo tor a conexao sera recusada, nao direta"
-                : "a saida nao ficou pronta a tempo, esta conexao vai sair direta");
+                ? "a saida confiavel nao ficou pronta a tempo; recusando esta conexao, sem proxy publica"
+                : "a proxy configurada nao ficou pronta a tempo; esta conexao pode seguir direta");
             resolve(null);
         }, prazo);
 
@@ -3348,18 +3558,8 @@ function currentExit() {
 
         waitingForExit.push(deliver);
 
-        // Se o refresh esta rodando, espera ele terminar. O chosenExit vai ser setado
-        // pelo settleExit (no refreshExit) ou ja' foi setado em outra execucao do chooseExit
-        // (em outro currentExit). Quando o refresh termina, o resolve e' chamado
-        // se a ativa foi setada; senao o timer estoura.
         if (refreshRunning !== null) {
             refreshRunning.then(() => {
-                // O refresh terminou. Se o chosenExit foi setado (sucesso), o deliver ja'
-                // foi chamado e o resolve ja' foi feito. Se nao (falha do refresh), o
-                // currentExit continua esperando o timer. O tempo ate agora ja' contou
-                // parte do prazo -- mas como o refresh ja' terminou, qualquer nova conexao
-                // pode prosseguir com a ativa (mesmo "morta") e a recarga (se houver)
-                // fara a troca.
                 if (chosenExit !== null) {
                     const index = waitingForExit.indexOf(deliver);
                     if (index >= 0) waitingForExit.splice(index, 1);
@@ -3381,30 +3581,21 @@ function refreshExit() {
 
     lastRefreshAt = Date.now();
     refreshingExit = (async () => {
-        log("nenhuma saida do pool entregou, procurando uma saida nova");
-        // Modo "tor": a reposicao tambem SO considera o Tor — cair para gratuita aqui
-        // trocaria a garantia escolhida pelo usuario por um IP qualquer. Sem Tor no ar,
-        // devolve null e o gateway fica segurado ate o Tor voltar.
-        // Probe do Tor com timeout curto (3s) para o refresh nao segurar o gateway
-        // por 12+ segundos quando o Tor esta morrendo (issue #87). O probe da escolha
-        // inicial usa o timeout completo (6s) porque vale a pena esperar mais.
-        // Modo "free"/"auto" tenta gratuitas; se nao houver nenhuma viva, cai pro Tor
-        // (que esta rodando de qualquer jeito) em vez de devolver null e abrir direto.
+        const manual = manualProxy();
         let fresh = null;
-        if (routeMode === "tor") {
-            fresh = await detectTor(3000);
+
+        if (manual !== null && manual !== "") {
+            const ok = await probe(manual, HEARTBEAT_TIMEOUT_MS);
+            fresh = ok === null ? null : manual;
+            if (fresh === null) log("proxy configurada ainda nao respondeu; nenhuma reserva publica sera buscada");
         } else {
-            fresh = await pickFreeExit();
-            if (fresh === null) {
-                log("gratuitas mortas, tentando Tor local como fallback");
-                fresh = await detectTor();
-            }
+            fresh = await detectTor(3000);
+            if (fresh === null) log("Tor ainda nao respondeu; nenhuma reserva publica sera buscada");
         }
+
         if (fresh !== null) {
             settleExit(fresh);
-            log("saida nova encontrada: " + safeProxy(fresh));
-        } else {
-            log("nenhuma saida nova disponivel agora");
+            log("saida confiavel recuperada: " + safeProxy(fresh));
         }
         return fresh;
     })();
@@ -3523,6 +3714,28 @@ async function checkPool() {
         return;
     }
 
+    if (usingManualProxy) {
+        if (active === null) {
+            refreshExit().catch(error => log("retry da proxy configurada falhou: " + error.message));
+            return;
+        }
+        const ok = await probe(active, HEARTBEAT_TIMEOUT_MS) !== null;
+        if (ok) {
+            missedBeats.delete(active);
+            return;
+        }
+        const count = (missedBeats.get(active) || 0) + 1;
+        missedBeats.set(active, count);
+        if (count >= MAX_MISSED_BEATS) {
+            missedBeats.delete(active);
+            log("proxy configurada perdeu " + MAX_MISSED_BEATS + " batimentos; tentando somente ela novamente");
+            refreshExit().catch(error => log("retry da proxy configurada falhou: " + error.message));
+        }
+        return;
+    }
+
+    // Codigo legado de pool fica inacessivel no enhanced: routeMode so chega aqui
+    // sem Tor quando ha uma proxy explicita, coberta acima.
     // A ativa entra na rodada mesmo estando fora do pote: proxy do settings.json e Tor local
     // nunca sao guardados, e sao exatamente os que a pessoa mais sente quando caem.
     const targets = [];
@@ -3783,65 +3996,31 @@ async function openThroughPool(target) {
     const active = await currentExit();
     if (active === null) return null;
 
-    // A ativa sozinha primeiro: ela e o IP que o servidor ja viu nesta sessao, e trocar sem
-    // precisar seria pedir uma reavaliacao a toa. No modo tor o prazo e o folgado
-    // (TOR_RELAY_TIMEOUT_MS): construcao de circuito do Tor nao pode ser abortada.
-    const tAtiva = Date.now();
+    const started = Date.now();
     const prazoTunel = routeMode === "tor" ? TOR_RELAY_TIMEOUT_MS : RELAY_TIMEOUT_MS;
-    const direto = await openTunnel(active, target.host, target.port, prazoTunel);
-    if (direto !== null) {
+    let socket = await openTunnel(active, target.host, target.port, prazoTunel);
+    if (socket !== null) {
         markGatewayRouted();
-        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(active) + " via=ativa latencia=" + (Date.now() - tAtiva) + "ms");
-        return direto;
+        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(active) + " via=ativa latencia=" + (Date.now() - started) + "ms");
+        return socket;
     }
 
-    log(safeProxy(active) + " nao entregou " + target.host);
-
-    // As reservas correm todas juntas em vez de uma por vez: enfileiradas, o prazo de cada uma
-    // somava com o gateway ja reconectando, e o Chromium desiste do roteador antes disso.
-    const won = await firstTunnel(pool.map(entry => entry.proxy).filter(proxy => proxy !== active), target, RELAY_TIMEOUT_MS);
-    if (won !== null) {
-        log("a saida " + safeProxy(active) + " parou de entregar, troquei para " + safeProxy(won.proxy));
-        chosenExit = won.proxy;
-        lastExitAt = Date.now();
-        missedBeats.delete(active);
-        pool = pool.filter(entry => entry.proxy !== active);
-        savePool();
-        markGatewayRouted();
-        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(won.proxy) + " via=reserva latencia=" + (Date.now() - tAtiva) + "ms");
-        return won.socket;
-    }
-
-    // Pool inteiro morto: antes de render a conexao ao IP brasileiro (o "carregando para
-    // sempre"), tenta o cache do state.json (revalidacao rapida, ~1-2s) e so entao a lista
-    // nova (lenta, ~4s+). No caso do ciclo 7 o pool tinha 1 saida que morreu; o cache teria
-    // saidas guardadas de aberturas anteriores para assumir na hora.
-    const cached = await cachedExit();
-    if (cached !== null) {
-        const socket = await openTunnel(cached, target.host, target.port, PROBE_TIMEOUT_MS);
-        if (socket !== null) {
-            chosenExit = cached;
-            lastExitAt = Date.now();
-            markGatewayRouted();
-            log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(cached) + " via=cache latencia=" + (Date.now() - tAtiva) + "ms");
-            return socket;
-        }
-        log(safeProxy(cached) + " do cache nao entregou " + target.host);
-    }
+    log(safeProxy(active) + " nao entregou " + target.host + "; nenhuma reserva publica sera tentada");
 
     const fresh = await refreshExit();
-    if (fresh !== null) {
-        const socket = await openTunnel(fresh, target.host, target.port, PROBE_TIMEOUT_MS);
-        if (socket !== null) {
-            chosenExit = fresh;
-            lastExitAt = Date.now();
-            markGatewayRouted();
-            log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(fresh) + " via=nova latencia=" + (Date.now() - tAtiva) + "ms");
-            return socket;
-        }
-        log(safeProxy(fresh) + " nao entregou " + target.host + " logo depois de escolhida");
+    if (fresh === null) return null;
+
+    const retryTimeout = routeMode === "tor" ? TOR_RELAY_TIMEOUT_MS : RELAY_TIMEOUT_MS;
+    socket = await openTunnel(fresh, target.host, target.port, retryTimeout);
+    if (socket !== null) {
+        chosenExit = fresh;
+        lastExitAt = Date.now();
+        markGatewayRouted();
+        log("tunel.aberto | alvo=" + target.host + " saida=" + safeProxy(fresh) + " via=retry-confiavel latencia=" + (Date.now() - started) + "ms");
+        return socket;
     }
 
+    log(safeProxy(fresh) + " nao entregou " + target.host + " depois do retry confiavel");
     return null;
 }
 
@@ -4206,7 +4385,7 @@ async function start() {
                             .filter(proxy => proxy !== chosenExit)
                             .sort((a, b) => (rttEma.get(a) ?? Infinity) - (rttEma.get(b) ?? Infinity))[0];
                         const emaAlvo = alvo === undefined ? Infinity : (rttEma.get(alvo) ?? Infinity);
-                        const podeTrocar = alvo !== undefined && trocaProativaPode() && emaAlvo <= emaAtual * SWAP_RESERVA_RAZAO;
+                        const podeTrocar = !usingManualProxy && routeMode !== "tor" && alvo !== undefined && trocaProativaPode() && emaAlvo <= emaAtual * SWAP_RESERVA_RAZAO;
                         log("gw.rajada_limite | n=" + gatewayReconexoes.length + "/180s" +
                             " intervalo_min=" + minD + "ms intervalo_med=" + medD + "ms" +
                             " ema_atual=" + (emaAtual === Infinity ? "?" : Math.round(emaAtual) + "ms") +

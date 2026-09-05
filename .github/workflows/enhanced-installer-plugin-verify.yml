@@ -1,0 +1,499 @@
+name: Enhanced Installer and Plugin Verify
+
+on:
+  push:
+    branches:
+      - enhanced/rtc-viewer-recovery-v1
+
+concurrency:
+  group: enhanced-installer-plugin-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: api/go.sum
+      - name: Vet bug-report API
+        working-directory: api
+        run: go vet ./...
+      - name: Test bug-report API
+        working-directory: api
+        run: go test ./...
+      - name: Parse POSIX installers
+        run: |
+          sh -n installer/golivebypass-installer.sh
+          sh -n standalone/golivebypass-standalone.sh
+
+  gui-security-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: golive-gui/package-lock.json
+
+      - name: Install GUI dependencies
+        working-directory: golive-gui
+        run: npm ci
+
+      - name: GUI tests
+        working-directory: golive-gui
+        run: npm test
+
+      - name: GUI TypeScript and Vite compile
+        working-directory: golive-gui
+        run: npm run compile
+
+  tor-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify current Tor expert bundle checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://dist.torproject.org/torbrowser/15.0.21'
+          curl -fsS "$base/sha256sums-signed-build.txt" -o sha256sums.txt
+
+          win='tor-expert-bundle-windows-x86_64-15.0.21.tar.gz'
+          linux='tor-expert-bundle-linux-x86_64-15.0.21.tar.gz'
+          mac_arm='tor-expert-bundle-macos-aarch64-15.0.21.tar.gz'
+          mac_x64='tor-expert-bundle-macos-x86_64-15.0.21.tar.gz'
+
+          win_sha="$(awk -v n="$win" '$2 == n { print $1 }' sha256sums.txt)"
+          linux_sha="$(awk -v n="$linux" '$2 == n { print $1 }' sha256sums.txt)"
+          mac_arm_sha="$(awk -v n="$mac_arm" '$2 == n { print $1 }' sha256sums.txt)"
+          mac_x64_sha="$(awk -v n="$mac_x64" '$2 == n { print $1 }' sha256sums.txt)"
+
+          test "$win_sha" = 'f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490'
+          test "$linux_sha" = '40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11'
+          test "$mac_arm_sha" = '83dec16412c1d97b91af603229481dd29f578e1485620ecffd9ac4aabcf6fb46'
+          test "$mac_x64_sha" = '7e21f5dab4c627e2ff8e894b2039fa49bdd78d12b025f96893d4d6238c6577e4'
+
+          grep -Fq 'TOR_BUNDLE_VERSION="15.0.21"' standalone/golivebypass-standalone.sh
+          grep -Fq "$linux_sha" standalone/golivebypass-standalone.sh
+          grep -Fq 'TOR_BUNDLE_VERSION="15.0.21"' installer/golivebypass-installer.sh
+          grep -Fq "$linux_sha" installer/golivebypass-installer.sh
+          grep -Fq "$win_sha" installer/GoLiveBypass-Installer.ps1
+          grep -Fq "$win_sha" golive-gui/electron/main.ts
+          grep -Fq "$linux_sha" golive-gui/electron/main.ts
+          grep -Fq "$mac_arm_sha" golive-gui/electron/main.ts
+          grep -Fq "$mac_x64_sha" golive-gui/electron/main.ts
+
+  windows-contracts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Installer and RTC contracts
+        run: |
+          node tests/test-windows-enhanced-installer.cjs
+          node tests/test-no-distributed-report-secrets.cjs
+          node tests/test-plugin-enhanced-rtc.cjs
+          node tests/test-enhanced-routing-policy.cjs
+          node tests/test-enhanced-rtc-recovery.cjs
+          node tests/test-native-rtc-recovery.cjs
+          node tests/test-gateway-zumbi-revive.cjs
+
+      - name: Parse PowerShell
+        shell: pwsh
+        run: |
+          $files = @(
+            'installer/Install-Enhanced.ps1',
+            'installer/GoLiveBypass-Installer.ps1',
+            'standalone/GoLiveBypass-Standalone.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Host "Parser errors in $file"
+              foreach ($err in $errors) {
+                Write-Host ("{0}:{1} {2} :: {3}" -f $err.Extent.StartLineNumber, $err.Extent.StartColumnNumber, $err.ErrorId, $err.Message)
+                Write-Host ("  > " + $err.Extent.Text)
+              }
+              exit 1
+            }
+          }
+
+      - name: Real Tor gateway smoke test
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode TestTor -Tor -Yes
+          if ($LASTEXITCODE -ne 0) {
+            $log = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor-bootstrap.log'
+            if (Test-Path -LiteralPath $log) {
+              Write-Host '--- tor-bootstrap.log tail ---'
+              Get-Content -LiteralPath $log -Tail 120
+            }
+            exit $LASTEXITCODE
+          }
+
+      - name: Portable Node checksum/extraction smoke test
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode TestPortableNode -Yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Diff hygiene
+        shell: bash
+        run: git diff --check origin/main...HEAD
+
+  clean-windows-bootstrap:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assert clean app state
+        shell: powershell
+        run: |
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Discord')) { throw 'Runner unexpectedly already has Discord.' }
+          if (Test-Path (Join-Path $env:USERPROFILE 'Equicord')) { throw 'Runner unexpectedly already has Equicord checkout.' }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor\tor.exe')) { throw 'Runner unexpectedly already has managed Tor.' }
+
+      - name: Install from zero with no Git Node pnpm or winget in PATH
+        shell: powershell
+        run: |
+          $barePath = @(
+            "$env:SystemRoot\System32",
+            "$env:SystemRoot",
+            "$env:SystemRoot\System32\Wbem",
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          ) -join ';'
+          $env:Path = $barePath
+          $env:GOLIVE_PREFER_SOURCE_ARCHIVE = '1'
+
+          if (Get-Command git -ErrorAction SilentlyContinue) { throw 'Git still visible in bare PATH.' }
+          if (Get-Command node -ErrorAction SilentlyContinue) { throw 'Node still visible in bare PATH.' }
+          if (Get-Command pnpm -ErrorAction SilentlyContinue) { throw 'pnpm still visible in bare PATH.' }
+          if (Get-Command winget -ErrorAction SilentlyContinue) { throw 'winget still visible in bare PATH.' }
+
+          $ErrorActionPreference = 'Stop'
+          $b = 'enhanced/rtc-viewer-recovery-v1'
+          $u = 'https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/' + [Uri]::EscapeDataString($b)
+          $r = irm $u -Headers @{ 'User-Agent' = 'GoLiveBypassEnhanced-Installer' }
+          if ([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'GitHub did not return a valid commit' }
+          $env:GOLIVE_ENHANCED_REF = [string]$r.sha
+          $s = irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/' + $r.sha + '/installer/Install-Enhanced.ps1')
+          iex $s
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify clean bootstrap result
+        shell: powershell
+        run: |
+          $discordResources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $discordResources) { throw 'Discord resources were not installed.' }
+
+          $equicord = Join-Path $env:USERPROFILE 'Equicord'
+          if (-not (Test-Path (Join-Path $equicord 'package.json'))) { throw 'Equicord checkout missing.' }
+          if (-not (Test-Path (Join-Path $equicord '.golive-source-commit'))) {
+            throw 'Gitless source-archive marker missing; clean test did not exercise archive fallback.'
+          }
+
+          $nodeMarker = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Toolchain\node-current-path.txt'
+          if (-not (Test-Path $nodeMarker)) { throw 'Portable Node marker missing.' }
+          $portableNode = (Get-Content $nodeMarker -Raw).Trim()
+          if (-not (Test-Path (Join-Path $portableNode 'node.exe'))) { throw 'Portable node.exe missing.' }
+
+          $plugin = Join-Path $equicord 'src\userplugins\goLiveBypass'
+          foreach ($file in @('index.tsx','native.ts','rtcRecovery.ts','rtcShim.ts','manifest.json')) {
+            if (-not (Test-Path (Join-Path $plugin $file))) { throw "Enhanced plugin file missing: $file" }
+          }
+
+          $settingsFile = Join-Path $env:APPDATA 'Equicord\settings\settings.json'
+          if (-not (Test-Path $settingsFile)) { throw 'Equicord settings.json missing.' }
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          if (-not $settings.plugins.GoLiveBypass.enabled) { throw 'GoLiveBypass is not enabled.' }
+          if ($settings.plugins.GoLiveBypass.proxy -ne 'socks5://127.0.0.1:9060') { throw 'GoLiveBypass is not pinned to local Tor.' }
+
+          $tor = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor\tor\tor.exe'
+          if (-not (Test-Path $tor)) { throw 'Managed Tor missing.' }
+          $torVersion = (& $tor --version | Out-String)
+          if ($torVersion -notmatch 'Tor version 0\.4\.9\.') { throw "Unexpected Tor version: $torVersion" }
+
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $run = (Get-ItemProperty -Path $runKey -Name 'GoLiveBypassTor' -ErrorAction Stop).GoLiveBypassTor
+          if ($run -notmatch '(?i)wscript\.exe' -or $run -notmatch '(?i)GoLiveBypassTor\.vbs') {
+            throw "Tor startup is not hidden: $run"
+          }
+
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+      - name: Simulate broken legacy GoLiveBypass install
+        shell: powershell
+        run: |
+          $resources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $resources) { throw 'Discord resources missing before legacy simulation.' }
+
+          $appAsar = Join-Path $resources.FullName 'app.asar'
+          $backupAsar = Join-Path $resources.FullName '_app.asar'
+          if (-not (Test-Path $backupAsar)) { throw 'Expected mod _app.asar backup is missing.' }
+
+          # Model the old standalone installer: restore original app.asar, back it up,
+          # then replace app.asar with a directory stub that requires golivebypass.js.
+          Remove-Item -LiteralPath $appAsar -Recurse -Force
+          Rename-Item -LiteralPath $backupAsar -NewName 'app.asar' -Force
+          Rename-Item -LiteralPath $appAsar -NewName '_app.asar' -Force
+          New-Item -ItemType Directory -Path $appAsar -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $appAsar 'package.json') -Value '{"main":"index.js"}' -Encoding UTF8
+          $legacyJs = Join-Path $env:LOCALAPPDATA 'GoLiveBypass\golivebypass.js'
+          New-Item -ItemType Directory -Path (Split-Path -Parent $legacyJs) -Force | Out-Null
+          Set-Content -LiteralPath $legacyJs -Value '// old broken standalone' -Encoding UTF8
+          Set-Content -LiteralPath (Join-Path $appAsar 'index.js') -Value ('require(' + ($legacyJs | ConvertTo-Json -Compress) + ');') -Encoding UTF8
+
+          $equicord = Join-Path $env:USERPROFILE 'Equicord'
+          $plugin = Join-Path $equicord 'src\userplugins\goLiveBypass'
+          Set-Content -LiteralPath (Join-Path $plugin 'legacy.ts') -Value 'export const stale = true;' -Encoding UTF8
+          $manifestFile = Join-Path $plugin 'manifest.json'
+          $manifest = Get-Content $manifestFile -Raw | ConvertFrom-Json
+          $manifest.updater.id = 'bezumiya/GoLiveBypass'
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestFile -Encoding UTF8
+
+          $settingsFile = Join-Path $env:APPDATA 'Equicord\settings\settings.json'
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          $glb = $settings.plugins.GoLiveBypass
+          $glb.proxy = 'socks5://127.0.0.1:9050'
+          $glb.sessionRouting = 'login'
+          $glb.voiceRegion = 'brazil'
+          $glb.streamRegion = 'brazil'
+          $settings.plugins | Add-Member -NotePropertyName GoLiveBypassLegacy -NotePropertyValue ([pscustomobject]@{ enabled = $true }) -Force
+          $settings.plugins | Add-Member -NotePropertyName UnrelatedPlugin -NotePropertyValue ([pscustomobject]@{ enabled = $true; keep = 42 }) -Force
+          $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsFile -Encoding UTF8
+
+          $nativeFile = Join-Path $env:APPDATA 'Equicord\settings\native-settings.json'
+          $native = if (Test-Path $nativeFile) { Get-Content $nativeFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+          if (-not $native.PSObject.Properties['plugins']) {
+            $native | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{}) -Force
+          }
+          $native.plugins | Add-Member -NotePropertyName UnrelatedNativePlugin -NotePropertyValue ([pscustomobject]@{ keep = 99 }) -Force
+          $native.plugins | Add-Member -NotePropertyName GoLiveBypass -NotePropertyValue ([pscustomobject]@{
+            bootPending = $true
+            lastKnownProxy = 'socks5://127.0.0.1:9050'
+            verifiedProxy = [pscustomobject]@{ proxy = 'socks5://127.0.0.1:9050'; at = 1 }
+            pool = @([pscustomobject]@{ proxy = 'socks5://1.2.3.4:1080'; country = 'US'; ms = 10; at = 1 })
+          }) -Force
+          New-Item -ItemType Directory -Path (Split-Path -Parent $nativeFile) -Force | Out-Null
+          $native | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $nativeFile -Encoding UTF8
+
+      - name: Migrate broken legacy install through public one-liner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b = 'enhanced/rtc-viewer-recovery-v1'
+          $u = 'https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/' + [Uri]::EscapeDataString($b)
+          $r = irm $u -Headers @{ 'User-Agent' = 'GoLiveBypassEnhanced-Installer' }
+          if ([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'GitHub did not return a valid commit' }
+          $env:GOLIVE_ENHANCED_REF = [string]$r.sha
+          $s = irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/' + $r.sha + '/installer/Install-Enhanced.ps1')
+          iex $s
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify legacy migration result
+        shell: powershell
+        run: |
+          $resources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $resources) { throw 'Discord resources missing after migration.' }
+
+          $appAsar = Join-Path $resources.FullName 'app.asar'
+          if (Test-Path $appAsar -PathType Container) {
+            throw 'Legacy standalone app.asar directory survived migration.'
+          }
+          $bytes = [IO.File]::ReadAllBytes($appAsar)
+          $take = [Math]::Min(65536, $bytes.Length)
+          $stub = [Text.Encoding]::UTF8.GetString($bytes, 0, $take)
+          if ($stub -notmatch '(?i)Equicord') { throw 'Discord is not reinjected into Equicord after migration.' }
+          if ($stub -match '(?i)golivebypass\.js') { throw 'Legacy standalone require survived migration.' }
+
+          $equicord = Join-Path $env:USERPROFILE 'Equicord'
+          $plugin = Join-Path $equicord 'src\userplugins\goLiveBypass'
+          if (Test-Path (Join-Path $plugin 'legacy.ts')) { throw 'Stale plugin source survived transactional replacement.' }
+          $manifest = Get-Content (Join-Path $plugin 'manifest.json') -Raw | ConvertFrom-Json
+          if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') { throw 'Enhanced manifest was not restored.' }
+
+          $settingsFile = Join-Path $env:APPDATA 'Equicord\settings\settings.json'
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          $glb = $settings.plugins.GoLiveBypass
+          if (-not $glb.enabled) { throw 'GoLiveBypass disabled after migration.' }
+          if ($glb.proxy -ne 'socks5://127.0.0.1:9060') { throw 'Migration did not repin local Tor.' }
+          if ($glb.sessionRouting -ne 'gateway') { throw 'Migration did not normalize sessionRouting.' }
+          if ([string]$glb.voiceRegion -ne '') { throw 'Migration did not reset voiceRegion to Automatic.' }
+          if ([string]$glb.streamRegion -ne '') { throw 'Migration did not reset streamRegion to Automatic.' }
+          if ($settings.plugins.PSObject.Properties['GoLiveBypassLegacy']) { throw 'Legacy alias settings survived migration.' }
+          if (-not $settings.plugins.UnrelatedPlugin -or $settings.plugins.UnrelatedPlugin.keep -ne 42) {
+            throw 'Unrelated renderer plugin settings were not preserved.'
+          }
+
+          $nativeFile = Join-Path $env:APPDATA 'Equicord\settings\native-settings.json'
+          $native = Get-Content $nativeFile -Raw | ConvertFrom-Json
+          if ($native.plugins.PSObject.Properties['GoLiveBypass']) { throw 'Legacy native GoLiveBypass state survived migration.' }
+          if (-not $native.plugins.UnrelatedNativePlugin -or $native.plugins.UnrelatedNativePlugin.keep -ne 99) {
+            throw 'Unrelated native plugin settings were not preserved.'
+          }
+
+          $backups = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\backups\migration-*') -Directory -ErrorAction SilentlyContinue
+          if (-not $backups) { throw 'Migration backups were not created.' }
+
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+
+  existing-vencord-migration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install baseline Vencord stack
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/GoLiveBypass-Installer.ps1 -Mode Install -Mod Vencord -Tor -Yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+      - name: Poison only old GoLiveBypass Vencord state
+        shell: powershell
+        run: |
+          $vencord = Join-Path $env:USERPROFILE 'Vencord'
+          if (-not (Test-Path (Join-Path $vencord 'package.json'))) { throw 'Vencord checkout missing.' }
+
+          $plugin = Join-Path $vencord 'src\userplugins\goLiveBypass'
+          Set-Content -LiteralPath (Join-Path $plugin 'legacy-vencord.ts') -Value 'export const oldVencord = true;' -Encoding UTF8
+          $manifestFile = Join-Path $plugin 'manifest.json'
+          $manifest = Get-Content $manifestFile -Raw | ConvertFrom-Json
+          $manifest.updater.id = 'bezumiya/GoLiveBypass'
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestFile -Encoding UTF8
+
+          $settingsFile = Join-Path $env:APPDATA 'Vencord\settings\settings.json'
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+          $settings.plugins.GoLiveBypass.proxy = 'socks5://127.0.0.1:9050'
+          $settings.plugins.GoLiveBypass.sessionRouting = 'login'
+          $settings.plugins.GoLiveBypass.voiceRegion = 'old-invalid-region'
+          $settings.plugins.GoLiveBypass.streamRegion = 'old-invalid-region'
+          $settings.plugins | Add-Member -NotePropertyName KeepMePlugin -NotePropertyValue ([pscustomobject]@{ enabled = $true; keep = 'yes' }) -Force
+          $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsFile -Encoding UTF8
+
+          $nativeFile = Join-Path $env:APPDATA 'Vencord\settings\native-settings.json'
+          $native = if (Test-Path $nativeFile) { Get-Content $nativeFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+          if (-not $native.PSObject.Properties['plugins']) {
+            $native | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{}) -Force
+          }
+          $native.plugins | Add-Member -NotePropertyName KeepMeNative -NotePropertyValue ([pscustomobject]@{ keep = 'yes' }) -Force
+          $native.plugins | Add-Member -NotePropertyName GoLiveBypass -NotePropertyValue ([pscustomobject]@{
+            bootPending = $true
+            lastKnownProxy = 'socks5://127.0.0.1:9050'
+          }) -Force
+          New-Item -ItemType Directory -Path (Split-Path -Parent $nativeFile) -Force | Out-Null
+          $native | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $nativeFile -Encoding UTF8
+
+      - name: Auto-detect and migrate Vencord through public one-liner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b = 'enhanced/rtc-viewer-recovery-v1'
+          $u = 'https://api.github.com/repos/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/commits/' + [Uri]::EscapeDataString($b)
+          $r = irm $u -Headers @{ 'User-Agent' = 'GoLiveBypassEnhanced-Installer' }
+          if ([string]$r.sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'GitHub did not return a valid commit' }
+          $env:GOLIVE_ENHANCED_REF = [string]$r.sha
+          $s = irm ('https://raw.githubusercontent.com/AC-Tech-Pro-Oficial/GoLiveBypassEnhanced/' + $r.sha + '/installer/Install-Enhanced.ps1')
+          iex $s
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify Vencord was preserved and normalized
+        shell: powershell
+        run: |
+          $vencord = Join-Path $env:USERPROFILE 'Vencord'
+          $plugin = Join-Path $vencord 'src\userplugins\goLiveBypass'
+          if (Test-Path (Join-Path $plugin 'legacy-vencord.ts')) { throw 'Stale Vencord GoLive source survived.' }
+          $manifest = Get-Content (Join-Path $plugin 'manifest.json') -Raw | ConvertFrom-Json
+          if ($manifest.updater.id -ne 'AC-Tech-Pro-Oficial/GoLiveBypassEnhanced') { throw 'Enhanced manifest missing after Vencord migration.' }
+
+          $settings = Get-Content (Join-Path $env:APPDATA 'Vencord\settings\settings.json') -Raw | ConvertFrom-Json
+          $glb = $settings.plugins.GoLiveBypass
+          if ($glb.proxy -ne 'socks5://127.0.0.1:9060') { throw 'Vencord migration did not repin Tor.' }
+          if ($glb.sessionRouting -ne 'gateway') { throw 'Vencord routing not normalized.' }
+          if ([string]$glb.voiceRegion -ne '' -or [string]$glb.streamRegion -ne '') { throw 'Vencord regions not reset.' }
+          if (-not $settings.plugins.KeepMePlugin -or $settings.plugins.KeepMePlugin.keep -ne 'yes') { throw 'Unrelated Vencord plugin settings were lost.' }
+
+          $native = Get-Content (Join-Path $env:APPDATA 'Vencord\settings\native-settings.json') -Raw | ConvertFrom-Json
+          if ($native.plugins.PSObject.Properties['GoLiveBypass']) { throw 'Old Vencord native GoLive state survived.' }
+          if (-not $native.plugins.KeepMeNative -or $native.plugins.KeepMeNative.keep -ne 'yes') { throw 'Unrelated Vencord native state was lost.' }
+
+          $resources = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $resources) { throw 'Discord resources missing.' }
+          $appAsar = Join-Path $resources.FullName 'app.asar'
+          $bytes = [IO.File]::ReadAllBytes($appAsar)
+          $take = [Math]::Min(65536, $bytes.Length)
+          $stub = [Text.Encoding]::UTF8.GetString($bytes, 0, $take)
+          if ($stub -notmatch '(?i)Vencord') { throw 'Public one-liner did not preserve/detect Vencord.' }
+
+          Get-Process -Name Discord -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+
+  mod-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Vencord
+            repo: https://github.com/Vendicated/Vencord.git
+          - name: Equicord
+            repo: https://github.com/Equicord/Equicord.git
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: enhanced
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Clone ${{ matrix.name }}
+        run: git clone --depth 1 "${{ matrix.repo }}" mod
+
+      - name: Install matching pnpm
+        working-directory: mod
+        run: |
+          PM="$(node -p "require('./package.json').packageManager")"
+          npm install -g "$PM"
+          pnpm --version
+
+      - name: Copy enhanced userplugin
+        run: |
+          mkdir -p mod/src/userplugins
+          rm -rf mod/src/userplugins/goLiveBypass
+          cp -R enhanced/goLiveBypass mod/src/userplugins/goLiveBypass
+
+      - name: Install dependencies
+        working-directory: mod
+        run: pnpm install --frozen-lockfile
+
+      - name: Build ${{ matrix.name }} with enhanced plugin
+        working-directory: mod
+        run: pnpm build
