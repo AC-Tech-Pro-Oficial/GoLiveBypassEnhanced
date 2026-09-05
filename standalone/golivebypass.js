@@ -1829,7 +1829,8 @@ function instalarVoiceShim() {
                 return resolve({ statsOk: false, reason: 'sem-metodo' });
             }
             var hint = connectionRoleHint(rec);
-            var filters = hint === 'viewer' ? [1, 0, 2] : (hint === 'broadcaster' ? [2] : [2, 1, 0]);
+            // Native bitmask: TRANSPORT=1, OUTBOUND=2, INBOUND=4, ALL=7.
+            var filters = hint === 'viewer' ? [4] : (hint === 'broadcaster' ? [2] : [7]);
             var done = false;
             var lastFailure = { statsOk: false, reason: 'campos' };
 

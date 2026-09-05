@@ -168,7 +168,7 @@ async function main() {
       streamSummary.stats?.captureFrames === 420 && streamSummary.stats?.framesEncoded === 300) {
     ok("getFilteredStats e normalizado nos contadores confirmados");
   } else bad("stats relevantes ausentes", JSON.stringify(streamSummary));
-  if (filters.length === 1 && filters[0] === 2) ok("somente stream usa o filtro outbound confirmado (2)");
+  if (filters.length === 1 && filters[0] === 7) ok("stream sem papel conhecido usa todos os campos nativos (7)");
   else bad("filtro inesperado no addon", JSON.stringify(filters));
 
   streamConn.setTransportOptions({ remoteSinkWantsPixelCount: 0 });

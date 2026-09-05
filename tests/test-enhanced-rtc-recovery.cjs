@@ -145,6 +145,11 @@ async function viewerRecoveryContract() {
       inbound: { video: { framesDecoded: 0, decodeFrameRate: 0, framesReceived: 0 } },
     },
   });
+  const readStats = viewer.getFilteredStats;
+  viewer.getFilteredStats = function (filter, callback) {
+    assert.equal(filter, 4, "viewer must request the native INBOUND bitmask, not transport/outbound");
+    return readStats.call(this, filter, callback);
+  };
   const voiceDefault = makeConnection({
     localUser: "local-secret",
     streamUser: undefined,

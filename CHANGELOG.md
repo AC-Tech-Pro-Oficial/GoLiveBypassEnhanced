@@ -900,6 +900,11 @@ Veja o histórico de tags e commits para o que veio antes.
 - The installed Equicord StreamingCodecDisabler references removed `setAv1Enabled`/`setH265Enabled`/`setH264Enabled` methods. Its checkbox was not proof of a negotiated codec change. No codec-disabler dependency is introduced by this repair.
 # Unreleased — first-frame recovery deadline
 
+- Correct native viewer statistics filter to INBOUND=4 (ALL=7 for unknown
+  roles). Live inspection confirmed the previous filters never requested
+  incoming video statistics. This repairs viewer observability and detection;
+  it does not establish successful media delivery.
+
 - Plugin and standalone: detect a live selected source with zero encoded frames
   after five seconds, polling every two seconds, so the existing encoder repair
   can run before the observed receiver timeout. Established-stream stalls keep
