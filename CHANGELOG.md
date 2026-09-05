@@ -1,5 +1,6 @@
 # Changelog
 
+- Fixes Windows reinstalls when Discord already points to another recognized Vencord/Equicord checkout. The installer now safely restores the validated `_app.asar` before reinjection instead of entering Equilotl's failing `Unpatching first` path.
 - Fixes the RTC recovery path against Discord's current native voice ABI. Viewer streams are now identified from `connectionOptions.context` even though Discord creates them through the generic voice factory, private local/stream identities are retained only inside the isolated preload, and viewer resubscription calls the live `setDisableLocalVideo` method.
 - Removes the outbound broadcaster-demand requirement from viewer stall detection. Discord's `video-stream-receiver-ready-timeout` can now trigger the targeted UDP reconnect and video resubscription while broadcaster recovery keeps its stricter remote-demand guard.
 - Registers the RTC preload before renderer IPC is available, replaces the misleading "shim active" signal with sanitized hook/connection readiness, rejects recovery actions for stale connection generations, and cancels escalation if the observed stream is replaced or intentionally stopped.

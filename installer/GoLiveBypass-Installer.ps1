@@ -809,7 +809,7 @@ function Get-InjectedPath($resources) {
 
     foreach ($text in $candidates) {
         if (-not $text) { continue }
-        $match = [regex]::Match($text, 'require\("(.+?)"\)')
+        $match = [regex]::Match($text, 'require\(\s*["''](.+?)["'']\s*\)')
         if ($match.Success) { return $match.Groups[1].Value -replace '\\\\', '\' }
     }
 
@@ -1886,6 +1886,43 @@ function Invoke-Injection($root, $targets) {
     }
 }
 
+function Restore-RecognizedModPatchBeforeReinject($root, $targets) {
+    foreach ($target in @($targets | Where-Object { $_.Tipo -eq 'O' })) {
+        $injected = Get-InjectedPath $target.Resources
+        if (-not $injected -or $injected.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        # Equilotl's runInstaller.mjs currently catches the CLI failure without restoring a
+        # nonzero process exit code. When its implicit "Unpatching first" path fails, pnpm
+        # therefore looks successful and the real error only appears in our assertion. Avoid
+        # that path: restore Discord's original asar ourselves, but only for a stub whose
+        # require target is positively identifiable as a Vencord/Equicord development build.
+        if ($injected -notmatch '(?i)[\\/](?:equicord|vencord)[\\/].*[\\/]dist[\\/](?:desktop|patcher(?:\.js)?)') {
+            throw "O Discord $($target.Flavour) esta injetado por um mod desconhecido ($injected); nao vou remove-lo automaticamente."
+        }
+
+        $resources = [IO.Path]::GetFullPath([string]$target.Resources)
+        $discordRoot = [IO.Path]::GetFullPath((Join-Path (Get-EffectiveLocalApp) $target.Flavour))
+        if (-not $resources.StartsWith($discordRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Alvo de reinjecao saiu da instalacao esperada do Discord: $resources"
+        }
+
+        $appAsar = Join-Path $resources 'app.asar'
+        $appDir = Join-Path $resources 'app'
+        $backup = Join-Path $resources '_app.asar'
+        if (-not (Test-Path -LiteralPath $backup -PathType Leaf)) {
+            throw "A injecao anterior em $resources nao tem _app.asar para restaurar com seguranca."
+        }
+
+        Write-Step "Restaurando patch anterior do $($target.Flavour) antes de trocar o checkout"
+        Remove-CaminhoSilencioso $appAsar
+        Remove-CaminhoSilencioso $appDir
+        Rename-Item -LiteralPath $backup -NewName 'app.asar'
+        Write-Ok 'Patch anterior removido; Discord original restaurado para a nova injecao.'
+    }
+}
+
 function Start-Discord {
     foreach ($name in $DiscordNames) {
         $exe = Join-Path $env:LOCALAPPDATA "$name\Update.exe"
@@ -1944,6 +1981,7 @@ function Invoke-Install($root) {
     }
 
     if ($oficialPendente -or $paralelos.Count -gt 0) {
+        Restore-RecognizedModPatchBeforeReinject $root $targets
         Invoke-Injection $root $targets
     } else {
         Write-Step 'O Discord ja carrega deste checkout, so reiniciando'

@@ -206,6 +206,7 @@ for (const [source, label, markers] of [
 
 for (const marker of [
   "Restore-KnownGoLiveStandaloneInjections",
+  "Restore-RecognizedModPatchBeforeReinject",
   "Test-KnownGoLiveStandaloneInjection",
   "Reset-GoLiveNativeState",
   "Remove-DuplicateGoLiveUserplugins",
@@ -216,6 +217,17 @@ for (const marker of [
 ]) {
   assert(pluginInstaller.includes(marker), `legacy migration contract missing ${marker}`);
 }
+
+assert(
+  pluginInstaller.includes("require\\(\\s*[\"''](.+?)[\"'']\\s*\\)") &&
+  pluginInstaller.includes("Patch anterior removido; Discord original restaurado para a nova injecao."),
+  "checkout switching must recognize current stubs and cleanly restore a known prior mod patch"
+);
+assert(
+  pluginInstaller.includes("esta injetado por um mod desconhecido") &&
+  pluginInstaller.includes("nao tem _app.asar para restaurar com seguranca"),
+  "pre-injection cleanup must fail closed for unknown or unrestorable patches"
+);
 
 assert(pluginInstaller.includes("golivebypass\\.js"),
   "known legacy standalone detection must identify the old patcher by golivebypass.js");
