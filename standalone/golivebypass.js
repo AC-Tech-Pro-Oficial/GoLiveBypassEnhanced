@@ -2650,10 +2650,8 @@ function geracaoNativa(voice, stream) {
 function avaliarRtcNativo(ctx) {
     if (!ctx || !ctx.voice || ctx.voice.installed !== true || ctx.voice.voiceHooked !== true) return null;
     if (!ctx.midia || ctx.midia.midiaAberta !== true) return null;
-    if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
     const stream = streamNativaAtiva(ctx.voice);
     if (!stream) return null;
-    if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
     const stats = stream.stats;
     if (!stats || stats.statsOk !== true) return null;
     if (stats.sampleHa < 0 || stats.sampleHa > VOICE_SAMPLE_MAX_MS) return null;
@@ -2662,6 +2660,8 @@ function avaliarRtcNativo(ctx) {
             ((typeof stats.framesDecoded === 'number' && typeof stats.decodeFrameRate === 'number') ? 'viewer' : 'unknown'));
 
     if (papel === 'broadcaster') {
+        if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
+        if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
         if (stream.createdHa < VOICE_STREAM_AQUECIMENTO_MS) return null;
         if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
         if (!(typeof stats.captureFrames === 'number' || stats.inputFrameRate > 0)) return null;
@@ -2685,7 +2685,6 @@ function rtcNativoSaudavel(ctx, papelEsperado) {
     const stream = streamNativaAtiva(ctx && ctx.voice);
     if (!stream) return null;
     const stats = stream.stats;
-    if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
     if (!ctx.midia || ctx.midia.midiaAberta !== true) return null;
     if (!stats || stats.statsOk !== true || stats.sampleHa > VOICE_SAMPLE_MAX_MS) return null;
     let papel = stats.role;
@@ -2697,6 +2696,7 @@ function rtcNativoSaudavel(ctx, papelEsperado) {
         if (papel !== papelEsperado) return null;
     }
     if (papel === 'broadcaster') {
+        if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
         if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
         if (stats.saidaHa < 0 || stats.saidaHa > VOICE_SAIDA_SUCESSO_MS) return null;
         if (!(stats.encodeFrameRate > 0) || typeof stats.framesEncoded !== 'number') return null;
@@ -2805,6 +2805,13 @@ function broadcasterRecoveryStillOwned(ctx, pendente) {
 function acompanharRecuperacaoNativa(ctx) {
     const pendente = videoNativoPendente;
     if (!pendente) return false;
+    const streamAtual = streamNativaAtiva(ctx && ctx.voice);
+    if (!streamAtual || geracaoNativa(ctx.voice, streamAtual) !== pendente.geracao ||
+        (pendente.papel === 'broadcaster' && streamAtual.sourceCached !== true)) {
+        log("gw.revive | rtc nativo: tentativa cancelada, stream terminou ou mudou");
+        videoNativoPendente = null;
+        return true;
+    }
     const agora = Date.now();
     const streamSaudavel = rtcNativoSaudavel(ctx, pendente.papel);
     if (streamSaudavel) {
@@ -2821,7 +2828,7 @@ function acompanharRecuperacaoNativa(ctx) {
     }
     pendente.sucessoEm = 0;
 
-    if (ctx.demanda && ctx.demanda.known === true && ctx.demanda.active !== true && ctx.demanda.changedHa >= 15_000) {
+    if (pendente.papel === 'broadcaster' && ctx.demanda && ctx.demanda.known === true && ctx.demanda.active !== true && ctx.demanda.changedHa >= 15_000) {
         if (pendente.papel === 'broadcaster' && broadcasterRecoveryStillOwned(ctx, pendente)) {
             // His real failure showed this exact sequence: capture stayed at ~30 fps while
             // encoded output remained zero, then demand fell and the old controller aborted

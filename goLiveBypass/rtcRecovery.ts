@@ -41,6 +41,7 @@ let lastActionAt = 0;
 let blockedGeneration = "";
 let blockedAt = 0;
 let lastDiagnosticAt = 0;
+let lastReadinessAt = 0;
 
 type Role = "broadcaster" | "viewer" | "unknown";
 type Signal = "transmissor-video-parado" | "viewer-video-parado";
@@ -136,8 +137,16 @@ async function isolated<T>(webContents: WebContents, code: string): Promise<T | 
 
 async function injectCurrent(webContents: WebContents) {
     const result = await isolated<any>(webContents,
-        `(function(){ ${RTC_SHIM_SOURCE}; return !!window.__goliveVoiceResumo; })()`);
-    if (result === true) log("shim ativo na pagina atual");
+        `(async function(){ ${RTC_SHIM_SOURCE}; return window.__goliveVoiceResumo ? await window.__goliveVoiceResumo() : null; })()`);
+    diagnoseReadiness(result, Date.now(), true);
+}
+
+function diagnoseReadiness(voice: any, now: number, force = false) {
+    if (!force && now - lastReadinessAt < DIAGNOSTIC_THROTTLE_MS) return;
+    lastReadinessAt = now;
+    const connections = Array.isArray(voice?.connections) ? voice.connections : [];
+    const streams = connections.filter((connection: any) => connection?.kind === "stream" && connection.destroyed !== true);
+    log(`shim estado | resumo=${voice ? "sim" : "nao"} installed=${voice?.installed === true ? "sim" : "nao"} voice_hooked=${voice?.voiceHooked === true ? "sim" : "nao"} connections=${connections.length} streams=${streams.length} stats_ok=${streams.filter((connection: any) => connection.stats?.statsOk === true).length} demand_known=${voice?.demandKnown === true ? "sim" : "nao"} demand_active=${voice?.demandActive === true ? "sim" : "nao"}`);
 }
 
 interface VoiceContext {
@@ -212,7 +221,6 @@ function diagnoseMissingBroadcasterStats(ctx: VoiceContext, now: number) {
 function detect(ctx: VoiceContext): Signal | null {
     const voice = ctx?.voice;
     if (!voice || voice.installed !== true || voice.voiceHooked !== true) return null;
-    if (voice.demandKnown !== true || voice.demandActive !== true) return null;
 
     const stream = activeStream(voice);
     const stats = stream?.stats;
@@ -221,6 +229,7 @@ function detect(ctx: VoiceContext): Signal | null {
 
     const role = roleOf(stats);
     if (role === "broadcaster") {
+        if (voice.demandKnown !== true || voice.demandActive !== true) return null;
         if (stream.createdHa < STREAM_WARMUP_MS) return null;
         if (typeof stats.entradaHa !== "number" || stats.entradaHa < 0 || stats.entradaHa > INPUT_LIVE_MS) return null;
         if (!(typeof stats.captureFrames === "number" || stats.inputFrameRate > 0)) return null;
@@ -243,7 +252,7 @@ function detect(ctx: VoiceContext): Signal | null {
 
 function healthy(ctx: VoiceContext, expectedRole: Exclude<Role, "unknown">) {
     const voice = ctx?.voice;
-    if (!voice || voice.demandKnown !== true || voice.demandActive !== true) return false;
+    if (!voice) return false;
     const stream = activeStream(voice);
     const stats = stream?.stats;
     if (!stream || !stats || stats.statsOk !== true) return false;
@@ -251,6 +260,7 @@ function healthy(ctx: VoiceContext, expectedRole: Exclude<Role, "unknown">) {
     if (typeof stats.sampleHa !== "number" || stats.sampleHa < 0 || stats.sampleHa > SAMPLE_MAX_MS) return false;
 
     if (expectedRole === "broadcaster") {
+        if (voice.demandKnown !== true || voice.demandActive !== true) return false;
         return typeof stats.framesEncoded === "number" &&
             stats.encodeFrameRate > 0 &&
             typeof stats.saidaHa === "number" &&
@@ -331,6 +341,7 @@ async function tick() {
     ticking = true;
     try {
         const ctx = await queryContext(webContents);
+        diagnoseReadiness(ctx?.voice, Date.now());
         if (!ctx?.voice) return;
 
         const now = Date.now();
@@ -348,6 +359,13 @@ async function tick() {
 
         if (pending) {
             const attempt = pending;
+            const currentStream = activeStream(ctx.voice);
+            if (!currentStream || generation(ctx.voice, currentStream) !== attempt.generation ||
+                (attempt.role === "broadcaster" && currentStream.sourceCached !== true)) {
+                log("tentativa cancelada: stream terminou ou mudou");
+                pending = null;
+                return;
+            }
             if (healthy(ctx, attempt.role)) {
                 if (attempt.successAt === 0) attempt.successAt = now;
                 if (now - attempt.successAt >= SUCCESS_SUSTAINED_MS) {
@@ -360,7 +378,7 @@ async function tick() {
             }
 
             attempt.successAt = 0;
-            if (ctx.voice.demandKnown === true && ctx.voice.demandActive !== true) {
+            if (attempt.role === "broadcaster" && ctx.voice.demandKnown === true && ctx.voice.demandActive !== true) {
                 if (attempt.role === "broadcaster" && broadcasterRecoveryStillOwned(ctx, attempt)) {
                     if (!attempt.demandDropLogged) {
                         attempt.demandDropLogged = true;
@@ -401,13 +419,15 @@ async function tick() {
 
 export function startRtcRecovery(webContents: WebContents | undefined, logFn: (message: string) => void) {
     logger = logFn;
+    // Native enable() also runs at app.whenReady(), before renderer IPC exists.
+    // Register now so the first Discord document sees the native factories early.
+    ensurePreload();
     if (!webContents || webContents.isDestroyed()) {
-        log("webContents indisponivel; recuperacao fica passiva");
+        log(`aguardando webContents; preload_registrado=${preloadRegistered ? "sim" : "nao"}`);
         return;
     }
 
     activeWebContents = webContents;
-    ensurePreload();
     void injectCurrent(webContents);
 
     if (timer === null) {
@@ -425,6 +445,7 @@ export function stopRtcRecovery() {
     activeWebContents = null;
     ticking = false;
     lastDiagnosticAt = 0;
+    lastReadinessAt = 0;
     unregisterPreload();
     log("controlador parado");
     logger = null;

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://ac-tech.pro/schemas/lgpd-project-register.schema.json",
+  "schema_version": "0.1",
+  "status": "draft",
+  "updated_at": "2026-09-05",
+  "owner_approval": "pending",
+  "product": {
+    "name": "GoLiveBypass Enhanced",
+    "app_id": "golivebypass-enhanced",
+    "release_stage": "pre-production"
+  },
+  "roles": {
+    "controller": "AC Tech",
+    "operator_status": "controller_by_default",
+    "encarregado_dpo": "Moacir Bilhar Costa Junior",
+    "incident_notification_approver": "AC Tech owner authority through AC-Tech-Pro-Oficial",
+    "legal_privacy_review_owner": "AC Tech owner authority until dedicated counsel or privacy owner is appointed",
+    "public_privacy_contact": "TODO",
+    "support_contact": "contato@ac-tech.pro"
+  },
+  "data_subjects": [],
+  "processing_activities": [
+    {
+      "id": "PA-TODO-001",
+      "purpose": "TODO",
+      "feature_or_workflow": "TODO",
+      "data_subject_categories": [],
+      "personal_data_categories": [],
+      "sensitive_personal_data_categories": [],
+      "legal_basis": "TODO",
+      "sensitive_data_legal_basis": "not_applicable",
+      "source_of_data": "TODO",
+      "storage_locations": [],
+      "access_roles": [],
+      "recipients_or_subprocessors": [],
+      "international_transfer": "not_assessed",
+      "retention_rule": "TODO",
+      "deletion_trigger": "TODO",
+      "security_controls": [],
+      "rights_request_path": "TODO",
+      "automated_decision_or_profiling": "none_declared",
+      "ripd_required": "not_assessed",
+      "owner_review": "pending"
+    }
+  ],
+  "rights_requests": {
+    "confirmation": "TODO",
+    "access": "TODO",
+    "correction": "TODO",
+    "deletion_or_anonymization": "TODO",
+    "portability": "TODO",
+    "sharing_information": "TODO",
+    "consent_revocation": "TODO",
+    "dpo_escalation": "TODO"
+  },
+  "retention": [],
+  "database_placement_decisions": [
+    {
+      "workflow": "TODO",
+      "local_database_viable": "not_assessed",
+      "firebase_or_provider_required": "not_assessed",
+      "reason_local_is_insufficient": "TODO if Firebase/provider is used",
+      "privacy_security_evidence": "TODO"
+    }
+  ],
+  "international_transfers": [],
+  "ripd": {
+    "required": "not_assessed",
+    "reason": "TODO",
+    "artifact": "TODO",
+    "owner_review": "pending"
+  },
+  "incident_response": {
+    "intake_channel": "TODO",
+    "triage_owner": "TODO",
+    "dpo": "Moacir Bilhar Costa Junior",
+    "approver": "AC Tech owner authority through AC-Tech-Pro-Oficial",
+    "anpd_deadline_business_days": 3,
+    "data_subject_deadline_business_days": 3,
+    "staged_communication_allowed": true,
+    "evidence_location": "TODO"
+  },
+  "providers": [],
+  "release_gates": {
+    "controller_operator_mapping_complete": false,
+    "ropa_processing_activities_complete": false,
+    "legal_basis_defined_for_every_activity": false,
+    "retention_and_deletion_defined_for_every_data_category": false,
+    "data_subject_rights_path_defined": false,
+    "incident_response_owner_and_deadlines_defined": false,
+    "international_transfer_assessment_complete_or_not_applicable": false,
+    "ripd_decision_complete_for_every_activity": false,
+    "sensitive_personal_data_art11_basis_defined_when_present": false,
+    "privacy_register_owner_reviewed": false
+  },
+  "exceptions": []
+}

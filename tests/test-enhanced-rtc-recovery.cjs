@@ -201,7 +201,8 @@ function detectorContract() {
   } }] } }), null, "healthy ~30fps decoder must not trigger");
   assert.equal(detect({ ...base, voice: { ...base.voice, connections: [{ ...base.voice.connections[0], createdHa: 4_000 }] } }), null,
     "new viewer stream must get negotiation warm-up");
-  assert.equal(detect({ ...base, demanda: { ...base.demanda, active: false } }), null, "no viewer demand means no recovery");
+  assert.equal(detect({ ...base, demanda: { ...base.demanda, active: false } }), "viewer-video-parado",
+    "outbound sink demand must not suppress inbound viewer recovery");
 }
 
 function friendBroadcasterDemandDropContract() {
