@@ -51,5 +51,10 @@ must not be described as proof that a viewer is receiving video.
 Executable tests cover repair activation, preserving caller objects, remembering
 new original settings, and restoration on source switch/stop in plugin and
 standalone shims. GUI payload regeneration and compilation, and Equicord build
-passed. After a clean restart the installed controller loaded; an owner-started
-fresh share and receiver confirmation are still needed for end-to-end proof.
+passed. After a clean restart, an owner-started fresh share triggered
+`desktop-source-keyframe-rearm` automatically at 10:30:46 UTC. The controller
+credited sustained recovery at 10:31:01 UTC. Native samples subsequently exceeded
+10,000 encoded frames at 30–31 FPS, with roughly 1.45–2.31 Mbps across samples,
+over more than five minutes. No live debugging intervention was used on that
+fresh share. Receiver-visible video and application-audio confirmation remain
+required for end-to-end proof.
