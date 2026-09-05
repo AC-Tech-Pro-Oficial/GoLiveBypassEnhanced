@@ -1,5 +1,9 @@
 # Changelog
 
+- Fixes the RTC recovery path against Discord's current native voice ABI. Viewer streams are now identified from `connectionOptions.context` even though Discord creates them through the generic voice factory, private local/stream identities are retained only inside the isolated preload, and viewer resubscription calls the live `setDisableLocalVideo` method.
+- Removes the outbound broadcaster-demand requirement from viewer stall detection. Discord's `video-stream-receiver-ready-timeout` can now trigger the targeted UDP reconnect and video resubscription while broadcaster recovery keeps its stricter remote-demand guard.
+- Registers the RTC preload before renderer IPC is available, replaces the misleading "shim active" signal with sanitized hook/connection readiness, rejects recovery actions for stale connection generations, and cancels escalation if the observed stream is replaced or intentionally stopped.
+- Adds executable regressions for cached native factories, generic-factory viewer classification, the current bound-wrapper ABI, disabled-video suppression, viewer recovery without broadcaster demand, and stale-generation rejection.
 - Changes the Windows one-line splash to a full-terminal `KINGCIR` frame for two seconds, with a compact fallback for redirected/non-interactive output.
 - Hardens the Electron GUI boundary: `nodeIntegration: false`, `contextIsolation: true`, `contextBridge` preload API, trusted external-link allowlist, and wrapped IPC notifications that do not expose Electron event objects.
 - Redacts local user/home paths from public bug reports and blocks submission if a known local path survives the final privacy scan.

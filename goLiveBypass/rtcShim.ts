@@ -176,8 +176,8 @@ export function installEnhancedRtcShim() {
         if (rec.sourceReplay) return 'broadcaster';
         try { if (typeof rec.conn.hasDesktopSource === 'function' && rec.conn.hasDesktopSource() === true) return 'broadcaster'; } catch (e) { }
         try {
-            var local = rec.conn.userId;
-            var remote = rec.conn.streamUserId;
+            var local = rec.localUser;
+            var remote = rec.streamUser;
             if (typeof remote === 'string' && remote.length > 0 && typeof local === 'string' && local.length > 0) {
                 return remote === local ? 'broadcaster' : 'viewer';
             }
@@ -233,16 +233,23 @@ export function installEnhancedRtcShim() {
             decodeFrameRate: stats.decodeFrameRate,
             framesReceived: stats.framesReceived,
             decodeHa: role === 'viewer' ? now - rec.progress.decodedAt : -1,
-            videoExpected: role === 'viewer' ? stats.videoExpected === true : false,
+            videoExpected: role === 'viewer' ? stats.videoExpected === true && !rec.localVideoDisabled : false,
             sampleHa: 0,
         };
     }
 
-    function registerConnection(kind, creator, options, conn) {
+    function registerConnection(kind, creator, options, conn, localUser) {
         if (!conn || (typeof conn !== 'object' && typeof conn !== 'function')) return conn;
+        // Viewer streams use createVoiceConnectionWithOptions in current Discord.
+        // The options context is authoritative; the returned native wrapper does
+        // not expose userId/streamUserId properties.
+        if (options && options.context === 'stream') kind = 'stream';
+        else if (options && options.context === 'default') kind = 'voice';
         var existing = state.seen.get(conn);
         if (existing) {
             if (kind === 'stream') existing.kind = 'stream';
+            if (typeof localUser === 'string') existing.localUser = localUser;
+            if (options && typeof options.streamUserId === 'string') existing.streamUser = options.streamUserId;
             return conn;
         }
         var rec = {
@@ -253,6 +260,9 @@ export function installEnhancedRtcShim() {
             destroyedAt: 0,
             optionShape: shape(options, 0, new WeakSet()),
             conn: conn,
+            localUser: typeof localUser === 'string' ? localUser : conn.userId,
+            streamUser: options && typeof options.streamUserId === 'string' ? options.streamUserId : conn.streamUserId,
+            localVideoDisabled: false,
             sourceReplay: null,
             sourceAt: 0,
             replayingSource: false,
@@ -275,6 +285,15 @@ export function installEnhancedRtcShim() {
         } catch (e) { }
 
         if (kind === 'stream') {
+            try {
+                var originalDisable = conn.setDisableLocalVideo;
+                if (typeof originalDisable === 'function') {
+                    conn.setDisableLocalVideo = function (userId, disabled) {
+                        if (userId === rec.streamUser) rec.localVideoDisabled = disabled === true;
+                        return originalDisable.apply(this, arguments);
+                    };
+                }
+            } catch (e) { }
             ['setDesktopSource', 'setDesktopSourceWithOptions'].forEach(function (name) {
                 try {
                     var original = conn[name];
@@ -322,7 +341,7 @@ export function installEnhancedRtcShim() {
                     var conn;
                     try { conn = original.apply(this, arguments); }
                     finally { state.pendingKind = null; }
-                    return registerConnection(kind, name, arguments[1], conn);
+                    return registerConnection(kind, name, arguments[1], conn, arguments[0]);
                 };
             })(creators[i][0], creators[i][1]);
         }
@@ -337,7 +356,7 @@ export function installEnhancedRtcShim() {
                 function GoliveVoiceConnection() {
                     var args = Array.prototype.slice.call(arguments);
                     var instance = Reflect.construct(OriginalVoiceConnection, args, OriginalVoiceConnection);
-                    if (!state.pendingKind) registerConnection('unknown', 'VoiceConnection', args[1], instance);
+                    if (!state.pendingKind) registerConnection('unknown', 'VoiceConnection', args[1], instance, args[0]);
                     return instance;
                 }
                 Object.setPrototypeOf(GoliveVoiceConnection, OriginalVoiceConnection);
@@ -510,7 +529,7 @@ export function installEnhancedRtcShim() {
 
     // A decisao e feita no main. O preload executa apenas a acao segura
     // correspondente ao papel sanitizado da stream; IDs e argumentos ficam no closure.
-    window.__goliveVoiceRecuperar = function (level) {
+    window.__goliveVoiceRecuperar = function (level, expectedInstanceId, expectedConnectionId) {
         if (level !== 1 && level !== 2) return { ok: false, level: 0, role: 'unknown', action: 'invalid-level' };
         var latestStream = null;
         for (var i = state.connections.length - 1; i >= 0; i--) {
@@ -520,6 +539,10 @@ export function installEnhancedRtcShim() {
             break;
         }
         if (!latestStream) return { ok: false, level: level, role: 'unknown', action: 'no-stream' };
+        if (String(state.instanceId) !== String(expectedInstanceId) ||
+            String(latestStream.id) !== String(expectedConnectionId)) {
+            return { ok: false, level: level, role: 'unknown', action: 'stale-generation' };
+        }
         var role = latestStream.lastRole || connectionRoleHint(latestStream);
         if (role === 'unknown') role = connectionRoleHint(latestStream);
 
@@ -573,18 +596,17 @@ export function installEnhancedRtcShim() {
                     return { ok: false, level: level, role: role, action: 'viewer-fast-udp-failed' };
                 }
             }
-            var remoteUser = null;
-            try { remoteUser = latestStream.conn.streamUserId; } catch (e) { }
+            var remoteUser = latestStream.streamUser;
             if (typeof remoteUser !== 'string' || remoteUser.length === 0 ||
-                typeof latestStream.conn.setLocalVideoDisabled !== 'function') {
+                typeof latestStream.conn.setDisableLocalVideo !== 'function') {
                 return { ok: false, level: level, role: role, action: 'viewer-resubscribe-unavailable' };
             }
             try {
-                latestStream.conn.setLocalVideoDisabled(remoteUser, true);
+                latestStream.conn.setDisableLocalVideo(remoteUser, true);
                 if (typeof latestStream.conn.fastUdpReconnect === 'function') latestStream.conn.fastUdpReconnect();
                 setTimeout(function () {
                     if (latestStream.destroyedAt) return;
-                    try { latestStream.conn.setLocalVideoDisabled(remoteUser, false); } catch (e) { }
+                    try { latestStream.conn.setDisableLocalVideo(remoteUser, false); } catch (e) { }
                 }, 200);
                 return { ok: true, level: level, role: role, action: 'viewer-video-resubscribe' };
             } catch (e) {

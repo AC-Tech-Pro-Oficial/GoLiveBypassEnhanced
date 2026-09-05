@@ -52,7 +52,7 @@ function makeConnection({ localUser = "local-secret", streamUser = "local-secret
     desktopActive: desktop,
     destroy() { this.destroyCalls++; this.destroyed = true; },
     fastUdpReconnect() { this.fastReconnectCalls++; },
-    setLocalVideoDisabled(userId, disabled) { this.videoToggleCalls.push([userId, disabled]); },
+    setDisableLocalVideo(userId, disabled) { this.videoToggleCalls.push([userId, disabled]); },
     setDesktopSource(...args) { this.desktopCalls.push(["setDesktopSource", ...args]); this.desktopActive = true; },
     setDesktopSourceWithOptions(...args) { this.desktopCalls.push(["setDesktopSourceWithOptions", ...args]); this.desktopActive = true; },
     clearDesktopSource() { this.clearCalls++; this.desktopActive = false; },
@@ -62,7 +62,7 @@ function makeConnection({ localUser = "local-secret", streamUser = "local-secret
   return conn;
 }
 
-function bootHarness(connections) {
+function bootHarness(connections, cacheGenericFactory = false) {
   const queue = connections.slice();
   const voice = {
     VoiceConnection: function VoiceConnection(_userId, options) { return options && options.__conn ? options.__conn : queue.shift(); },
@@ -73,6 +73,7 @@ function bootHarness(connections) {
       return new this.VoiceConnection(userId, options, callback);
     },
   };
+  const cachedCreateVoice = cacheGenericFactory ? voice.createVoiceConnectionWithOptions : null;
   const nativeModules = { requireModule(name) { return name === "discord_voice" ? voice : { name }; } };
   const sandbox = {
     window: { DiscordNative: { nativeModules } },
@@ -84,7 +85,7 @@ function bootHarness(connections) {
   vm.createContext(sandbox);
   vm.runInContext(source.slice(begin, end) + "\ninstalarVoiceShim();", sandbox, { filename: BYPASS });
   nativeModules.requireModule("discord_voice");
-  return { sandbox, voice };
+  return { sandbox, voice, cachedCreateVoice };
 }
 
 async function broadcasterRecoveryContract() {
@@ -98,7 +99,7 @@ async function broadcasterRecoveryContract() {
     },
   });
   const { sandbox, voice } = bootHarness([broadcaster]);
-  voice.createOwnStreamConnectionWithOptions("local-secret", { __conn: broadcaster });
+  voice.createOwnStreamConnectionWithOptions("local-secret", { __conn: broadcaster, context: "stream", streamUserId: "local-secret" });
   const secretHook = function privateCallback() {};
   broadcaster.setDesktopSource("screen-secret-id", secretHook, "screen");
 
@@ -111,7 +112,7 @@ async function broadcasterRecoveryContract() {
     "selected broadcaster source must be exposed only as a sanitized cached/not-cached bit");
   assert.equal(summary.connections[0].roleHint, "broadcaster");
 
-  const level1 = await sandbox.window.__goliveVoiceRecuperar(1);
+  const level1 = await sandbox.window.__goliveVoiceRecuperar(1, summary.instanceId, summary.connections[0].id);
   assert.equal(level1.ok, true);
   assert.equal(level1.role, "broadcaster");
   assert.equal(level1.action, "desktop-source-reapply");
@@ -120,7 +121,7 @@ async function broadcasterRecoveryContract() {
   assert.strictEqual(broadcaster.desktopCalls[1][1], "screen-secret-id");
   assert.strictEqual(broadcaster.desktopCalls[1][2], secretHook);
 
-  const level2 = await sandbox.window.__goliveVoiceRecuperar(2);
+  const level2 = await sandbox.window.__goliveVoiceRecuperar(2, summary.instanceId, summary.connections[0].id);
   assert.equal(level2.ok, true);
   assert.equal(level2.action, "desktop-source-clear-reapply");
   await new Promise(resolve => setTimeout(resolve, 350));
@@ -144,8 +145,9 @@ async function viewerRecoveryContract() {
     stats: {},
   });
   const { sandbox, voice } = bootHarness([voiceDefault, viewer]);
-  voice.createVoiceConnectionWithOptions("local-secret", { __conn: voiceDefault });
-  voice.createOwnStreamConnectionWithOptions("local-secret", { __conn: viewer });
+  voice.createVoiceConnectionWithOptions("local-secret", { __conn: voiceDefault, context: "default" });
+  // Current Discord uses the generic factory for viewers; context identifies the stream.
+  voice.createVoiceConnectionWithOptions("local-secret", { __conn: viewer, context: "stream", streamUserId: "remote-secret" });
 
   const summary = await sandbox.window.__goliveVoiceResumo();
   const stream = summary.connections.find(c => c.kind === "stream");
@@ -154,7 +156,7 @@ async function viewerRecoveryContract() {
   assert.equal(stream.stats.decodeFrameRate, 0);
   assert(!JSON.stringify(summary).includes("remote-secret"), "remote stream user id must stay private");
 
-  const level1 = await sandbox.window.__goliveVoiceRecuperar(1);
+  const level1 = await sandbox.window.__goliveVoiceRecuperar(1, summary.instanceId, stream.id);
   assert.equal(level1.ok, true);
   assert.equal(level1.role, "viewer");
   assert.equal(level1.action, "viewer-fast-udp-reconnect");
@@ -162,13 +164,42 @@ async function viewerRecoveryContract() {
   assert.equal(viewer.destroyCalls, 0);
   assert.equal(voiceDefault.destroyCalls, 0, "primary voice must be preserved");
 
-  const level2 = await sandbox.window.__goliveVoiceRecuperar(2);
+  const stale = await sandbox.window.__goliveVoiceRecuperar(2, summary.instanceId, stream.id + 1);
+  assert.equal(stale.ok, false, "recovery must reject a replaced stream generation");
+  assert.equal(stale.action, "stale-generation");
+  assert.deepEqual(viewer.videoToggleCalls, [], "stale recovery must not touch the active stream");
+
+  const level2 = await sandbox.window.__goliveVoiceRecuperar(2, summary.instanceId, stream.id);
   assert.equal(level2.ok, true);
   assert.equal(level2.action, "viewer-video-resubscribe");
   await new Promise(resolve => setTimeout(resolve, 350));
   assert.deepEqual(viewer.videoToggleCalls, [["remote-secret", true], ["remote-secret", false]]);
   assert.equal(viewer.destroyCalls, 0);
   assert.equal(voiceDefault.destroyCalls, 0);
+}
+
+async function cachedViewerFactoryContract() {
+  const viewer = makeConnection({
+    localUser: "local-secret",
+    streamUser: "remote-secret",
+    stats: { inbound: { video: { framesDecoded: 0, decodeFrameRate: 0, framesReceived: 0 } } },
+  });
+  // Current discord_voice returns a bound wrapper without identity fields.
+  delete viewer.userId;
+  delete viewer.streamUserId;
+  const { sandbox, cachedCreateVoice } = bootHarness([viewer], true);
+  cachedCreateVoice.call(sandbox.window.DiscordNative.nativeModules.requireModule("discord_voice"),
+    "local-secret", { __conn: viewer, context: "stream", streamUserId: "remote-secret" });
+
+  let summary = await sandbox.window.__goliveVoiceResumo();
+  assert.equal(summary.connections[0].kind, "stream",
+    "a cached generic factory must still classify a viewer from options.context");
+  assert.equal(summary.connections[0].stats.role, "viewer");
+
+  viewer.setDisableLocalVideo("remote-secret", true);
+  summary = await sandbox.window.__goliveVoiceResumo();
+  assert.equal(summary.connections[0].stats.videoExpected, false,
+    "manual video disable must suppress automatic viewer recovery");
 }
 
 function detectorContract() {
@@ -259,6 +290,7 @@ function staticSafetyContract() {
 (async () => {
   await broadcasterRecoveryContract();
   await viewerRecoveryContract();
+  await cachedViewerFactoryContract();
   detectorContract();
   friendBroadcasterDemandDropContract();
   staticSafetyContract();

@@ -321,7 +321,7 @@ async function performRecovery(webContents: WebContents, ctx: VoiceContext, leve
 
     log(`nivel=${level} papel=${role} sinal=${signal}`);
     const result = await isolated<any>(webContents,
-        `window.__goliveVoiceRecuperar ? window.__goliveVoiceRecuperar(${level}) : null`);
+        `window.__goliveVoiceRecuperar ? window.__goliveVoiceRecuperar(${level}, ${JSON.stringify(ctx.voice.instanceId)}, ${JSON.stringify(stream.id)}) : null`);
 
     if (pending !== attempt) return;
     if (!result || result.ok !== true || result.role !== role) {
