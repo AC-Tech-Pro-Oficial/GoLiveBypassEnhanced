@@ -779,6 +779,11 @@ function Get-DiscordResources {
             $resources = Join-Path $app.FullName 'resources'
             if (Test-DiscordResourcesReady $resources) {
                 $found += $resources
+                # Equilotl/Vencord Installer selects one active app directory per Discord
+                # flavour: the newest usable app-* version. Returning historical Squirrel
+                # versions here made our pending/assertion logic disagree with the injector,
+                # which then tried to unpatch an already-correct active version.
+                break
             }
         }
     }
@@ -1898,7 +1903,7 @@ function Restore-RecognizedModPatchBeforeReinject($root, $targets) {
         # therefore looks successful and the real error only appears in our assertion. Avoid
         # that path: restore Discord's original asar ourselves, but only for a stub whose
         # require target is positively identifiable as a Vencord/Equicord development build.
-        if ($injected -notmatch '(?i)[\\/](?:equicord|vencord)[\\/].*[\\/]dist[\\/](?:desktop|patcher(?:\.js)?)') {
+        if ($injected -notmatch '(?i)[\\/](?:equicord|vencord)[\\/](?:.*[\\/])?dist[\\/](?:desktop|patcher(?:\.js)?)') {
             throw "O Discord $($target.Flavour) esta injetado por um mod desconhecido ($injected); nao vou remove-lo automaticamente."
         }
 

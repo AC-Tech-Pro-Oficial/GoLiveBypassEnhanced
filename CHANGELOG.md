@@ -1,5 +1,7 @@
 # Changelog
 
+- Aligns Windows Discord discovery with Equilotl by selecting only the newest usable `app-*` directory for each Discord channel. Stale Squirrel versions no longer force a needless reinjection of the already-patched active version.
+- Fixes recognized-checkout cleanup for the normal `Equicord\dist\desktop` and `Vencord\dist\desktop` paths, while preserving the fail-closed guard for unrelated injectors or missing `_app.asar` backups.
 - Fixes Windows reinstalls when Discord already points to another recognized Vencord/Equicord checkout. The installer now safely restores the validated `_app.asar` before reinjection instead of entering Equilotl's failing `Unpatching first` path.
 - Fixes the RTC recovery path against Discord's current native voice ABI. Viewer streams are now identified from `connectionOptions.context` even though Discord creates them through the generic voice factory, private local/stream identities are retained only inside the isolated preload, and viewer resubscription calls the live `setDisableLocalVideo` method.
 - Removes the outbound broadcaster-demand requirement from viewer stall detection. Discord's `video-stream-receiver-ready-timeout` can now trigger the targeted UDP reconnect and video resubscription while broadcaster recovery keeps its stricter remote-demand guard.
