@@ -58,3 +58,22 @@ credited sustained recovery at 10:31:01 UTC. Native samples subsequently exceede
 over more than five minutes. No live debugging intervention was used on that
 fresh share. Receiver-visible video and application-audio confirmation remain
 required for end-to-end proof.
+
+## First-frame deadline correction
+
+The paired test exposed a timing defect in that workaround. The local native
+sender still reported zero encoded frames at 11:42:12.721 UTC. Recovery and
+encoder reinitialization followed at 11:42:12.928 UTC, with 294 frames by
+11:42:22.782 UTC. The friend's reported receiver timeout was 11:42:07.298 UTC.
+Thus the previous post-recovery counters did not establish timely startup.
+Cross-PC clocks were not independently synchronized; the local 20-second
+zero-output interval itself also exhausted most of the observed receiver budget.
+
+Both controllers now poll every two seconds and allow level-one recovery after
+five seconds of zero output from a selected source with positive input FPS.
+Source age, output-stall age, fresh stats, and existing demand/ownership guards
+remain required. Streams that have encoded frames retain the 20-second stall
+threshold. The existing repair and source restoration behavior are unchanged.
+This corrects a confirmed late-recovery path; successful receiver playback still
+requires a new live test. It does not establish the meaning of the native
+receiver-count feedback or rule out another transport/signaling defect.

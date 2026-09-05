@@ -2463,7 +2463,7 @@ const GW_STREAM_LEAVE_MS = 15_000;
 // isolado 999. O main junta sua telemetria de discord_voice com a demanda e os
 // websockets observados no mundo principal; dado ausente nunca vira acao.
 const VOICE_ISOLATED_WORLD_ID = 999;
-const VOICE_PROBE_MS = 5_000;
+const VOICE_PROBE_MS = 2_000;
 const VOICE_PROBE_LOG_MS = 30_000;
 const VOICE_STREAM_AQUECIMENTO_MS = 20_000;
 const VOICE_VIEWER_AQUECIMENTO_MS = 10_000;
@@ -2698,11 +2698,15 @@ function avaliarRtcNativo(ctx) {
     if (papel === 'broadcaster') {
         if (!ctx.demanda || ctx.demanda.known !== true || ctx.demanda.active !== true) return null;
         if (ctx.demanda.demandHa < 0 || ctx.demanda.demandHa > stream.createdHa + VOICE_DEMANDA_GRACA_MS) return null;
-        if (stream.createdHa < VOICE_STREAM_AQUECIMENTO_MS) return null;
+        const startup = stream.sourceCached === true &&
+            typeof stream.sourceHa === 'number' && stream.sourceHa >= 5_000 &&
+            stats.framesEncoded === 0 && stats.encodeFrameRate === 0 && stats.inputFrameRate > 0;
+        const stallMs = startup ? 5_000 : VOICE_SAIDA_PARADA_MS;
+        if (stream.createdHa < (startup ? 5_000 : VOICE_STREAM_AQUECIMENTO_MS)) return null;
         if (stats.entradaHa < 0 || stats.entradaHa > VOICE_ENTRADA_VIVA_MS) return null;
         if (!(typeof stats.captureFrames === 'number' || stats.inputFrameRate > 0)) return null;
         if (typeof stats.framesEncoded !== 'number' || typeof stats.encodeFrameRate !== 'number') return null;
-        if (stats.saidaHa < VOICE_SAIDA_PARADA_MS) return null;
+        if (stats.saidaHa < stallMs) return null;
         return 'transmissor-video-parado';
     }
 

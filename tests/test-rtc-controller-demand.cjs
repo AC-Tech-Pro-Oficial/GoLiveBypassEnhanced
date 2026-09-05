@@ -77,6 +77,22 @@ function standaloneHarness() {
 
 async function run() {
     for (const make of [pluginHarness, standaloneHarness]) {
+        const early = context("broadcaster", { known: true, active: true });
+        const stream = early.voice.connections[0];
+        Object.assign(stream, { createdHa: 8_000, sourceHa: 8_000 });
+        stream.stats.saidaHa = 6_000;
+        assert.equal(make().api.detect(early), "transmissor-video-parado", `${make.name}: recover zero-output startup before receiver deadline`);
+        for (const change of [
+            s => { s.sourceHa = 4_000; },
+            s => { s.sourceCached = false; },
+            s => { s.stats.framesEncoded = 30; },
+            s => { s.stats.inputFrameRate = 0; },
+            s => { s.stats.saidaHa = 4_000; }
+        ]) {
+            const guarded = structuredClone(early);
+            change(guarded.voice.connections[0]);
+            assert.equal(make().api.detect(guarded), null, `${make.name}: early recovery requires sustained live capture and zero output`);
+        }
         for (const demand of [{ known: false, active: false }, { known: true, active: false }]) {
             const box = make();
             const viewer = context("viewer", demand);

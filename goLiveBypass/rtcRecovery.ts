@@ -13,7 +13,8 @@ import { join } from "path";
 import { RTC_SHIM_SOURCE } from "./rtcShim";
 
 const WORLD_ID = 999;
-const PROBE_MS = 5_000;
+const PROBE_MS = 2_000;
+const STARTUP_STALL_MS = 5_000;
 const STREAM_WARMUP_MS = 20_000;
 const VIEWER_WARMUP_MS = 10_000;
 const VIEWER_STALL_MS = 10_000;
@@ -237,11 +238,18 @@ function detect(ctx: VoiceContext): Signal | null {
     const role = roleOf(stats);
     if (role === "broadcaster") {
         if (voice.demandKnown !== true || voice.demandActive !== true) return null;
-        if (stream.createdHa < STREAM_WARMUP_MS) return null;
+        // A 20s warmup plus polling let the receiver time out before the first
+        // encoded frame. Use a shorter window only for a live selected source
+        // that has produced no frames; established-stream stalls keep 20s.
+        const startup = stream.sourceCached === true &&
+            typeof stream.sourceHa === "number" && stream.sourceHa >= STARTUP_STALL_MS &&
+            stats.framesEncoded === 0 && stats.encodeFrameRate === 0 && stats.inputFrameRate > 0;
+        const stallMs = startup ? STARTUP_STALL_MS : OUTPUT_STALL_MS;
+        if (stream.createdHa < (startup ? STARTUP_STALL_MS : STREAM_WARMUP_MS)) return null;
         if (typeof stats.entradaHa !== "number" || stats.entradaHa < 0 || stats.entradaHa > INPUT_LIVE_MS) return null;
         if (!(typeof stats.captureFrames === "number" || stats.inputFrameRate > 0)) return null;
         if (typeof stats.framesEncoded !== "number" || typeof stats.encodeFrameRate !== "number") return null;
-        if (typeof stats.saidaHa !== "number" || stats.saidaHa < OUTPUT_STALL_MS) return null;
+        if (typeof stats.saidaHa !== "number" || stats.saidaHa < stallMs) return null;
         return "transmissor-video-parado";
     }
 

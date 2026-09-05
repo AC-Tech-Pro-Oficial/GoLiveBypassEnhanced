@@ -898,3 +898,11 @@ Veja o histórico de tags e commits para o que veio antes.
 - Level-one broadcaster recovery now applies that transport repair when the prior values are known. It preserves codec selection and the gateway, holds the repair for the selected source, and restores the latest original settings on source change or stop. It may keep encoding while that share has no viewers; it does not start a share or select a source.
 - Ported to standalone and regenerated GUI payload. Added executable restoration and caller-options preservation tests. Receiver-visible video/audio and a fresh installed-session check remain separate validation requirements.
 - The installed Equicord StreamingCodecDisabler references removed `setAv1Enabled`/`setH265Enabled`/`setH264Enabled` methods. Its checkbox was not proof of a negotiated codec change. No codec-disabler dependency is introduced by this repair.
+# Unreleased — first-frame recovery deadline
+
+- Plugin and standalone: detect a live selected source with zero encoded frames
+  after five seconds, polling every two seconds, so the existing encoder repair
+  can run before the observed receiver timeout. Established-stream stalls keep
+  their twenty-second threshold. GUI includes the regenerated standalone payload.
+- Paired logs confirmed the previous repair ran after the viewer had timed out.
+  Receiver-visible success remains unverified; this is not an end-to-end fix claim.
