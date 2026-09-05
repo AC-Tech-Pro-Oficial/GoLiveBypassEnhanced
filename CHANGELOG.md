@@ -892,3 +892,9 @@ Veja o histórico de tags e commits para o que veio antes.
 - Adds fixed numeric plugin stream counters and a read-only `installer/Get-StreamDiagnostics.ps1` collector. It emits no raw log lines, IDs, proxy credentials or addresses.
 - Validation covers native observer behavior without console messages, zero demand, stream replacement, delayed user changes, and diagnostic filtering. Error 2012 remains a viewer timeout symptom; these checks do not establish successful streaming on the affected friend's computer.
 - Still outside this fix: simultaneous-stream scheduling, capture/transport failures unrelated to frozen encoding, and live verification on the affected sender and viewer.
+## Enhanced fork — inactive native encoder recovery
+
+- Reproduced capture at 30 FPS with native simulcast inactive, zero encoded frames and growing encoder-queue drops on the local Windows sender. AV1, H.265, H.264 and VP8 all stalled. Setting a one-second keyframe interval together with `alwaysSendVideo` restored sustained AV1 encoding and encryption; restoring the prior setting reproduced the stall.
+- Level-one broadcaster recovery now applies that transport repair when the prior values are known. It preserves codec selection and the gateway, holds the repair for the selected source, and restores the latest original settings on source change or stop. It may keep encoding while that share has no viewers; it does not start a share or select a source.
+- Ported to standalone and regenerated GUI payload. Added executable restoration and caller-options preservation tests. Receiver-visible video/audio and a fresh installed-session check remain separate validation requirements.
+- The installed Equicord StreamingCodecDisabler references removed `setAv1Enabled`/`setH265Enabled`/`setH264Enabled` methods. Its checkbox was not proof of a negotiated codec change. No codec-disabler dependency is introduced by this repair.

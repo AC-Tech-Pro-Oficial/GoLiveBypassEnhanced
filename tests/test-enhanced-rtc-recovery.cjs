@@ -355,7 +355,38 @@ async function nativeDemandContract() {
   }
 }
 
+async function keyframeRepairContract() {
+  for (const plugin of [false, true]) {
+    const conn = makeConnection({desktop:true,stats:{screenshare:{frames:300},outbound:{video:{inputFrameRate:30,framesEncoded:0,encodeFrameRate:0}}}});
+    const {sandbox,voice}=bootHarness([conn],false,plugin);
+    voice.createOwnStreamConnectionWithOptions('local-secret',{context:'stream',streamUserId:'local-secret'});
+    conn.setDesktopSource('selected-source');
+    conn.setTransportOptions({keyframeInterval:0,alwaysSendVideo:false});
+    const summary=await sandbox.window.__goliveVoiceResumo();
+    const result=sandbox.window.__goliveVoiceRecuperar(1,summary.instanceId,summary.connections[0].id);
+    assert.equal(result.action,'desktop-source-keyframe-rearm');
+    assert.equal(conn.lastTransport.keyframeInterval,1000);
+    assert.equal(conn.lastTransport.alwaysSendVideo,true);
+    const partial={keyframeInterval:5000,alwaysSendVideo:false,encodingVideoBitRate:1234};
+    conn.setTransportOptions(partial);
+    assert.equal(partial.keyframeInterval,5000,'caller options must remain unchanged');
+    assert.equal(conn.lastTransport.keyframeInterval,1000);
+    assert.equal(conn.lastTransport.encodingVideoBitRate,1234);
+    conn.clearDesktopSource();
+    assert.equal(conn.lastTransport.keyframeInterval,5000,'restore latest caller intent');
+    assert.equal(conn.lastTransport.alwaysSendVideo,false);
+    conn.setTransportOptions({keyframeInterval:0,alwaysSendVideo:false});
+    conn.setDesktopSource('new-source');
+    const next=await sandbox.window.__goliveVoiceResumo();
+    sandbox.window.__goliveVoiceRecuperar(1,next.instanceId,next.connections[0].id);
+    conn.setDesktopSource('user-switched-source');
+    assert.equal(conn.lastTransport.keyframeInterval,0,'source switch cancels repair');
+    assert.equal(conn.lastTransport.alwaysSendVideo,false);
+  }
+}
+
 (async () => {
+  await keyframeRepairContract();
   await nativeDemandContract();
   await broadcasterRecoveryContract();
   await viewerRecoveryContract();

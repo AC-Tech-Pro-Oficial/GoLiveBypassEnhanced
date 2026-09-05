@@ -285,6 +285,14 @@ export function installEnhancedRtcShim() {
             // Discord forwards effective remote viewer demand through this native
             // method. Renderer console messages live in a different JS world.
             // Read only the numeric pixel count; never retain transport options.
+            rec.keyframeRepair = false;
+            rec.keyframeBaseline = null;
+            rec.alwaysSendBaseline = null;
+            rec.restoreKeyframeRepair = function () {
+                if (!rec.keyframeRepair) return;
+                originalTransport.call(conn, { keyframeInterval: rec.keyframeBaseline, alwaysSendVideo: rec.alwaysSendBaseline });
+                rec.keyframeRepair = false;
+            };
             rec.demandKnown = false;
             rec.demandActive = false;
             rec.demandAt = 0;
@@ -293,7 +301,15 @@ export function installEnhancedRtcShim() {
                 var originalTransport = conn.setTransportOptions;
                 if (typeof originalTransport === 'function') {
                     conn.setTransportOptions = function (options) {
-                        var result = originalTransport.apply(this, arguments);
+                        var effective = options;
+                        if (options && typeof options === 'object') {
+                            if (finite(options.keyframeInterval) !== null) rec.keyframeBaseline = options.keyframeInterval;
+                            if (typeof options.alwaysSendVideo === 'boolean') rec.alwaysSendBaseline = options.alwaysSendVideo;
+                            if (rec.keyframeRepair) effective = Object.assign({}, options, { keyframeInterval: 1000, alwaysSendVideo: true });
+                        }
+                        var forwarded = Array.prototype.slice.call(arguments);
+                        forwarded[0] = effective;
+                        var result = originalTransport.apply(this, forwarded);
                         var pixels = options && finite(options.remoteSinkWantsPixelCount);
                         if (pixels !== null && pixels !== undefined && pixels >= 0) {
                             var now = Date.now();
@@ -325,6 +341,7 @@ export function installEnhancedRtcShim() {
                     if (typeof original !== 'function') return;
                     conn[name] = function () {
                         if (!rec.replayingSource) {
+                            rec.restoreKeyframeRepair();
                             rec.sourceReplay = { name: name, args: Array.prototype.slice.call(arguments) };
                             rec.sourceAt = Date.now();
                         }
@@ -337,6 +354,7 @@ export function installEnhancedRtcShim() {
                 if (typeof originalClear === 'function') {
                     conn.clearDesktopSource = function () {
                         if (!rec.recoveryClearingSource) {
+                            rec.restoreKeyframeRepair();
                             rec.sourceReplay = null;
                             rec.sourceAt = 0;
                         }
@@ -540,6 +558,16 @@ export function installEnhancedRtcShim() {
                 try {
                     latestStream.replayingSource = true;
                     latestStream.conn[replay.name].apply(latestStream.conn, replay.args);
+                    // Capture can remain live while native simulcast is inactive.
+                    // A one-second keyframe interval plus alwaysSendVideo restarted
+                    // encoding in the live A/B test; codecs and gateway stay intact.
+                    // Only override known transport state, and only for this source.
+                    if (latestStream.keyframeBaseline !== null && latestStream.alwaysSendBaseline !== null &&
+                        typeof latestStream.conn.setTransportOptions === 'function') {
+                        latestStream.keyframeRepair = true;
+                        latestStream.conn.setTransportOptions({});
+                        return { ok: true, level: level, role: role, action: 'desktop-source-keyframe-rearm' };
+                    }
                     return { ok: true, level: level, role: role, action: 'desktop-source-reapply' };
                 } catch (e) {
                     return { ok: false, level: level, role: role, action: 'desktop-source-reapply-failed' };

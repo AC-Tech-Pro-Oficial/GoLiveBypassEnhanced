@@ -27,7 +27,7 @@ $result = [ordered]@{
 $readiness = 'resumo=(sim|nao) installed=(sim|nao) voice_hooked=(sim|nao) connections=(\d+) streams=(\d+) stats_ok=(\d+) demand_known=(sim|nao) demand_active=(sim|nao)'
 foreach ($line in $plugin) {
     # Capture only the fixed recovery vocabulary, never arbitrary error text.
-    if ($line -match 'rtc\.enhanced \| ((?:sucesso )?nivel=[12] papel=(?:broadcaster|viewer) (?:sinal=(?:transmissor-video-parado|viewer-video-parado)|acao=(?:desktop-source-reapply|desktop-source-clear-reapply|viewer-fast-udp-reconnect|viewer-video-resubscribe)))\s*$' -or
+    if ($line -match 'rtc\.enhanced \| ((?:sucesso )?nivel=[12] papel=(?:broadcaster|viewer) (?:sinal=(?:transmissor-video-parado|viewer-video-parado)|acao=(?:desktop-source-reapply|desktop-source-keyframe-rearm|desktop-source-clear-reapply|viewer-fast-udp-reconnect|viewer-video-resubscribe)))\s*$' -or
         $line -match 'rtc\.enhanced \| ((?:recuperacao manual: (?:teto de tentativas|papel indisponivel|acao nativa indisponivel|nivel 2 sem progresso))|(?:tentativa cancelada: (?:stream terminou ou mudou|demanda terminou)))\s*$') {
         $result.recoveryEvents += $Matches[1]
         $result.recoveryEvents = @($result.recoveryEvents | Select-Object -Last 20)
