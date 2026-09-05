@@ -26,7 +26,7 @@
       "feature_or_workflow": "Local RTC counters and user-run Get-StreamDiagnostics.ps1",
       "personal_data_categories": [],
       "sensitive_personal_data_categories": [],
-      "source_of_data": "Allowlisted native numeric counters and local error-label counts; raw Discord logs are read locally and not exported",
+      "source_of_data": "Allowlisted native numeric counters, fixed recovery actions, codec names, log timestamps and local error-label counts; raw Discord logs are read locally and not exported",
       "storage_locations": ["Local GoLiveBypass log; collector JSON is written to stdout only"],
       "recipients_or_subprocessors": [],
       "retention_rule": "Existing local plugin log lifecycle; no new remote storage or automatic submission",

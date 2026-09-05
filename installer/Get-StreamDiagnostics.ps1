@@ -13,17 +13,25 @@ function Read-Tail([string]$Path) {
 $plugin = Read-Tail (Join-Path $DataRoot 'golivebypass.log')
 $renderer = Read-Tail (Join-Path $DiscordLogRoot 'renderer_js.log')
 $result = [ordered]@{
-    schema = 1
+    schema = 2
     scope = 'Last 10000 lines per log; historical counts, not a live success verdict'
     pluginLogPresent = $plugin.Count -gt 0
     discordLogPresent = $renderer.Count -gt 0
     rtc = $null
     streamSamples = @()
     streamEvents = @()
+    recoveryEvents = @()
+    nativeVideo = @()
     errors = [ordered]@{}
 }
 $readiness = 'resumo=(sim|nao) installed=(sim|nao) voice_hooked=(sim|nao) connections=(\d+) streams=(\d+) stats_ok=(\d+) demand_known=(sim|nao) demand_active=(sim|nao)'
 foreach ($line in $plugin) {
+    # Capture only the fixed recovery vocabulary, never arbitrary error text.
+    if ($line -match 'rtc\.enhanced \| ((?:sucesso )?nivel=[12] papel=(?:broadcaster|viewer) (?:sinal=(?:transmissor-video-parado|viewer-video-parado)|acao=(?:desktop-source-reapply|desktop-source-clear-reapply|viewer-fast-udp-reconnect|viewer-video-resubscribe)))\s*$' -or
+        $line -match 'rtc\.enhanced \| ((?:recuperacao manual: (?:teto de tentativas|papel indisponivel|acao nativa indisponivel|nivel 2 sem progresso))|(?:tentativa cancelada: (?:stream terminou ou mudou|demanda terminou)))\s*$') {
+        $result.recoveryEvents += $Matches[1]
+        $result.recoveryEvents = @($result.recoveryEvents | Select-Object -Last 20)
+    }
     if ($line -match $readiness) {
         $result.rtc = [ordered]@{ summary=$Matches[1]; installed=$Matches[2]; hooked=$Matches[3]; connections=[int]$Matches[4]; streams=[int]$Matches[5]; statsOk=[int]$Matches[6]; demandKnown=$Matches[7]; demandActive=$Matches[8] }
     }
@@ -47,4 +55,26 @@ foreach ($line in $renderer) {
         }
     }
 }
+# Discord's native log can distinguish encoder initialization from encryption
+# failure. Only known codec names and numeric counters are emitted. These are
+# historical samples and may include the default voice connection as well.
+foreach ($name in @('discord-last-webrtc_0', 'discord-last-webrtc_1', 'discord-webrtc_0', 'discord-webrtc_1')) {
+    foreach ($line in (Read-Tail (Join-Path $DiscordLogRoot $name))) {
+        $sample = $null
+        if ($line -match 'Initialize MultiEncoder for codec: (AV1|H264|H265|VP8|VP9)\b') {
+            $sample = [ordered]@{ event='encoder-initialization'; codec=$Matches[1] }
+        } elseif ($line -match 'Encrypted audio: (\d+), video: (\d+)\. Failed audio: (\d+), video: (\d+)') {
+            $sample = [ordered]@{ event='encryption-counters'; audio=[long]$Matches[1]; video=[long]$Matches[2]; failedAudio=[long]$Matches[3]; failedVideo=[long]$Matches[4] }
+        }
+        if ($null -ne $sample) {
+            # Timestamp syntax is fixed; no message payload is copied.
+            $sample.log = $name
+            if ($line -match '^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]') { $sample.time = $Matches[1] }
+            $result.nativeVideo += $sample
+        }
+    }
+}
+$initializations = @($result.nativeVideo | Where-Object { $_.event -eq 'encoder-initialization' } | Sort-Object { $_['time'] } | Select-Object -Last 4)
+$encryption = @($result.nativeVideo | Where-Object { $_.event -eq 'encryption-counters' } | Sort-Object { $_['time'] } | Select-Object -Last 8)
+$result.nativeVideo = @(@($initializations + $encryption) | Sort-Object { $_['time'] })
 $result | ConvertTo-Json -Depth 5

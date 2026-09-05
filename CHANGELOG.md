@@ -886,6 +886,7 @@ funcionar de ponta a ponta.
 Veja o histórico de tags e commits para o que veio antes.
 ## Enhanced fork — native viewer demand and recovery ownership
 
+- Diagnostic schema 2 includes existing recovery actions plus allowlisted native codec initialization and encryption counters, with fixed-format timestamps. This distinguishes an unexecuted recovery from recovery that ran without restoring video; it does not alter Discord settings or media behavior.
 - Fixes broadcaster recovery remaining disarmed when Discord logs viewer demand in the renderer but the observer runs in an isolated preload. Demand now comes from the current stream's native `setTransportOptions.remoteSinkWantsPixelCount`, preserving the original call and its arguments.
 - Prevents delayed recovery from restoring an old source after a source switch or re-enabling video after a user toggle. Ported to standalone and the generated GUI payload.
 - Adds fixed numeric plugin stream counters and a read-only `installer/Get-StreamDiagnostics.ps1` collector. It emits no raw log lines, IDs, proxy credentials or addresses.
