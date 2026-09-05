@@ -147,6 +147,13 @@ function diagnoseReadiness(voice: any, now: number, force = false) {
     const connections = Array.isArray(voice?.connections) ? voice.connections : [];
     const streams = connections.filter((connection: any) => connection?.kind === "stream" && connection.destroyed !== true);
     log(`shim estado | resumo=${voice ? "sim" : "nao"} installed=${voice?.installed === true ? "sim" : "nao"} voice_hooked=${voice?.voiceHooked === true ? "sim" : "nao"} connections=${connections.length} streams=${streams.length} stats_ok=${streams.filter((connection: any) => connection.stats?.statsOk === true).length} demand_known=${voice?.demandKnown === true ? "sim" : "nao"} demand_active=${voice?.demandActive === true ? "sim" : "nao"}`);
+    // Fixed fields only: never serialize native options, user IDs or raw stats.
+    for (const stream of streams) {
+        const stats = stream.stats;
+        const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.round(value) : -1;
+        const role = roleOf(stats);
+        log(`stream counters | role=${role} stats_ok=${stats?.statsOk === true ? "sim" : "nao"} source=${stream.sourceCached === true ? "sim" : "nao"} capture=${number(stats?.captureFrames)} input_fps=${number(stats?.inputFrameRate)} encoded=${number(stats?.framesEncoded)} encode_fps=${number(stats?.encodeFrameRate)} bitrate=${number(stats?.mediaBitrate)} decoded=${number(stats?.framesDecoded)} decode_fps=${number(stats?.decodeFrameRate)} received=${number(stats?.framesReceived)}`);
+    }
 }
 
 interface VoiceContext {

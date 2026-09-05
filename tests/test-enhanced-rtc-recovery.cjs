@@ -50,6 +50,7 @@ function makeConnection({ localUser = "local-secret", streamUser = "local-secret
     desktopCalls: [],
     clearCalls: 0,
     desktopActive: desktop,
+    setTransportOptions(options) { this.lastTransport = options; return 42; },
     destroy() { this.destroyCalls++; this.destroyed = true; },
     fastUdpReconnect() { this.fastReconnectCalls++; },
     setDisableLocalVideo(userId, disabled) { this.videoToggleCalls.push([userId, disabled]); },
@@ -62,7 +63,7 @@ function makeConnection({ localUser = "local-secret", streamUser = "local-secret
   return conn;
 }
 
-function bootHarness(connections, cacheGenericFactory = false) {
+function bootHarness(connections, cacheGenericFactory = false, plugin = false) {
   const queue = connections.slice();
   const voice = {
     VoiceConnection: function VoiceConnection(_userId, options) { return options && options.__conn ? options.__conn : queue.shift(); },
@@ -83,7 +84,12 @@ function bootHarness(connections, cacheGenericFactory = false) {
   };
   sandbox.window.window = sandbox.window;
   vm.createContext(sandbox);
-  vm.runInContext(source.slice(begin, end) + "\ninstalarVoiceShim();", sandbox, { filename: BYPASS });
+  const shimCode = plugin
+    ? fs.readFileSync(path.resolve(process.cwd(), "goLiveBypass/rtcShim.ts"), "utf8")
+        .replace("export function installEnhancedRtcShim", "function installEnhancedRtcShim")
+        .split("export const RTC_SHIM_SOURCE")[0] + "\ninstallEnhancedRtcShim();"
+    : source.slice(begin, end) + "\ninstalarVoiceShim();";
+  vm.runInContext(shimCode, sandbox, { filename: plugin ? "rtcShim.ts" : BYPASS });
   nativeModules.requireModule("discord_voice");
   return { sandbox, voice, cachedCreateVoice };
 }
@@ -202,6 +208,46 @@ async function cachedViewerFactoryContract() {
     "manual video disable must suppress automatic viewer recovery");
 }
 
+async function delayedRecoveryOwnershipContract() {
+  for (const plugin of [false, true]) {
+    const label = plugin ? "plugin" : "standalone";
+    const broadcaster = makeConnection({
+      stats: { screenshare: { capturedFrames: 100 }, outbound: { video: {
+        inputFrameRate: 30, framesEncoded: 0, encodeFrameRate: 0,
+      } } },
+    });
+    const senderHarness = bootHarness([broadcaster], false, plugin);
+    senderHarness.voice.createOwnStreamConnectionWithOptions("local-secret",
+      { __conn: broadcaster, context: "stream", streamUserId: "local-secret" });
+    broadcaster.setDesktopSource("original-source", null, "screen");
+    const sender = await senderHarness.sandbox.window.__goliveVoiceResumo();
+    senderHarness.sandbox.window.__goliveVoiceRecuperar(2, sender.instanceId, sender.connections[0].id);
+    broadcaster.setDesktopSource("new-user-selected-source", null, "screen");
+
+    const viewer = makeConnection({
+      streamUser: "remote-secret",
+      stats: { inbound: { video: { framesDecoded: 0, decodeFrameRate: 0 } } },
+    });
+    const viewerHarness = bootHarness([viewer], false, plugin);
+    viewerHarness.voice.createVoiceConnectionWithOptions("local-secret",
+      { __conn: viewer, context: "stream", streamUserId: "remote-secret" });
+    const receiver = await viewerHarness.sandbox.window.__goliveVoiceResumo();
+    viewerHarness.sandbox.window.__goliveVoiceRecuperar(2, receiver.instanceId, receiver.connections[0].id);
+    // An explicit user disable is meaningful even when recovery already disabled it.
+    viewer.setDisableLocalVideo("remote-secret", true);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.deepEqual(broadcaster.desktopCalls.map(call => call[1]),
+      ["original-source", "new-user-selected-source"],
+      `${label}: delayed recovery must not restore the user's previous source`);
+    assert.deepEqual(viewer.videoToggleCalls,
+      [["remote-secret", true], ["remote-secret", true]],
+      `${label}: delayed recovery must preserve intervening user video disable`);
+    const after = await viewerHarness.sandbox.window.__goliveVoiceResumo();
+    assert.equal(after.connections[0].stats.videoExpected, false,
+      `${label}: user disable must continue to suppress automatic recovery`);
+  }
+}
+
 function detectorContract() {
   const detectorCode = [
     "const VOICE_STREAM_AQUECIMENTO_MS = " + extractConst("VOICE_STREAM_AQUECIMENTO_MS") + ";",
@@ -287,10 +333,34 @@ function staticSafetyContract() {
     "standalone summary must expose only sanitized source ownership state");
 }
 
+async function nativeDemandContract() {
+  for (const plugin of [false, true]) {
+    const first = makeConnection({ stats: {}, desktop: true });
+    const second = makeConnection({ stats: {}, desktop: true });
+    const { sandbox, voice } = bootHarness([first, second], false, plugin);
+    voice.createOwnStreamConnectionWithOptions('local-secret', { context: 'stream' });
+    // No console event is emitted: renderer and preload have separate consoles.
+    const options = { remoteSinkWantsPixelCount: 841424, privateToken: 'never-export' };
+    assert.equal(first.setTransportOptions(options), 42);
+    assert.equal(first.lastTransport, options);
+    assert.equal(sandbox.window.__goliveVoiceDemandaResumo().active, true);
+    first.setTransportOptions({ bitrate: 90000 });
+    assert.equal(sandbox.window.__goliveVoiceDemandaResumo().active, true, 'partial transport update preserves demand');
+    first.setTransportOptions({ remoteSinkWantsPixelCount: 0 });
+    assert.equal(sandbox.window.__goliveVoiceDemandaResumo().active, false);
+    first.setTransportOptions({ remoteSinkWantsPixelCount: 841424 });
+    voice.createOwnStreamConnectionWithOptions('local-secret', { context: 'stream' });
+    assert.equal(sandbox.window.__goliveVoiceDemandaResumo().known, false, 'new stream cannot inherit old demand');
+    assert(!JSON.stringify(await sandbox.window.__goliveVoiceResumo()).includes('never-export'));
+  }
+}
+
 (async () => {
+  await nativeDemandContract();
   await broadcasterRecoveryContract();
   await viewerRecoveryContract();
   await cachedViewerFactoryContract();
+  await delayedRecoveryOwnershipContract();
   detectorContract();
   friendBroadcasterDemandDropContract();
   staticSafetyContract();

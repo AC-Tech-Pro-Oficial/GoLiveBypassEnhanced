@@ -884,3 +884,10 @@ funcionar de ponta a ponta.
 ## [1.1.7] e anteriores
 
 Veja o histórico de tags e commits para o que veio antes.
+## Enhanced fork — native viewer demand and recovery ownership
+
+- Fixes broadcaster recovery remaining disarmed when Discord logs viewer demand in the renderer but the observer runs in an isolated preload. Demand now comes from the current stream's native `setTransportOptions.remoteSinkWantsPixelCount`, preserving the original call and its arguments.
+- Prevents delayed recovery from restoring an old source after a source switch or re-enabling video after a user toggle. Ported to standalone and the generated GUI payload.
+- Adds fixed numeric plugin stream counters and a read-only `installer/Get-StreamDiagnostics.ps1` collector. It emits no raw log lines, IDs, proxy credentials or addresses.
+- Validation covers native observer behavior without console messages, zero demand, stream replacement, delayed user changes, and diagnostic filtering. Error 2012 remains a viewer timeout symptom; these checks do not establish successful streaming on the affected friend's computer.
+- Still outside this fix: simultaneous-stream scheduling, capture/transport failures unrelated to frozen encoding, and live verification on the affected sender and viewer.

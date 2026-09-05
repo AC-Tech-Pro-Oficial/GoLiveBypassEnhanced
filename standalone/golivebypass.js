@@ -1403,10 +1403,6 @@ function instalarVoiceShim() {
         connections: [],
         seen: new WeakMap(),
         modules: new WeakSet(),
-        demandKnown: false,
-        demandActive: false,
-        demandAt: 0,
-        demandChangedAt: 0,
         retry: 0,
     };
     window.__goliveVoiceShim = state;
@@ -1648,6 +1644,7 @@ function instalarVoiceShim() {
             localUser: typeof localUser === 'string' ? localUser : conn.userId,
             streamUser: options && typeof options.streamUserId === 'string' ? options.streamUserId : conn.streamUserId,
             localVideoDisabled: false,
+            localVideoRevision: 0,
             sourceReplay: null,
             sourceAt: 0,
             replayingSource: false,
@@ -1670,11 +1667,39 @@ function instalarVoiceShim() {
         } catch (e) { }
 
         if (kind === 'stream') {
+            // Discord forwards effective remote viewer demand through this native
+            // method. Renderer console messages live in a different JS world.
+            // Read only the numeric pixel count; never retain transport options.
+            rec.demandKnown = false;
+            rec.demandActive = false;
+            rec.demandAt = 0;
+            rec.demandChangedAt = 0;
+            try {
+                var originalTransport = conn.setTransportOptions;
+                if (typeof originalTransport === 'function') {
+                    conn.setTransportOptions = function (options) {
+                        var result = originalTransport.apply(this, arguments);
+                        var pixels = options && finite(options.remoteSinkWantsPixelCount);
+                        if (pixels !== null && pixels !== undefined && pixels >= 0) {
+                            var now = Date.now();
+                            var active = pixels > 0;
+                            if (!rec.demandKnown || rec.demandActive !== active) rec.demandChangedAt = now;
+                            rec.demandKnown = true;
+                            rec.demandActive = active;
+                            if (active) rec.demandAt = now;
+                        }
+                        return result;
+                    };
+                }
+            } catch (e) { }
             try {
                 var originalDisable = conn.setDisableLocalVideo;
                 if (typeof originalDisable === 'function') {
                     conn.setDisableLocalVideo = function (userId, disabled) {
-                        if (userId === rec.streamUser) rec.localVideoDisabled = disabled === true;
+                        if (userId === rec.streamUser) {
+                            rec.localVideoDisabled = disabled === true;
+                            rec.localVideoRevision++;
+                        }
                         return originalDisable.apply(this, arguments);
                     };
                 }
@@ -1778,51 +1803,6 @@ function instalarVoiceShim() {
         }
     }
 
-    function noteDemand(args) {
-        try {
-            var joined = Array.prototype.map.call(args, function (value) {
-                return typeof value === 'string' ? value : '';
-            }).join(' ');
-            var marker = 'Remote media sink wants:';
-            var at = joined.indexOf(marker);
-            if (at < 0) return;
-            var payload = JSON.parse(joined.slice(at + marker.length).trim());
-            var positive = false;
-            function walk(value) {
-                if (positive || value === null || value === undefined) return;
-                if (typeof value === 'number') { if (value > 0) positive = true; return; }
-                if (typeof value === 'object') {
-                    var values = Object.values(value);
-                    for (var i = 0; i < values.length; i++) walk(values[i]);
-                }
-            }
-            walk(payload && payload.pixelCounts);
-            if (!positive && payload && typeof payload === 'object') {
-                var entries = Object.entries(payload);
-                for (var i = 0; i < entries.length; i++) {
-                    var key = entries[i][0], value = entries[i][1];
-                    if (key !== 'any' && key !== 'pixelCounts' && typeof value === 'number' && value > 0) positive = true;
-                }
-            }
-            var now = Date.now();
-            if (!state.demandKnown || state.demandActive !== positive) state.demandChangedAt = now;
-            state.demandKnown = true;
-            state.demandActive = positive;
-            if (positive) state.demandAt = now;
-        } catch (e) { }
-    }
-
-    ['log', 'info', 'debug'].forEach(function (method) {
-        try {
-            var original = console[method];
-            if (typeof original !== 'function') return;
-            console[method] = function () {
-                noteDemand(arguments);
-                return original.apply(this, arguments);
-            };
-        } catch (e) { }
-    });
-
     function sample(rec) {
         return new Promise(function (resolve) {
             if (rec.destroyedAt > 0 || !rec.conn) return resolve({ statsOk: false, reason: 'destruida' });
@@ -1874,11 +1854,16 @@ function instalarVoiceShim() {
 
     window.__goliveVoiceDemandaResumo = function () {
         var now = Date.now();
+        var rec = null;
+        for (var i = state.connections.length - 1; i >= 0; i--) {
+            var candidate = state.connections[i];
+            if (candidate.kind === 'stream' && !candidate.destroyedAt) { rec = candidate; break; }
+        }
         return {
-            known: state.demandKnown,
-            active: state.demandActive,
-            demandHa: state.demandAt > 0 ? now - state.demandAt : -1,
-            changedHa: state.demandChangedAt > 0 ? now - state.demandChangedAt : -1,
+            known: !!(rec && rec.demandKnown),
+            active: !!(rec && rec.demandActive),
+            demandHa: rec && rec.demandAt > 0 ? now - rec.demandAt : -1,
+            changedHa: rec && rec.demandChangedAt > 0 ? now - rec.demandChangedAt : -1,
         };
     };
 
@@ -1904,9 +1889,9 @@ function instalarVoiceShim() {
                 installed: state.installed,
                 voiceHooked: state.voiceHooked,
                 instanceId: state.instanceId,
-                demandKnown: state.demandKnown,
-                demandActive: state.demandActive,
-                demandHa: state.demandAt > 0 ? Date.now() - state.demandAt : -1,
+                demandKnown: window.__goliveVoiceDemandaResumo().known,
+                demandActive: window.__goliveVoiceDemandaResumo().active,
+                demandHa: window.__goliveVoiceDemandaResumo().demandHa,
                 connections: connections,
             };
         });
@@ -1959,7 +1944,7 @@ function instalarVoiceShim() {
             }
             latestStream.recoveryClearingSource = false;
             setTimeout(function () {
-                if (latestStream.destroyedAt || !latestStream.sourceReplay) return;
+                if (latestStream.destroyedAt || latestStream.sourceReplay !== replay) return;
                 try {
                     latestStream.replayingSource = true;
                     latestStream.conn[replay.name].apply(latestStream.conn, replay.args);
@@ -1988,9 +1973,10 @@ function instalarVoiceShim() {
             }
             try {
                 latestStream.conn.setDisableLocalVideo(remoteUser, true);
+                var videoRevision = latestStream.localVideoRevision;
                 if (typeof latestStream.conn.fastUdpReconnect === 'function') latestStream.conn.fastUdpReconnect();
                 setTimeout(function () {
-                    if (latestStream.destroyedAt) return;
+                    if (latestStream.destroyedAt || latestStream.localVideoRevision !== videoRevision) return;
                     try { latestStream.conn.setDisableLocalVideo(remoteUser, false); } catch (e) { }
                 }, 200);
                 return { ok: true, level: level, role: role, action: 'viewer-video-resubscribe' };

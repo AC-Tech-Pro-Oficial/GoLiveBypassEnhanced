@@ -39,6 +39,7 @@ const filters = [];
 function connection(stats) {
   const value = {
     destroyed: false,
+    setTransportOptions(options) { value.transportOptions = options; return 'transport-result'; },
     destroy() { value.destroyed = true; },
     getFilteredStats(filter, callback) {
       filters.push(filter);
@@ -137,7 +138,10 @@ async function main() {
   if (voiceConn === connections[0] && streamConn === connections[1]) ok("retornos originais preservados");
   else bad("retorno da conexao foi alterado");
 
-  fakeConsole.log('[RTCConnection(oculto, stream)] Remote media sink wants: {"123":100,"pixelCounts":{"123":244860},"any":100}');
+  const transportOptions = { remoteSinkWantsPixelCount: 244860 };
+  if (streamConn.setTransportOptions(transportOptions) === 'transport-result' && streamConn.transportOptions === transportOptions) ok('native transport call preserved');
+  else bad('native transport call changed');
+  fakeConsole.log('unrelated renderer message');
   if (logs.length > 0) ok("console original continua sendo chamado");
   else bad("console original foi engolido");
 
@@ -167,11 +171,11 @@ async function main() {
   if (filters.length === 1 && filters[0] === 2) ok("somente stream usa o filtro outbound confirmado (2)");
   else bad("filtro inesperado no addon", JSON.stringify(filters));
 
-  fakeConsole.log('[RTCConnection(oculto, stream)] Remote media sink wants: {"pixelCounts":{"123":0},"any":100}');
+  streamConn.setTransportOptions({ remoteSinkWantsPixelCount: 0 });
   const noDemand = sandbox.window.__goliveVoiceDemandaResumo();
   if (noDemand.known === true && noDemand.active === false) ok("demanda zero desarma o detector");
   else bad("demanda zero ficou ativa", JSON.stringify(noDemand));
-  fakeConsole.log('[RTCConnection(oculto, stream)] Remote media sink wants: payload-malformado');
+  streamConn.setTransportOptions({ remoteSinkWantsPixelCount: 'not-a-number' });
   const malformed = sandbox.window.__goliveVoiceDemandaResumo();
   if (malformed.active === false) ok("payload de demanda malformado falha fechado");
   else bad("payload malformado alterou a demanda");
